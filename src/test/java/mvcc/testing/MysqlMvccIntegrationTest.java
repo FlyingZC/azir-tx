@@ -17,6 +17,7 @@ import mvcc.storage.mysql.MysqlStorageAdapter;
 import mvcc.tso.AtomicTimestampOracle;
 import mvcc.tso.TimestampOracle;
 import mvcc.txn.ConflictMode;
+import mvcc.txn.CrossShardCommitPolicy;
 import mvcc.txn.LockWaitPolicy;
 import mvcc.txn.TransactionManager;
 import mvcc.txn.TransactionOptions;
@@ -242,7 +243,8 @@ class MysqlMvccIntegrationTest {
                 metadataStore,
                 new TransactionOptions(
                         new LockWaitPolicy(ConflictMode.WAIT, 2_000L, 5L, 20L, 2.0d, false),
-                        new TransactionRetryPolicy(3, 5L, 20L, 2.0d, false)
+                        new TransactionRetryPolicy(3, 5L, 20L, 2.0d, false),
+                        CrossShardCommitPolicy.serial()
                 ),
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
         );
@@ -286,7 +288,8 @@ class MysqlMvccIntegrationTest {
                 metadataStore,
                 new TransactionOptions(
                         LockWaitPolicy.failFast(),
-                        new TransactionRetryPolicy(3, 5L, 20L, 2.0d, false)
+                        new TransactionRetryPolicy(3, 5L, 20L, 2.0d, false),
+                        CrossShardCommitPolicy.serial()
                 ),
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
         );

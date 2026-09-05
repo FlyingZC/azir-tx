@@ -11,6 +11,7 @@ import mvcc.storage.mysql.MysqlDataSourceFactory;
 import mvcc.storage.mysql.MysqlStorageAdapter;
 import mvcc.tso.mysql.MysqlTimestampOracle;
 import mvcc.txn.ConflictMode;
+import mvcc.txn.CrossShardCommitPolicy;
 import mvcc.txn.LockWaitPolicy;
 import mvcc.txn.TransactionManager;
 import mvcc.txn.TransactionOptions;
@@ -77,6 +78,11 @@ public final class MysqlTxnBenchmark {
                                     config.retryBackoffMaxMs(),
                                     config.retryBackoffMultiplier(),
                                     config.retryBackoffJitter()
+                            ),
+                            new CrossShardCommitPolicy(
+                                    config.parallelPrepare(),
+                                    config.parallelCommit(),
+                                    config.parallelRollback()
                             )
                     ),
                     Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
@@ -196,7 +202,10 @@ public final class MysqlTxnBenchmark {
                           long retryBackoffInitialMs,
                           long retryBackoffMaxMs,
                           double retryBackoffMultiplier,
-                          boolean retryBackoffJitter) {
+                          boolean retryBackoffJitter,
+                          boolean parallelPrepare,
+                          boolean parallelCommit,
+                          boolean parallelRollback) {
         private static Config fromEnv() {
             return new Config(
                     env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:3306/control"),
@@ -218,7 +227,10 @@ public final class MysqlTxnBenchmark {
                     Long.parseLong(env("AZIR_TX_RETRY_BACKOFF_INITIAL_MS", "5")),
                     Long.parseLong(env("AZIR_TX_RETRY_BACKOFF_MAX_MS", "100")),
                     Double.parseDouble(env("AZIR_TX_RETRY_BACKOFF_MULTIPLIER", "2.0")),
-                    Boolean.parseBoolean(env("AZIR_TX_RETRY_BACKOFF_JITTER", "true"))
+                    Boolean.parseBoolean(env("AZIR_TX_RETRY_BACKOFF_JITTER", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_PREPARE", "false")),
+                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_COMMIT", "false")),
+                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "false"))
             );
         }
     }
@@ -238,6 +250,9 @@ public final class MysqlTxnBenchmark {
                     + " mode=" + (config.conflictMode() ? "conflict" : "no_conflict")
                     + " conflict_mode=" + config.conflictModeSetting()
                     + " retry_max_attempts=" + config.maxAttempts()
+                    + " parallel_prepare=" + config.parallelPrepare()
+                    + " parallel_commit=" + config.parallelCommit()
+                    + " parallel_rollback=" + config.parallelRollback()
                     + " attempts=" + attempts
                     + " committed=" + committed
                     + " conflicts=" + conflicts

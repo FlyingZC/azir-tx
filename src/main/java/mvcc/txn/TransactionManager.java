@@ -21,7 +21,12 @@ import mvcc.tso.TimestampOracle;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 public final class TransactionManager {
     private final TimestampOracle timestampOracle;
@@ -156,17 +161,21 @@ public final class TransactionManager {
                 : TransactionCommitMode.TWO_PHASE_COMMIT;
 
         if (mode == TransactionCommitMode.TWO_PHASE_COMMIT) {
-            for (String participant : tx.participants()) {
-                adapter(participant).prepare(tx.txId());
-            }
+            runAcrossParticipants(
+                    tx.participants(),
+                    participant -> adapter(participant).prepare(tx.txId()),
+                    options.crossShardCommitPolicy().parallelPrepare()
+            );
         }
 
         long commitTs = timestampOracle.nextTimestamp();
         metadataStore.markCommitted(tx.txId(), commitTs);
         try {
-            for (String participant : tx.participants()) {
-                adapter(participant).commit(tx.txId(), commitTs);
-            }
+            runAcrossParticipants(
+                    tx.participants(),
+                    participant -> adapter(participant).commit(tx.txId(), commitTs),
+                    options.crossShardCommitPolicy().parallelCommit()
+            );
         } catch (RuntimeException ex) {
             throw new MvccException(
                     ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -186,9 +195,11 @@ public final class TransactionManager {
             return;
         }
         metadataStore.markAborted(tx.txId());
-        for (String participant : tx.participants()) {
-            adapter(participant).abort(tx.txId());
-        }
+        runAcrossParticipants(
+                tx.participants(),
+                participant -> adapter(participant).abort(tx.txId()),
+                options.crossShardCommitPolicy().parallelRollback()
+        );
         tx.status(TxStatus.ABORTED);
     }
 
@@ -279,6 +290,37 @@ public final class TransactionManager {
         try {
             rollback(tx);
         } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void runAcrossParticipants(Set<String> participants, Consumer<String> operation, boolean parallel) {
+        if (!parallel || participants.size() <= 1) {
+            for (String participant : participants) {
+                operation.accept(participant);
+            }
+            return;
+        }
+
+        ConcurrentLinkedQueue<RuntimeException> failures = new ConcurrentLinkedQueue<>();
+        CompletableFuture<?>[] futures = participants.stream()
+                .map(participant -> CompletableFuture.runAsync(() -> {
+                    try {
+                        operation.accept(participant);
+                    } catch (RuntimeException ex) {
+                        failures.add(ex);
+                        throw ex;
+                    }
+                }))
+                .toArray(CompletableFuture[]::new);
+
+        try {
+            CompletableFuture.allOf(futures).join();
+        } catch (CompletionException ignored) {
+        }
+
+        RuntimeException failure = failures.peek();
+        if (failure != null) {
+            throw failure;
         }
     }
 

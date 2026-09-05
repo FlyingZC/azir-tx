@@ -11,6 +11,7 @@ import mvcc.tso.BatchingTimestampOracle;
 import mvcc.tso.TimestampOracle;
 import mvcc.tso.mysql.MysqlTimestampOracle;
 import mvcc.txn.ConflictMode;
+import mvcc.txn.CrossShardCommitPolicy;
 import mvcc.txn.LockWaitPolicy;
 import mvcc.txn.TransactionManager;
 import mvcc.txn.TransactionOptions;
@@ -70,7 +71,8 @@ public final class MysqlSingleShardTxnBenchmark {
                                     config.retryBackoffMaxMs(),
                                     config.retryBackoffMultiplier(),
                                     config.retryBackoffJitter()
-                            )
+                            ),
+                            CrossShardCommitPolicy.serial()
                     ),
                     Map.of(shard1.shardId(), shard1)
             );
