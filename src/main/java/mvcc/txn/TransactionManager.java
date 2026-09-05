@@ -25,15 +25,19 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-public final class TransactionManager {
+public final class TransactionManager implements AutoCloseable {
     private final TimestampOracle timestampOracle;
     private final TransactionMetadataStore metadataStore;
     private final SafePointStore safePointStore;
     private final Map<String, StorageAdapter> adapters;
     private final TransactionOptions options;
+    private final ExecutorService participantExecutor;
+    private final ExecutorService asyncCommitExecutor;
 
     public TransactionManager(TimestampOracle timestampOracle,
                               TransactionMetadataStore metadataStore,
@@ -65,13 +69,23 @@ public final class TransactionManager {
         this.safePointStore = safePointStore;
         this.options = options;
         this.adapters = Map.copyOf(adapters);
+        this.participantExecutor = requiresParallelExecutor(options.crossShardCommitPolicy())
+                ? Executors.newThreadPerTaskExecutor(Thread.ofVirtual()
+                        .name("mvcc-participant-", 0)
+                        .factory())
+                : null;
+        this.asyncCommitExecutor = options.crossShardCommitPolicy().asyncCommit() ? participantExecutor : null;
     }
 
     public Transaction begin(IsolationLevel isolationLevel) {
         long txId = timestampOracle.nextTimestamp();
-        long startTs = timestampOracle.nextTimestamp();
-        metadataStore.create(txId, startTs, isolationLevel);
-        return new Transaction(txId, startTs, isolationLevel);
+        long startTs = txId;
+        Transaction transaction = new Transaction(txId, startTs, isolationLevel);
+        if (!options.lazyBeginMetadata()) {
+            metadataStore.create(txId, startTs, isolationLevel);
+            transaction.metadataPersisted(true);
+        }
+        return transaction;
     }
 
     public Optional<byte[]> get(Transaction tx, String shardId, String key) {
@@ -79,6 +93,10 @@ public final class TransactionManager {
         StorageAdapter adapter = adapter(shardId);
         long readTs = readTs(tx);
         ensureSnapshotVisible(readTs, tx.txId());
+        Optional<byte[]> bufferedValue = bufferedRead(tx, shardId, key);
+        if (bufferedValue != null) {
+            return bufferedValue;
+        }
         Optional<VersionedValue> result = adapter.get(new ReadContext(tx.txId(), readTs, tx.isolationLevel()), key);
         if (result.isEmpty() || result.get().deleted()) {
             return Optional.empty();
@@ -91,7 +109,11 @@ public final class TransactionManager {
         StorageAdapter adapter = adapter(shardId);
         long readTs = readTs(tx);
         ensureSnapshotVisible(readTs, tx.txId());
-        return adapter.scan(new ReadContext(tx.txId(), readTs, tx.isolationLevel()), new KeyRange(startKeyInclusive, endKeyExclusive));
+        List<VersionedValue> result = adapter.scan(
+                new ReadContext(tx.txId(), readTs, tx.isolationLevel()),
+                new KeyRange(startKeyInclusive, endKeyExclusive)
+        );
+        return overlayBufferedMutations(tx, shardId, startKeyInclusive, endKeyExclusive, result);
     }
 
     public void put(Transaction tx, String shardId, String key, byte[] value) {
@@ -131,17 +153,30 @@ public final class TransactionManager {
         ensureActive(tx);
         if (tx.participants().isEmpty()) {
             long commitTs = timestampOracle.nextTimestamp();
-            metadataStore.markCommitted(tx.txId(), commitTs);
+            if (tx.metadataPersisted()) {
+                metadataStore.markCommitted(tx.txId(), commitTs);
+            } else if (!options.lazyBeginMetadata()) {
+                metadataStore.markCommitted(tx.txId(), commitTs);
+            }
             tx.status(TxStatus.COMMITTED);
             return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
         }
 
+        prewriteBufferedMutations(tx);
+
         if (tx.participants().size() == 1) {
             String participant = tx.participants().iterator().next();
             long commitTs = timestampOracle.nextTimestamp();
-            metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
+            if (tx.metadataPersisted()) {
+                metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
+            } else if (options.lazyBeginMetadata()) {
+                metadataStore.createCommitted(tx.txId(), tx.startTs(), tx.isolationLevel(), Set.of(participant), commitTs);
+                tx.metadataPersisted(true);
+            } else {
+                metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
+            }
             try {
-                adapter(participant).commit(tx.txId(), commitTs);
+                commitParticipant(tx, participant, commitTs);
             } catch (RuntimeException ex) {
                 throw new MvccException(
                         ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -155,12 +190,16 @@ public final class TransactionManager {
             return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
         }
 
-        metadataStore.markPreparing(tx.txId(), tx.participants());
-        TransactionCommitMode mode = tx.participants().size() == 1
-                ? TransactionCommitMode.SINGLE_SHARD_FAST_PATH
-                : TransactionCommitMode.TWO_PHASE_COMMIT;
-
-        if (mode == TransactionCommitMode.TWO_PHASE_COMMIT) {
+        if (tx.metadataPersisted()) {
+            metadataStore.markPreparing(tx.txId(), tx.participants());
+        } else if (options.lazyBeginMetadata()) {
+            metadataStore.createPreparing(tx.txId(), tx.startTs(), tx.isolationLevel(), tx.participants());
+            tx.metadataPersisted(true);
+        } else {
+            metadataStore.markPreparing(tx.txId(), tx.participants());
+            tx.metadataPersisted(true);
+        }
+        if (requiresExplicitPreparePhase(tx.participants())) {
             runAcrossParticipants(
                     tx.participants(),
                     participant -> adapter(participant).prepare(tx.txId()),
@@ -170,12 +209,19 @@ public final class TransactionManager {
 
         long commitTs = timestampOracle.nextTimestamp();
         metadataStore.markCommitted(tx.txId(), commitTs);
+        String primaryParticipant = primaryParticipant(tx.participants());
         try {
-            runAcrossParticipants(
-                    tx.participants(),
-                    participant -> adapter(participant).commit(tx.txId(), commitTs),
-                    options.crossShardCommitPolicy().parallelCommit()
-            );
+            commitParticipant(tx, primaryParticipant, commitTs);
+            Set<String> secondaryParticipants = secondaryParticipants(tx.participants(), primaryParticipant);
+            if (options.crossShardCommitPolicy().asyncCommit()) {
+                scheduleAsyncSecondaryCommit(tx, commitTs, secondaryParticipants);
+            } else {
+                runAcrossParticipants(
+                        secondaryParticipants,
+                        participant -> commitParticipant(tx, participant, commitTs),
+                        options.crossShardCommitPolicy().parallelCommit()
+                );
+            }
         } catch (RuntimeException ex) {
             throw new MvccException(
                     ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -187,14 +233,61 @@ public final class TransactionManager {
         }
 
         tx.status(TxStatus.COMMITTED);
-        return new TransactionCommitResult(tx.txId(), commitTs, mode);
+        return new TransactionCommitResult(
+                tx.txId(),
+                commitTs,
+                options.crossShardCommitPolicy().asyncCommit()
+                        ? TransactionCommitMode.ASYNC_PRIMARY_COMMIT
+                        : TransactionCommitMode.TWO_PHASE_COMMIT
+        );
+    }
+
+    @Override
+    public void close() {
+        if (participantExecutor != null) {
+            participantExecutor.shutdown();
+            try {
+                participantExecutor.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private void scheduleAsyncSecondaryCommit(Transaction tx, long commitTs, Set<String> secondaryParticipants) {
+        if (secondaryParticipants.isEmpty()) {
+            return;
+        }
+        for (String participant : secondaryParticipants) {
+            asyncCommitExecutor.submit(() -> {
+                try {
+                    commitParticipant(tx, participant, commitTs);
+                } catch (RuntimeException ignored) {
+                }
+            });
+        }
+    }
+
+    private String primaryParticipant(Set<String> participants) {
+        return participants.stream()
+                .sorted()
+                .findFirst()
+                .orElseThrow(() -> new MvccException(ErrorCode.ILLEGAL_STATE, "cross-shard tx has no participants", false, null));
+    }
+
+    private Set<String> secondaryParticipants(Set<String> participants, String primaryParticipant) {
+        return participants.stream()
+                .filter(participant -> !participant.equals(primaryParticipant))
+                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
     }
 
     public void rollback(Transaction tx) {
         if (tx.status() == TxStatus.ABORTED || tx.status() == TxStatus.COMMITTED) {
             return;
         }
-        metadataStore.markAborted(tx.txId());
+        if (tx.metadataPersisted()) {
+            metadataStore.markAborted(tx.txId());
+        }
         runAcrossParticipants(
                 tx.participants(),
                 participant -> adapter(participant).abort(tx.txId()),
@@ -209,6 +302,10 @@ public final class TransactionManager {
 
     private void write(Transaction tx, String shardId, Mutation mutation) {
         ensureActive(tx);
+        if (options.bufferWrites()) {
+            tx.bufferMutation(shardId, mutation);
+            return;
+        }
         StorageAdapter adapter = adapter(shardId);
         LockWaitPolicy lockWaitPolicy = options.lockWaitPolicy();
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lockWaitPolicy.lockWaitTimeoutMs());
@@ -272,6 +369,15 @@ public final class TransactionManager {
         return adapter;
     }
 
+    private boolean requiresExplicitPreparePhase(Set<String> participants) {
+        for (String participant : participants) {
+            if (adapter(participant).requiresExplicitPreparePhase()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private boolean shouldWaitOnConflict(MvccException ex, LockWaitPolicy lockWaitPolicy) {
         return lockWaitPolicy.conflictMode() == ConflictMode.WAIT
                 && ex.errorCode() == ErrorCode.LOCK_CONFLICT
@@ -310,7 +416,7 @@ public final class TransactionManager {
                         failures.add(ex);
                         throw ex;
                     }
-                }))
+                }, participantExecutor))
                 .toArray(CompletableFuture[]::new);
 
         try {
@@ -334,5 +440,107 @@ public final class TransactionManager {
             Thread.currentThread().interrupt();
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "interrupted while waiting for retry", true, null, ex);
         }
+    }
+
+    private void prewriteBufferedMutations(Transaction tx) {
+        if (!options.bufferWrites()) {
+            return;
+        }
+        runAcrossParticipants(
+                tx.participants(),
+                shardId -> {
+                    List<Mutation> mutations = tx.bufferedMutations(shardId);
+                    if (!mutations.isEmpty()) {
+                        prewriteMutations(tx, shardId, mutations);
+                    }
+                },
+                options.crossShardCommitPolicy().parallelPrewrite()
+        );
+    }
+
+    private void prewriteMutations(Transaction tx, String shardId, List<Mutation> mutations) {
+        LockWaitPolicy lockWaitPolicy = options.lockWaitPolicy();
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lockWaitPolicy.lockWaitTimeoutMs());
+        int attempt = 0;
+        while (true) {
+            try {
+                adapter(shardId).prewrite(tx.txId(), tx.startTs(), mutations);
+                tx.addParticipant(shardId);
+                return;
+            } catch (MvccException ex) {
+                if (!shouldWaitOnConflict(ex, lockWaitPolicy)) {
+                    throw ex;
+                }
+                if (System.nanoTime() >= deadlineNanos) {
+                    throw new MvccException(
+                            ErrorCode.LOCK_WAIT_TIMEOUT,
+                            "lock wait timeout on shard " + shardId + ", tx=" + tx.txId(),
+                            true,
+                            tx.txId(),
+                            ex
+                    );
+                }
+                long delayMillis = Math.min(lockWaitPolicy.nextDelayMillis(attempt++), remainingMillis(deadlineNanos));
+                sleepQuietly(delayMillis);
+            }
+        }
+    }
+
+    private Optional<byte[]> bufferedRead(Transaction tx, String shardId, String key) {
+        if (!options.bufferWrites()) {
+            return null;
+        }
+        Optional<Mutation> mutation = tx.bufferedMutation(shardId, key);
+        if (mutation.isEmpty()) {
+            return null;
+        }
+        return mutation.get().type() == mvcc.common.MutationType.DELETE
+                ? Optional.empty()
+                : Optional.of(mutation.get().value());
+    }
+
+    private List<VersionedValue> overlayBufferedMutations(Transaction tx,
+                                                         String shardId,
+                                                         String startKeyInclusive,
+                                                         String endKeyExclusive,
+                                                         List<VersionedValue> baseValues) {
+        if (!options.bufferWrites()) {
+            return baseValues;
+        }
+        java.util.NavigableMap<String, VersionedValue> visible = new java.util.TreeMap<>();
+        for (VersionedValue value : baseValues) {
+            visible.put(value.key(), value);
+        }
+        for (Mutation mutation : tx.bufferedMutationsInRange(shardId, startKeyInclusive, endKeyExclusive)) {
+            if (mutation.type() == mvcc.common.MutationType.DELETE) {
+                visible.remove(mutation.key());
+            } else {
+                visible.put(mutation.key(), new VersionedValue(
+                        mutation.key(),
+                        mutation.value(),
+                        false,
+                        tx.startTs(),
+                        true
+                ));
+            }
+        }
+        return List.copyOf(visible.values());
+    }
+
+    private boolean requiresParallelExecutor(CrossShardCommitPolicy policy) {
+        return policy.parallelPrewrite()
+                || policy.parallelPrepare()
+                || policy.parallelCommit()
+                || policy.parallelRollback()
+                || policy.asyncCommit();
+    }
+
+    private void commitParticipant(Transaction tx, String shardId, long commitTs) {
+        List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
+        if (options.bufferWrites() && !bufferedMutations.isEmpty()) {
+            adapter(shardId).commit(tx.txId(), commitTs, bufferedMutations);
+            return;
+        }
+        adapter(shardId).commit(tx.txId(), commitTs);
     }
 }

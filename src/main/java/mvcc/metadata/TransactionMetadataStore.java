@@ -8,6 +8,10 @@ import java.util.Set;
 public interface TransactionMetadataStore {
     TxRecord create(long txId, long startTs, IsolationLevel isolationLevel);
 
+    TxRecord createPreparing(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants);
+
+    TxRecord createCommitted(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants, long commitTs);
+
     Optional<TxRecord> get(long txId);
 
     TxRecord markPreparing(long txId, Set<String> participants);

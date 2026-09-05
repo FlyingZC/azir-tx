@@ -9,6 +9,10 @@ public interface StorageAdapter {
 
     void initialize();
 
+    default boolean requiresExplicitPreparePhase() {
+        return false;
+    }
+
     Optional<VersionedValue> get(ReadContext context, String key);
 
     List<VersionedValue> scan(ReadContext context, KeyRange keyRange);
@@ -18,6 +22,10 @@ public interface StorageAdapter {
     void prepare(long txId);
 
     void commit(long txId, long commitTs);
+
+    default void commit(long txId, long commitTs, List<Mutation> mutations) {
+        commit(txId, commitTs);
+    }
 
     void abort(long txId);
 

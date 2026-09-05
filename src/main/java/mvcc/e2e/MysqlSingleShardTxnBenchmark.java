@@ -72,7 +72,9 @@ public final class MysqlSingleShardTxnBenchmark {
                                     config.retryBackoffMultiplier(),
                                     config.retryBackoffJitter()
                             ),
-                            CrossShardCommitPolicy.serial()
+                            CrossShardCommitPolicy.serial(),
+                            config.bufferWrites(),
+                            false
                     ),
                     Map.of(shard1.shardId(), shard1)
             );
@@ -181,7 +183,8 @@ public final class MysqlSingleShardTxnBenchmark {
                           long retryBackoffMaxMs,
                           double retryBackoffMultiplier,
                           boolean retryBackoffJitter,
-                          int tsoBatchSize) {
+                          int tsoBatchSize,
+                          boolean bufferWrites) {
         private static Config fromEnv() {
             return new Config(
                     env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:3306/control"),
@@ -203,7 +206,8 @@ public final class MysqlSingleShardTxnBenchmark {
                     Long.parseLong(env("AZIR_TX_RETRY_BACKOFF_MAX_MS", "100")),
                     Double.parseDouble(env("AZIR_TX_RETRY_BACKOFF_MULTIPLIER", "2.0")),
                     Boolean.parseBoolean(env("AZIR_TX_RETRY_BACKOFF_JITTER", "true")),
-                    Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "256"))
+                    Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "256")),
+                    Boolean.parseBoolean(env("AZIR_TX_BUFFER_WRITES", "true"))
             );
         }
     }
@@ -224,6 +228,7 @@ public final class MysqlSingleShardTxnBenchmark {
                     + " conflict_mode=" + config.conflictModeSetting()
                     + " retry_max_attempts=" + config.maxAttempts()
                     + " tso_batch_size=" + config.tsoBatchSize()
+                    + " buffer_writes=" + config.bufferWrites()
                     + " attempts=" + attempts
                     + " committed=" + committed
                     + " conflicts=" + conflicts

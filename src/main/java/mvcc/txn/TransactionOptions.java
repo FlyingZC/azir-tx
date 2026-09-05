@@ -4,7 +4,9 @@ import java.util.Objects;
 
 public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
                                  TransactionRetryPolicy retryPolicy,
-                                 CrossShardCommitPolicy crossShardCommitPolicy) {
+                                 CrossShardCommitPolicy crossShardCommitPolicy,
+                                 boolean bufferWrites,
+                                 boolean lazyBeginMetadata) {
     public TransactionOptions {
         Objects.requireNonNull(lockWaitPolicy, "lockWaitPolicy");
         Objects.requireNonNull(retryPolicy, "retryPolicy");
@@ -15,7 +17,9 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
         return new TransactionOptions(
                 LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(),
-                CrossShardCommitPolicy.serial()
+                CrossShardCommitPolicy.serial(),
+                false,
+                false
         );
     }
 
@@ -23,7 +27,9 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
         return new TransactionOptions(
                 LockWaitPolicy.mysqlLikeDefaults(),
                 TransactionRetryPolicy.mysqlLikeDefaults(),
-                CrossShardCommitPolicy.parallel()
+                CrossShardCommitPolicy.asyncParallel(8),
+                true,
+                true
         );
     }
 }

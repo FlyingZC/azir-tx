@@ -25,6 +25,26 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
     }
 
     @Override
+    public TxRecord createPreparing(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants) {
+        TxRecord record = new TxRecord(txId, startTs, isolationLevel, new LinkedHashSet<>(participants), TxStatus.PREPARING, null);
+        TxRecord previous = records.putIfAbsent(txId, record);
+        if (previous != null) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction already exists: " + txId, false, txId);
+        }
+        return record;
+    }
+
+    @Override
+    public TxRecord createCommitted(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants, long commitTs) {
+        TxRecord record = new TxRecord(txId, startTs, isolationLevel, new LinkedHashSet<>(participants), TxStatus.COMMITTED, commitTs);
+        TxRecord previous = records.putIfAbsent(txId, record);
+        if (previous != null) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction already exists: " + txId, false, txId);
+        }
+        return record;
+    }
+
+    @Override
     public Optional<TxRecord> get(long txId) {
         return Optional.ofNullable(records.get(txId));
     }

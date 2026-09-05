@@ -46,6 +46,25 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
 
     @Override
     public TxRecord create(long txId, long startTs, IsolationLevel isolationLevel) {
+        return insertRecord(txId, startTs, isolationLevel, Set.of(), TxStatus.ACTIVE, null);
+    }
+
+    @Override
+    public TxRecord createPreparing(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants) {
+        return insertRecord(txId, startTs, isolationLevel, participants, TxStatus.PREPARING, null);
+    }
+
+    @Override
+    public TxRecord createCommitted(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants, long commitTs) {
+        return insertRecord(txId, startTs, isolationLevel, participants, TxStatus.COMMITTED, commitTs);
+    }
+
+    private TxRecord insertRecord(long txId,
+                                  long startTs,
+                                  IsolationLevel isolationLevel,
+                                  Set<String> participants,
+                                  TxStatus status,
+                                  Long commitTs) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
                      insert into mvcc_txn(tx_id, start_ts, isolation_level, status, commit_ts, participants)
@@ -54,11 +73,15 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
             statement.setLong(1, txId);
             statement.setLong(2, startTs);
             statement.setString(3, isolationLevel.name());
-            statement.setString(4, TxStatus.ACTIVE.name());
-            statement.setNull(5, Types.BIGINT);
-            statement.setString(6, "");
+            statement.setString(4, status.name());
+            if (commitTs == null) {
+                statement.setNull(5, Types.BIGINT);
+            } else {
+                statement.setLong(5, commitTs);
+            }
+            statement.setString(6, encodeParticipants(participants));
             statement.executeUpdate();
-            return new TxRecord(txId, startTs, isolationLevel, Set.of(), TxStatus.ACTIVE, null);
+            return new TxRecord(txId, startTs, isolationLevel, participants, status, commitTs);
         } catch (SQLException ex) {
             throw storageError(txId, "create tx metadata failed", ex);
         }

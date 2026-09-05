@@ -9,6 +9,8 @@ import mvcc.metadata.TransactionMetadataStore;
 import mvcc.metadata.mysql.MysqlTransactionMetadataStore;
 import mvcc.storage.mysql.MysqlDataSourceFactory;
 import mvcc.storage.mysql.MysqlStorageAdapter;
+import mvcc.tso.TimestampOracle;
+import mvcc.tso.mysql.MysqlSegmentTimestampOracle;
 import mvcc.tso.mysql.MysqlTimestampOracle;
 import mvcc.txn.ConflictMode;
 import mvcc.txn.CrossShardCommitPolicy;
@@ -26,6 +28,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class MysqlTxnBenchmark {
     private MysqlTxnBenchmark() {
@@ -38,7 +41,11 @@ public final class MysqlTxnBenchmark {
         DataSource shard2DataSource = MysqlDataSourceFactory.create(config.shard2JdbcUrl(), config.username(), config.password());
 
         try {
-            MysqlTimestampOracle tso = new MysqlTimestampOracle(controlDataSource);
+            MysqlTimestampOracle mysqlTso = new MysqlTimestampOracle(controlDataSource);
+            MysqlSegmentTimestampOracle segmentTso = new MysqlSegmentTimestampOracle(controlDataSource, config.tsoBatchSize());
+            TimestampOracle tso = config.segmentTso()
+                    ? segmentTso
+                    : mysqlTso;
             TransactionMetadataStore metadataStore = new MysqlTransactionMetadataStore(controlDataSource);
             SafePointStore safePointStore = new MysqlSafePointStore(controlDataSource);
             MysqlStorageAdapter shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource);
@@ -46,7 +53,8 @@ public final class MysqlTxnBenchmark {
 
             shard1.initialize();
             shard2.initialize();
-            tso.initialize(100);
+            mysqlTso.initialize(100);
+            segmentTso.initialize(100);
             ((MysqlTransactionMetadataStore) metadataStore).initialize();
             ((MysqlSafePointStore) safePointStore).initialize(0L);
 
@@ -54,12 +62,13 @@ public final class MysqlTxnBenchmark {
                 reset(controlDataSource, "mvcc_txn", "mvcc_tso", "mvcc_safe_point");
                 reset(shard1DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
                 reset(shard2DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
-                tso.initialize(100);
+                mysqlTso.initialize(100);
+                segmentTso.initialize(100);
                 ((MysqlTransactionMetadataStore) metadataStore).initialize();
                 ((MysqlSafePointStore) safePointStore).initialize(0L);
             }
 
-            TransactionManager transactionManager = new TransactionManager(
+            try (TransactionManager transactionManager = new TransactionManager(
                     tso,
                     metadataStore,
                     safePointStore,
@@ -80,16 +89,21 @@ public final class MysqlTxnBenchmark {
                                     config.retryBackoffJitter()
                             ),
                             new CrossShardCommitPolicy(
+                                    config.parallelPrewrite(),
                                     config.parallelPrepare(),
                                     config.parallelCommit(),
-                                    config.parallelRollback()
-                            )
+                                    config.parallelRollback(),
+                                    config.asyncCommit(),
+                                    config.asyncCommitWorkers()
+                            ),
+                            config.bufferWrites(),
+                            config.lazyBeginMetadata()
                     ),
                     Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-            );
-
-            BenchmarkResult result = runBenchmark(transactionManager, config);
-            System.out.println(result.toLine(config));
+            )) {
+                BenchmarkResult result = runBenchmark(transactionManager, config);
+                System.out.println(result.toLine(config));
+            }
         } finally {
             close(controlDataSource);
             close(shard1DataSource);
@@ -103,6 +117,7 @@ public final class MysqlTxnBenchmark {
         LongAdder conflicts = new LongAdder();
         LongAdder failures = new LongAdder();
         AtomicLong keySequence = new AtomicLong();
+        AtomicReference<String> firstFailure = new AtomicReference<>();
 
         var executor = Executors.newFixedThreadPool(config.concurrency());
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -136,9 +151,11 @@ public final class MysqlTxnBenchmark {
                                 conflicts.increment();
                             } else {
                                 failures.increment();
+                                firstFailure.compareAndSet(null, formatFailure(ex));
                             }
                         } catch (RuntimeException ex) {
                             failures.increment();
+                            firstFailure.compareAndSet(null, formatFailure(ex));
                         }
                     }
                 } catch (InterruptedException ex) {
@@ -161,12 +178,32 @@ public final class MysqlTxnBenchmark {
                 attempts.sum(),
                 committed.sum(),
                 conflicts.sum(),
-                failures.sum()
+                failures.sum(),
+                firstFailure.get()
         );
     }
 
     private static byte[] bytes(String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static String formatFailure(Throwable throwable) {
+        StringBuilder builder = new StringBuilder();
+        builder.append(throwable.getClass().getSimpleName());
+        if (throwable instanceof MvccException ex) {
+            builder.append(":").append(ex.errorCode());
+        }
+        if (throwable.getMessage() != null && !throwable.getMessage().isBlank()) {
+            builder.append(":").append(throwable.getMessage());
+        }
+        Throwable cause = throwable.getCause();
+        if (cause != null) {
+            builder.append(":cause=").append(cause.getClass().getSimpleName());
+            if (cause.getMessage() != null && !cause.getMessage().isBlank()) {
+                builder.append(":").append(cause.getMessage());
+            }
+        }
+        return builder.toString();
     }
 
     private static void reset(DataSource dataSource, String... tables) throws Exception {
@@ -203,9 +240,16 @@ public final class MysqlTxnBenchmark {
                           long retryBackoffMaxMs,
                           double retryBackoffMultiplier,
                           boolean retryBackoffJitter,
+                          boolean segmentTso,
+                          int tsoBatchSize,
+                          boolean bufferWrites,
+                          boolean lazyBeginMetadata,
+                          boolean parallelPrewrite,
                           boolean parallelPrepare,
                           boolean parallelCommit,
-                          boolean parallelRollback) {
+                          boolean parallelRollback,
+                          boolean asyncCommit,
+                          int asyncCommitWorkers) {
         private static Config fromEnv() {
             return new Config(
                     env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:3306/control"),
@@ -228,9 +272,16 @@ public final class MysqlTxnBenchmark {
                     Long.parseLong(env("AZIR_TX_RETRY_BACKOFF_MAX_MS", "100")),
                     Double.parseDouble(env("AZIR_TX_RETRY_BACKOFF_MULTIPLIER", "2.0")),
                     Boolean.parseBoolean(env("AZIR_TX_RETRY_BACKOFF_JITTER", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_SEGMENT_TSO", "false")),
+                    Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "256")),
+                    Boolean.parseBoolean(env("AZIR_TX_BUFFER_WRITES", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_LAZY_BEGIN_METADATA", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_PREWRITE", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_PREPARE", "false")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_COMMIT", "false")),
-                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "false"))
+                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "false")),
+                    Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "false")),
+                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "8"))
             );
         }
     }
@@ -239,7 +290,8 @@ public final class MysqlTxnBenchmark {
                                    long attempts,
                                    long committed,
                                    long conflicts,
-                                   long failures) {
+                                   long failures,
+                                   String firstFailure) {
         private String toLine(Config config) {
             double attemptTps = attempts / elapsedSeconds;
             double commitTps = committed / elapsedSeconds;
@@ -250,13 +302,20 @@ public final class MysqlTxnBenchmark {
                     + " mode=" + (config.conflictMode() ? "conflict" : "no_conflict")
                     + " conflict_mode=" + config.conflictModeSetting()
                     + " retry_max_attempts=" + config.maxAttempts()
+                    + " segment_tso=" + config.segmentTso()
+                    + " tso_batch_size=" + config.tsoBatchSize()
+                    + " buffer_writes=" + config.bufferWrites()
+                    + " lazy_begin_metadata=" + config.lazyBeginMetadata()
+                    + " parallel_prewrite=" + config.parallelPrewrite()
                     + " parallel_prepare=" + config.parallelPrepare()
                     + " parallel_commit=" + config.parallelCommit()
                     + " parallel_rollback=" + config.parallelRollback()
+                    + " async_commit=" + config.asyncCommit()
                     + " attempts=" + attempts
                     + " committed=" + committed
                     + " conflicts=" + conflicts
                     + " failures=" + failures
+                    + " first_failure=" + (firstFailure == null ? "-" : firstFailure.replace(' ', '_'))
                     + " attempt_tps=" + String.format("%.2f", attemptTps)
                     + " commit_tps=" + String.format("%.2f", commitTps)
                     + " conflict_tps=" + String.format("%.2f", conflictTps);

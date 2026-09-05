@@ -142,6 +142,63 @@ class MysqlMvccIntegrationTest {
     }
 
     @Test
+    void bufferedWritesShouldSupportReadYourOwnWriteBeforeCommit() throws Exception {
+        TransactionManager bufferedManager = new TransactionManager(
+                tso,
+                metadataStore,
+                new TransactionOptions(
+                        LockWaitPolicy.failFast(),
+                        TransactionRetryPolicy.noRetry(),
+                        CrossShardCommitPolicy.parallel(),
+                        true,
+                        false
+                ),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = bufferedManager.begin(IsolationLevel.REPEATABLE_READ);
+        bufferedManager.put(tx, "shard-1", "buffered:001", bytes("v1"));
+        bufferedManager.put(tx, "shard-1", "buffered:002", bytes("v2"));
+
+        assertEquals("v1", bufferedManager.get(tx, "shard-1", "buffered:001").map(String::new).orElse(null));
+        assertEquals(
+                List.of("buffered:001", "buffered:002"),
+                bufferedManager.scan(tx, "shard-1", "buffered:000", "buffered:999")
+                        .stream()
+                        .map(VersionedValue::key)
+                        .collect(Collectors.toList())
+        );
+        assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
+    }
+
+    @Test
+    void bufferedWritesShouldFlushAtCommit() throws Exception {
+        TransactionManager bufferedManager = new TransactionManager(
+                tso,
+                metadataStore,
+                new TransactionOptions(
+                        LockWaitPolicy.failFast(),
+                        TransactionRetryPolicy.noRetry(),
+                        CrossShardCommitPolicy.parallel(),
+                        true,
+                        false
+                ),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = bufferedManager.begin(IsolationLevel.REPEATABLE_READ);
+        bufferedManager.put(tx, "shard-1", "buffered:commit:1", bytes("left"));
+        bufferedManager.put(tx, "shard-2", "buffered:commit:2", bytes("right"));
+
+        bufferedManager.commit(tx);
+
+        assertEquals("left", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "buffered:commit:1"));
+        assertEquals("right", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "buffered:commit:2"));
+        assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
+        assertEquals(0, countRows(shard2DataSource, "mvcc_intent"));
+    }
+
+    @Test
     void crossShardCommitShouldUseTwoPhaseCommit() {
         Transaction tx = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
         transactionManager.put(tx, "shard-1", "order:1", bytes("created"));
@@ -152,6 +209,42 @@ class MysqlMvccIntegrationTest {
         assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, result.mode());
         assertEquals("created", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "order:1"));
         assertEquals("reserved", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "stock:1"));
+    }
+
+    @Test
+    void crossShardCommitShouldSkipPrepareForAdaptersThatDoNotRequireIt() {
+        StorageAdapter failOnPrepareShard2 = new FailOnPrepareStorageAdapter(shard2);
+        TransactionManager manager = new TransactionManager(tso, metadataStore, Map.of(
+                shard1.shardId(), shard1,
+                shard2.shardId(), failOnPrepareShard2
+        ));
+
+        Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
+        manager.put(tx, "shard-1", "order:skip-prepare", bytes("created"));
+        manager.put(tx, "shard-2", "stock:skip-prepare", bytes("reserved"));
+
+        TransactionCommitResult result = manager.commit(tx);
+
+        assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, result.mode());
+        assertEquals("created", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "order:skip-prepare"));
+        assertEquals("reserved", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "stock:skip-prepare"));
+    }
+
+    @Test
+    void crossShardCommitShouldCallPrepareWhenAdapterRequiresIt() {
+        CountingPrepareStorageAdapter prepareAwareShard2 = new CountingPrepareStorageAdapter(shard2);
+        TransactionManager manager = new TransactionManager(tso, metadataStore, Map.of(
+                shard1.shardId(), shard1,
+                shard2.shardId(), prepareAwareShard2
+        ));
+
+        Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
+        manager.put(tx, "shard-1", "order:require-prepare", bytes("created"));
+        manager.put(tx, "shard-2", "stock:require-prepare", bytes("reserved"));
+
+        manager.commit(tx);
+
+        assertEquals(1, prepareAwareShard2.prepareCalls.get());
     }
 
     @Test
@@ -244,7 +337,9 @@ class MysqlMvccIntegrationTest {
                 new TransactionOptions(
                         new LockWaitPolicy(ConflictMode.WAIT, 2_000L, 5L, 20L, 2.0d, false),
                         new TransactionRetryPolicy(3, 5L, 20L, 2.0d, false),
-                        CrossShardCommitPolicy.serial()
+                        CrossShardCommitPolicy.serial(),
+                        false,
+                        false
                 ),
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
         );
@@ -289,7 +384,9 @@ class MysqlMvccIntegrationTest {
                 new TransactionOptions(
                         LockWaitPolicy.failFast(),
                         new TransactionRetryPolicy(3, 5L, 20L, 2.0d, false),
-                        CrossShardCommitPolicy.serial()
+                        CrossShardCommitPolicy.serial(),
+                        false,
+                        false
                 ),
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
         );
@@ -438,6 +535,129 @@ class MysqlMvccIntegrationTest {
             if (shouldFail.compareAndSet(true, false)) {
                 throw new IllegalStateException("simulated commit failure");
             }
+            delegate.commit(txId, commitTs);
+        }
+
+        @Override
+        public void abort(long txId) {
+            delegate.abort(txId);
+        }
+
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return delegate.findPendingTransactionIds(limit);
+        }
+
+        @Override
+        public int gc(long safePoint, int limit) {
+            return delegate.gc(safePoint, limit);
+        }
+    }
+
+    private static final class FailOnPrepareStorageAdapter implements StorageAdapter {
+        private final StorageAdapter delegate;
+
+        private FailOnPrepareStorageAdapter(StorageAdapter delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String shardId() {
+            return delegate.shardId();
+        }
+
+        @Override
+        public void initialize() {
+            delegate.initialize();
+        }
+
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return delegate.get(context, key);
+        }
+
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return delegate.scan(context, keyRange);
+        }
+
+        @Override
+        public void prewrite(long txId, long startTs, java.util.List<mvcc.storage.Mutation> mutations) {
+            delegate.prewrite(txId, startTs, mutations);
+        }
+
+        @Override
+        public void prepare(long txId) {
+            throw new AssertionError("prepare should not be called");
+        }
+
+        @Override
+        public void commit(long txId, long commitTs) {
+            delegate.commit(txId, commitTs);
+        }
+
+        @Override
+        public void abort(long txId) {
+            delegate.abort(txId);
+        }
+
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return delegate.findPendingTransactionIds(limit);
+        }
+
+        @Override
+        public int gc(long safePoint, int limit) {
+            return delegate.gc(safePoint, limit);
+        }
+    }
+
+    private static final class CountingPrepareStorageAdapter implements StorageAdapter {
+        private final StorageAdapter delegate;
+        private final AtomicInteger prepareCalls = new AtomicInteger();
+
+        private CountingPrepareStorageAdapter(StorageAdapter delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public String shardId() {
+            return delegate.shardId();
+        }
+
+        @Override
+        public void initialize() {
+            delegate.initialize();
+        }
+
+        @Override
+        public boolean requiresExplicitPreparePhase() {
+            return true;
+        }
+
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return delegate.get(context, key);
+        }
+
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return delegate.scan(context, keyRange);
+        }
+
+        @Override
+        public void prewrite(long txId, long startTs, java.util.List<mvcc.storage.Mutation> mutations) {
+            delegate.prewrite(txId, startTs, mutations);
+        }
+
+        @Override
+        public void prepare(long txId) {
+            prepareCalls.incrementAndGet();
+            delegate.prepare(txId);
+        }
+
+        @Override
+        public void commit(long txId, long commitTs) {
             delegate.commit(txId, commitTs);
         }
 

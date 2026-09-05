@@ -14,6 +14,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLIntegrityConstraintViolationException;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -71,6 +72,10 @@ public class MysqlStorageAdapter implements StorageAdapter {
             ignored1.execute();
             ignored2.execute();
             ignored3.execute();
+            ensureIndex(connection, "mvcc_intent", "idx_mvcc_intent_tx_id_user_key",
+                    "create index idx_mvcc_intent_tx_id_user_key on mvcc_intent(tx_id, user_key)");
+            ensureIndex(connection, "mvcc_rollback", "idx_mvcc_rollback_tx_id_user_key",
+                    "create index idx_mvcc_rollback_tx_id_user_key on mvcc_rollback(tx_id, user_key)");
         } catch (SQLException ex) {
             throw storageError(null, "initialize schema failed", ex);
         }
@@ -113,10 +118,24 @@ public class MysqlStorageAdapter implements StorageAdapter {
     public void prewrite(long txId, long startTs, List<Mutation> mutations) {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
-            try {
+            try (PreparedStatement insertIntentIfNoWriteConflict = connection.prepareStatement("""
+                    insert into mvcc_intent(user_key, tx_id, start_ts, deleted, value, expire_at)
+                    select ?, ?, ?, ?, ?, ?
+                    from dual
+                    where not exists (
+                        select 1
+                        from mvcc_data
+                        where user_key = ? and commit_ts > ?
+                        limit 1
+                    )
+                    """);
+                 PreparedStatement updateOwnIntent = connection.prepareStatement("""
+                    update mvcc_intent
+                    set start_ts = ?, deleted = ?, value = ?, expire_at = ?
+                    where user_key = ? and tx_id = ?
+                    """)) {
                 for (Mutation mutation : mutations) {
-                    lockAndCheck(connection, txId, startTs, mutation.key());
-                    upsertIntent(connection, txId, startTs, mutation);
+                    upsertIntent(insertIntentIfNoWriteConflict, updateOwnIntent, txId, startTs, mutation);
                 }
                 connection.commit();
             } catch (SQLException | RuntimeException ex) {
@@ -152,42 +171,33 @@ public class MysqlStorageAdapter implements StorageAdapter {
     public void commit(long txId, long commitTs) {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
-            try (PreparedStatement select = connection.prepareStatement("""
-                    select user_key, deleted, value
-                    from mvcc_intent
-                    where tx_id = ?
-                    order by user_key
-                    """);
-                 PreparedStatement insert = connection.prepareStatement("""
-                    insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value)
-                    values (?, ?, ?, ?, ?)
-                    on duplicate key update
-                      tx_id = values(tx_id),
-                      deleted = values(deleted),
-                      value = values(value)
-                    """);
-                 PreparedStatement delete = connection.prepareStatement("""
-                    delete from mvcc_intent where tx_id = ?
-                    """)) {
-                select.setLong(1, txId);
-                try (ResultSet resultSet = select.executeQuery()) {
-                    while (resultSet.next()) {
-                        insert.setBytes(1, resultSet.getBytes("user_key"));
-                        insert.setLong(2, commitTs);
-                        insert.setLong(3, txId);
-                        insert.setInt(4, resultSet.getInt("deleted"));
-                        byte[] value = resultSet.getBytes("value");
-                        if (value == null) {
-                            insert.setNull(5, Types.BLOB);
-                        } else {
-                            insert.setBytes(5, value);
-                        }
-                        insert.addBatch();
-                    }
-                }
-                insert.executeBatch();
-                delete.setLong(1, txId);
-                delete.executeUpdate();
+            try {
+                commitInternal(connection, txId, commitTs, loadIntentRows(connection, txId));
+                connection.commit();
+            } catch (SQLException | RuntimeException ex) {
+                connection.rollback();
+                throw ex;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException ex) {
+            throw storageError(txId, "commit failed", ex);
+        }
+    }
+
+    @Override
+    public void commit(long txId, long commitTs, List<Mutation> mutations) {
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                List<IntentRow> rows = mutations.stream()
+                        .map(mutation -> new IntentRow(
+                                encodeKey(mutation.key()),
+                                mutation.type() == MutationType.DELETE ? 1 : 0,
+                                mutation.value()
+                        ))
+                        .toList();
+                commitKnownRowsInternal(connection, txId, commitTs, rows);
                 connection.commit();
             } catch (SQLException | RuntimeException ex) {
                 connection.rollback();
@@ -386,69 +396,53 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    private void lockAndCheck(Connection connection, long txId, long startTs, String key) throws SQLException {
-        try (PreparedStatement lockIntent = connection.prepareStatement("""
-                select tx_id
-                from mvcc_intent
-                where user_key = ?
-                for update
-                """)) {
-            lockIntent.setBytes(1, encodeKey(key));
-            try (ResultSet resultSet = lockIntent.executeQuery()) {
-                if (resultSet.next()) {
-                    long ownerTxId = resultSet.getLong("tx_id");
-                    if (ownerTxId != txId) {
-                        throw new MvccException(ErrorCode.LOCK_CONFLICT, "lock conflict on key " + key, true, txId);
-                    }
-                }
+    private void upsertIntent(PreparedStatement insertIntentIfNoWriteConflict,
+                              PreparedStatement updateOwnIntent,
+                              long txId,
+                              long startTs,
+                              Mutation mutation) throws SQLException {
+        try {
+            byte[] userKey = encodeKey(mutation.key());
+            insertIntentIfNoWriteConflict.setBytes(1, userKey);
+            insertIntentIfNoWriteConflict.setLong(2, txId);
+            insertIntentIfNoWriteConflict.setLong(3, startTs);
+            insertIntentIfNoWriteConflict.setInt(4, mutation.type() == MutationType.DELETE ? 1 : 0);
+            if (mutation.value() == null) {
+                insertIntentIfNoWriteConflict.setNull(5, Types.BLOB);
+            } else {
+                insertIntentIfNoWriteConflict.setBytes(5, mutation.value());
             }
-        }
-
-        try (PreparedStatement latestCommitted = connection.prepareStatement("""
-                select commit_ts
-                from mvcc_data
-                where user_key = ?
-                order by commit_ts desc
-                limit 1
-                for update
-                """)) {
-            latestCommitted.setBytes(1, encodeKey(key));
-            try (ResultSet resultSet = latestCommitted.executeQuery()) {
-                if (resultSet.next() && resultSet.getLong("commit_ts") > startTs) {
-                    throw new MvccException(
-                            ErrorCode.WRITE_CONFLICT,
-                            "write conflict on key " + key + ", newer version exists",
-                            true,
-                            txId
-                    );
-                }
+            insertIntentIfNoWriteConflict.setLong(6, startTs + 60_000L);
+            insertIntentIfNoWriteConflict.setBytes(7, userKey);
+            insertIntentIfNoWriteConflict.setLong(8, startTs);
+            int updated = insertIntentIfNoWriteConflict.executeUpdate();
+            if (updated == 0) {
+                throw new MvccException(
+                        ErrorCode.WRITE_CONFLICT,
+                        "write conflict on key " + mutation.key() + ", newer version exists",
+                        true,
+                        txId
+                );
+            }
+        } catch (SQLIntegrityConstraintViolationException ex) {
+            if (!tryUpdateOwnIntent(updateOwnIntent, txId, startTs, mutation)) {
+                throw new MvccException(ErrorCode.LOCK_CONFLICT, "lock conflict on key " + mutation.key(), true, txId, ex);
             }
         }
     }
 
-    private void upsertIntent(Connection connection, long txId, long startTs, Mutation mutation) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                insert into mvcc_intent(user_key, tx_id, start_ts, deleted, value, expire_at)
-                values (?, ?, ?, ?, ?, ?)
-                on duplicate key update
-                  tx_id = values(tx_id),
-                  start_ts = values(start_ts),
-                  deleted = values(deleted),
-                  value = values(value),
-                  expire_at = values(expire_at)
-                """)) {
-            statement.setBytes(1, encodeKey(mutation.key()));
-            statement.setLong(2, txId);
-            statement.setLong(3, startTs);
-            statement.setInt(4, mutation.type() == MutationType.DELETE ? 1 : 0);
-            if (mutation.value() == null) {
-                statement.setNull(5, Types.BLOB);
-            } else {
-                statement.setBytes(5, mutation.value());
-            }
-            statement.setLong(6, startTs + 60_000L);
-            statement.executeUpdate();
+    private boolean tryUpdateOwnIntent(PreparedStatement statement, long txId, long startTs, Mutation mutation) throws SQLException {
+        statement.setLong(1, startTs);
+        statement.setInt(2, mutation.type() == MutationType.DELETE ? 1 : 0);
+        if (mutation.value() == null) {
+            statement.setNull(3, Types.BLOB);
+        } else {
+            statement.setBytes(3, mutation.value());
         }
+        statement.setLong(4, startTs + 60_000L);
+        statement.setBytes(5, encodeKey(mutation.key()));
+        statement.setLong(6, txId);
+        return statement.executeUpdate() == 1;
     }
 
     private List<String> collectRangeKeys(Connection connection, KeyRange keyRange) throws SQLException {
@@ -484,6 +478,121 @@ public class MysqlStorageAdapter implements StorageAdapter {
     }
 
     private MvccException storageError(Long txId, String message, SQLException ex) {
-        return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, shardId + ": " + message, true, txId, ex);
+        String detailedMessage = shardId
+                + ": " + message
+                + " [sqlState=" + ex.getSQLState()
+                + ", vendorCode=" + ex.getErrorCode()
+                + "]";
+        return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, detailedMessage, true, txId, ex);
+    }
+
+    private void ensureIndex(Connection connection, String tableName, String indexName, String ddl) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                select 1
+                from information_schema.statistics
+                where table_schema = database()
+                  and table_name = ?
+                  and index_name = ?
+                limit 1
+                """)) {
+            statement.setString(1, tableName);
+            statement.setString(2, indexName);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    return;
+                }
+            }
+        }
+        try (PreparedStatement createIndex = connection.prepareStatement(ddl)) {
+            createIndex.execute();
+        }
+    }
+
+    private List<IntentRow> loadIntentRows(Connection connection, long txId) throws SQLException {
+        try (PreparedStatement select = connection.prepareStatement("""
+                select user_key, deleted, value
+                from mvcc_intent
+                where tx_id = ?
+                order by user_key
+                """)) {
+            select.setLong(1, txId);
+            try (ResultSet resultSet = select.executeQuery()) {
+                List<IntentRow> rows = new ArrayList<>();
+                while (resultSet.next()) {
+                    rows.add(new IntentRow(
+                            resultSet.getBytes("user_key"),
+                            resultSet.getInt("deleted"),
+                            resultSet.getBytes("value")
+                    ));
+                }
+                return rows;
+            }
+        }
+    }
+
+    private void commitInternal(Connection connection, long txId, long commitTs, List<IntentRow> rows) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value)
+                values (?, ?, ?, ?, ?)
+                on duplicate key update
+                  tx_id = values(tx_id),
+                  deleted = values(deleted),
+                  value = values(value)
+                """);
+             PreparedStatement delete = connection.prepareStatement("""
+                delete from mvcc_intent where tx_id = ?
+                """)) {
+            for (IntentRow row : rows) {
+                insert.setBytes(1, row.userKey());
+                insert.setLong(2, commitTs);
+                insert.setLong(3, txId);
+                insert.setInt(4, row.deleted());
+                if (row.value() == null) {
+                    insert.setNull(5, Types.BLOB);
+                } else {
+                    insert.setBytes(5, row.value());
+                }
+                insert.addBatch();
+            }
+            if (!rows.isEmpty()) {
+                insert.executeBatch();
+            }
+            delete.setLong(1, txId);
+            delete.executeUpdate();
+        }
+    }
+
+    private void commitKnownRowsInternal(Connection connection, long txId, long commitTs, List<IntentRow> rows) throws SQLException {
+        try (PreparedStatement insert = connection.prepareStatement("""
+                insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value)
+                values (?, ?, ?, ?, ?)
+                """);
+             PreparedStatement delete = connection.prepareStatement("""
+                delete from mvcc_intent where user_key = ? and tx_id = ?
+                """)) {
+            for (IntentRow row : rows) {
+                insert.setBytes(1, row.userKey());
+                insert.setLong(2, commitTs);
+                insert.setLong(3, txId);
+                insert.setInt(4, row.deleted());
+                if (row.value() == null) {
+                    insert.setNull(5, Types.BLOB);
+                } else {
+                    insert.setBytes(5, row.value());
+                }
+                insert.addBatch();
+
+                delete.setBytes(1, row.userKey());
+                delete.setLong(2, txId);
+                delete.addBatch();
+            }
+            if (!rows.isEmpty()) {
+                insert.executeBatch();
+                delete.executeBatch();
+            }
+        }
+    }
+
+    private record IntentRow(byte[] userKey, int deleted, byte[] value) {
     }
 }
