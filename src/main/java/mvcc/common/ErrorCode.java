@@ -1,5 +1,8 @@
 package mvcc.common;
 
+/**
+ * MVCC 组件错误码枚举。
+ */
 public enum ErrorCode {
     WRITE_CONFLICT,
     LOCK_CONFLICT,

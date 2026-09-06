@@ -15,10 +15,19 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
+/**
+ * 时间戳分配器基准测试入口。
+ */
 public final class TimestampOracleBenchmark {
+    /**
+     * 构造 TimestampOracleBenchmark 实例。
+     */
     private TimestampOracleBenchmark() {
     }
 
+    /**
+     * 程序入口方法。
+     */
     public static void main(String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource controlDataSource = MysqlDataSourceFactory.create(config.controlJdbcUrl(), config.username(), config.password());
@@ -51,6 +60,9 @@ public final class TimestampOracleBenchmark {
         }
     }
 
+    /**
+     * 执行基准测试并返回统计结果。
+     */
     private static BenchmarkResult runBenchmark(TimestampOracle oracle,
                                                 CountingTimestampOracle countingOracle,
                                                 MysqlSegmentTimestampOracle segmentTso,
@@ -92,6 +104,9 @@ public final class TimestampOracleBenchmark {
         return new BenchmarkResult(elapsedSeconds, allocatedCount, remoteCalls);
     }
 
+    /**
+     * 重置基准测试表数据。
+     */
     private static void reset(DataSource dataSource, String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
@@ -100,12 +115,18 @@ public final class TimestampOracleBenchmark {
         }
     }
 
+    /**
+     * 关闭资源或后台执行器。
+     */
     private static void close(DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
+    /**
+     * 基准测试配置对象。
+     */
     private record Config(String controlJdbcUrl,
                           String username,
                           String password,
@@ -114,6 +135,9 @@ public final class TimestampOracleBenchmark {
                           int durationSeconds,
                           Mode mode,
                           int batchSize) {
+        /**
+         * 从环境变量读取配置对象。
+         */
         private static Config fromEnv() {
             return new Config(
                     env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control"),
@@ -128,9 +152,15 @@ public final class TimestampOracleBenchmark {
         }
     }
 
+    /**
+     * 基准测试结果对象。
+     */
     private record BenchmarkResult(double elapsedSeconds,
                                    long allocated,
                                    long remoteCalls) {
+        /**
+         * 将基准测试结果格式化为一行文本。
+         */
         private String toLine(Config config) {
             double allocatedTps = allocated / elapsedSeconds;
             double remoteCallTps = remoteCalls / elapsedSeconds;
@@ -148,11 +178,17 @@ public final class TimestampOracleBenchmark {
         }
     }
 
+    /**
+     * 读取字符串环境变量配置。
+     */
     private static String env(String key, String defaultValue) {
         String value = System.getenv(key);
         return value == null || value.isBlank() ? defaultValue : value;
     }
 
+    /**
+     * 基准测试运行模式枚举。
+     */
     private enum Mode {
         DIRECT,
         LEGACY_BATCH,

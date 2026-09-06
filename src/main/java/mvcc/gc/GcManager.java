@@ -6,12 +6,18 @@ import mvcc.tso.TimestampOracle;
 
 import java.util.Map;
 
+/**
+ * MVCC 历史版本垃圾回收管理器。
+ */
 public final class GcManager {
     private final TransactionMetadataStore metadataStore;
     private final TimestampOracle timestampOracle;
     private final SafePointStore safePointStore;
     private final Map<String, StorageAdapter> adapters;
 
+    /**
+     * 构造 GcManager 实例。
+     */
     public GcManager(TransactionMetadataStore metadataStore,
                      TimestampOracle timestampOracle,
                      SafePointStore safePointStore,
@@ -22,6 +28,9 @@ public final class GcManager {
         this.adapters = Map.copyOf(adapters);
     }
 
+    /**
+     * 根据活跃事务推进安全点。
+     */
     public long advanceSafePoint() {
         long currentSafePoint = safePointStore.currentSafePoint();
         long candidate = metadataStore.oldestActiveStartTs()
@@ -30,6 +39,9 @@ public final class GcManager {
         return safePointStore.advanceTo(candidate);
     }
 
+    /**
+     * 执行一次历史版本垃圾回收。
+     */
     public int gcOnce(int limitPerShard) {
         long safePoint = advanceSafePoint();
         int reclaimed = 0;

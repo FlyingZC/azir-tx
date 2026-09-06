@@ -14,10 +14,19 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
+/**
+ * MySQL 本地事务基准测试入口。
+ */
 public final class MysqlLocalTxnBenchmark {
+    /**
+     * 构造 MysqlLocalTxnBenchmark 实例。
+     */
     private MysqlLocalTxnBenchmark() {
     }
 
+    /**
+     * 程序入口方法。
+     */
     public static void main(String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource dataSource = MysqlDataSourceFactory.create(config.jdbcUrl(), config.username(), config.password());
@@ -37,6 +46,9 @@ public final class MysqlLocalTxnBenchmark {
         }
     }
 
+    /**
+     * 初始化所需的数据库表结构或运行环境。
+     */
     private static void initialize(DataSource dataSource) throws Exception {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
@@ -55,6 +67,9 @@ public final class MysqlLocalTxnBenchmark {
         }
     }
 
+    /**
+     * 重置基准测试表数据。
+     */
     private static void reset(DataSource dataSource) throws Exception {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
@@ -63,6 +78,9 @@ public final class MysqlLocalTxnBenchmark {
         }
     }
 
+    /**
+     * 写入热点行初始数据。
+     */
     private static void seedHotRows(DataSource dataSource) throws Exception {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement insertA = connection.prepareStatement("""
@@ -82,6 +100,9 @@ public final class MysqlLocalTxnBenchmark {
         }
     }
 
+    /**
+     * 执行基准测试并返回统计结果。
+     */
     private static BenchmarkResult runBenchmark(DataSource dataSource, Config config) throws Exception {
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
@@ -142,6 +163,9 @@ public final class MysqlLocalTxnBenchmark {
         return new BenchmarkResult(elapsedSeconds, attempts.sum(), committed.sum(), conflicts.sum(), failures.sum());
     }
 
+    /**
+     * 执行无冲突的本地事务。
+     */
     private static void executeNoConflictTxn(Connection connection, long id) throws SQLException {
         try (PreparedStatement writeA = connection.prepareStatement("""
                 insert into bench_single_a(k, v) values (?, ?)
@@ -161,6 +185,9 @@ public final class MysqlLocalTxnBenchmark {
         }
     }
 
+    /**
+     * 执行会竞争热点行的本地事务。
+     */
     private static void executeConflictTxn(Connection connection) throws SQLException {
         try (PreparedStatement updateA = connection.prepareStatement("""
                 update bench_single_a set v = ? where k = 'hot'
@@ -176,18 +203,27 @@ public final class MysqlLocalTxnBenchmark {
         }
     }
 
+    /**
+     * 判断 SQL 异常是否为事务冲突。
+     */
     private static boolean isConflict(SQLException ex) {
         return ex instanceof SQLTransactionRollbackException
                 || "40001".equals(ex.getSQLState())
                 || "41000".equals(ex.getSQLState());
     }
 
+    /**
+     * 关闭资源或后台执行器。
+     */
     private static void close(DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
+    /**
+     * 基准测试配置对象。
+     */
     private record Config(String jdbcUrl,
                           String username,
                           String password,
@@ -195,6 +231,9 @@ public final class MysqlLocalTxnBenchmark {
                           int concurrency,
                           int durationSeconds,
                           boolean conflictMode) {
+        /**
+         * 从环境变量读取配置对象。
+         */
         private static Config fromEnv() {
             return new Config(
                     env("AZIR_TX_LOCAL_BENCH_JDBC", "jdbc:mysql://127.0.0.1:23306/single_tx"),
@@ -208,11 +247,17 @@ public final class MysqlLocalTxnBenchmark {
         }
     }
 
+    /**
+     * 基准测试结果对象。
+     */
     private record BenchmarkResult(double elapsedSeconds,
                                    long attempts,
                                    long committed,
                                    long conflicts,
                                    long failures) {
+        /**
+         * 将基准测试结果格式化为一行文本。
+         */
         private String toLine(Config config) {
             double attemptTps = attempts / elapsedSeconds;
             double commitTps = committed / elapsedSeconds;
@@ -231,6 +276,9 @@ public final class MysqlLocalTxnBenchmark {
         }
     }
 
+    /**
+     * 读取字符串环境变量配置。
+     */
     private static String env(String key, String defaultValue) {
         String value = System.getenv(key);
         return value == null || value.isBlank() ? defaultValue : value;

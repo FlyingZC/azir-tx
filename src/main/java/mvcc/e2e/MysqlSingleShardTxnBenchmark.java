@@ -27,10 +27,19 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
+/**
+ * MySQL 单分片事务基准测试入口。
+ */
 public final class MysqlSingleShardTxnBenchmark {
+    /**
+     * 构造 MysqlSingleShardTxnBenchmark 实例。
+     */
     private MysqlSingleShardTxnBenchmark() {
     }
 
+    /**
+     * 程序入口方法。
+     */
     public static void main(String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource controlDataSource = MysqlDataSourceFactory.create(config.controlJdbcUrl(), config.username(), config.password());
@@ -93,6 +102,9 @@ public final class MysqlSingleShardTxnBenchmark {
         }
     }
 
+    /**
+     * 执行基准测试并返回统计结果。
+     */
     private static BenchmarkResult runBenchmark(TransactionManager transactionManager, Config config) throws Exception {
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
@@ -152,10 +164,16 @@ public final class MysqlSingleShardTxnBenchmark {
         return new BenchmarkResult(elapsedSeconds, attempts.sum(), committed.sum(), conflicts.sum(), failures.sum());
     }
 
+    /**
+     * 将字符串转换为字节数组。
+     */
     private static byte[] bytes(String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
+    /**
+     * 重置基准测试表数据。
+     */
     private static void reset(DataSource dataSource, String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
@@ -164,12 +182,18 @@ public final class MysqlSingleShardTxnBenchmark {
         }
     }
 
+    /**
+     * 关闭资源或后台执行器。
+     */
     private static void close(DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
+    /**
+     * 基准测试配置对象。
+     */
     private record Config(String controlJdbcUrl,
                           String shard1JdbcUrl,
                           String username,
@@ -193,6 +217,9 @@ public final class MysqlSingleShardTxnBenchmark {
                           int tsoBatchSize,
                           boolean bufferWrites,
                           boolean lazyBeginMetadata) {
+        /**
+         * 从环境变量读取配置对象。
+         */
         private static Config fromEnv() {
             return new Config(
                     env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control"),
@@ -222,11 +249,17 @@ public final class MysqlSingleShardTxnBenchmark {
         }
     }
 
+    /**
+     * 基准测试结果对象。
+     */
     private record BenchmarkResult(double elapsedSeconds,
                                    long attempts,
                                    long committed,
                                    long conflicts,
                                    long failures) {
+        /**
+         * 将基准测试结果格式化为一行文本。
+         */
         private String toLine(Config config) {
             double attemptTps = attempts / elapsedSeconds;
             double commitTps = committed / elapsedSeconds;
@@ -251,6 +284,9 @@ public final class MysqlSingleShardTxnBenchmark {
         }
     }
 
+    /**
+     * 读取字符串环境变量配置。
+     */
     private static String env(String key, String defaultValue) {
         String value = System.getenv(key);
         return value == null || value.isBlank() ? defaultValue : value;

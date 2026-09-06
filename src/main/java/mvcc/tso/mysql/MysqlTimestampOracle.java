@@ -10,15 +10,24 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 
+/**
+ * 基于 MySQL 行锁递增的时间戳分配器。
+ */
 public final class MysqlTimestampOracle implements TimestampOracle {
     private static final String SEQUENCE_NAME = "global";
 
     private final DataSource dataSource;
 
+    /**
+     * 构造 MysqlTimestampOracle 实例。
+     */
     public MysqlTimestampOracle(DataSource dataSource) {
         this.dataSource = dataSource;
     }
 
+    /**
+     * 初始化所需的数据库表结构或运行环境。
+     */
     public void initialize(long initialValue) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement create = connection.prepareStatement("""
@@ -41,6 +50,9 @@ public final class MysqlTimestampOracle implements TimestampOracle {
         }
     }
 
+    /**
+     * 分配下一个全局单调递增时间戳。
+     */
     @Override
     public long nextTimestamp() {
         try (Connection connection = dataSource.getConnection()) {
@@ -81,6 +93,9 @@ public final class MysqlTimestampOracle implements TimestampOracle {
         }
     }
 
+    /**
+     * 将底层存储异常包装为 MVCC 异常。
+     */
     private MvccException storageError(String message, SQLException ex, Long txId) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, txId, ex);
     }

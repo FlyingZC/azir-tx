@@ -22,20 +22,32 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+/**
+ * 基于 MySQL 表结构的 MVCC 分片存储适配器。
+ */
 public class MysqlStorageAdapter implements StorageAdapter {
     private final String shardId;
     private final DataSource dataSource;
 
+    /**
+     * 构造 MysqlStorageAdapter 实例。
+     */
     public MysqlStorageAdapter(String shardId, DataSource dataSource) {
         this.shardId = shardId;
         this.dataSource = dataSource;
     }
 
+    /**
+     * 返回当前存储适配器所属分片编号。
+     */
     @Override
     public String shardId() {
         return shardId;
     }
 
+    /**
+     * 初始化所需的数据库表结构或运行环境。
+     */
     @Override
     public void initialize() {
         try (Connection connection = dataSource.getConnection();
@@ -81,6 +93,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 读取指定键或事务的当前可见数据。
+     */
     @Override
     public Optional<VersionedValue> get(ReadContext context, String key) {
         try (Connection connection = dataSource.getConnection()) {
@@ -94,6 +109,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 按键范围扫描当前快照可见的数据。
+     */
     @Override
     public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
         try (Connection connection = dataSource.getConnection()) {
@@ -114,6 +132,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 写入事务意向并检测写冲突。
+     */
     @Override
     public void prewrite(long txId, long startTs, List<Mutation> mutations) {
         try (Connection connection = dataSource.getConnection()) {
@@ -135,6 +156,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
                     where user_key = ? and tx_id = ?
                     """)) {
                 for (Mutation mutation : mutations) {
+                    // 先尝试插入新意向，若已经是本事务意向则更新；其他事务占用会触发锁冲突。
                     upsertIntent(insertIntentIfNoWriteConflict, updateOwnIntent, txId, startTs, mutation);
                 }
                 connection.commit();
@@ -149,6 +171,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 检查事务意向是否存在并进入准备阶段。
+     */
     @Override
     public void prepare(long txId) {
         try (Connection connection = dataSource.getConnection();
@@ -169,6 +194,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 提交事务意向并生成已提交版本。
+     */
     @Override
     public void commit(long txId, long commitTs) {
         try (Connection connection = dataSource.getConnection()) {
@@ -187,11 +215,17 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 提交事务意向并生成已提交版本。
+     */
     @Override
     public void commit(long txId, long commitTs, List<Mutation> mutations) {
         commit(txId, commitTs, mutations, true);
     }
 
+    /**
+     * 提交事务意向并生成已提交版本。
+     */
     @Override
     public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
         try (Connection connection = dataSource.getConnection()) {
@@ -210,6 +244,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 直接写入已提交版本，跳过显式 prepare 阶段。
+     */
     @Override
     public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
         try (Connection connection = dataSource.getConnection()) {
@@ -228,11 +265,17 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 清理事务残留的写意向。
+     */
     @Override
     public void cleanupIntents(long txId, List<Mutation> mutations) {
         cleanupIntents(txId);
     }
 
+    /**
+     * 清理事务残留的写意向。
+     */
     @Override
     public void cleanupIntents(long txId) {
         try (Connection connection = dataSource.getConnection()) {
@@ -251,6 +294,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 回滚事务并清理写意向。
+     */
     @Override
     public void abort(long txId) {
         try (Connection connection = dataSource.getConnection()) {
@@ -293,6 +339,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 查找仍有待处理意向的事务编号。
+     */
     @Override
     public Set<Long> findPendingTransactionIds(int limit) {
         try (Connection connection = dataSource.getConnection();
@@ -316,6 +365,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 清理安全点之前的历史版本。
+     */
     @Override
     public int gc(long safePoint, int limit) {
         try (Connection connection = dataSource.getConnection()) {
@@ -387,6 +439,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 查找指定事务自己的写意向。
+     */
     private Optional<VersionedValue> findIntent(Connection connection, long txId, String key) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select tx_id, deleted, value, start_ts
@@ -413,6 +468,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 查找指定快照时间戳可见的已提交版本。
+     */
     private Optional<VersionedValue> findCommitted(Connection connection, long readTs, String key) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select commit_ts, deleted, value
@@ -438,6 +496,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 插入或更新事务写意向。
+     */
     private void upsertIntent(PreparedStatement insertIntentIfNoWriteConflict,
                               PreparedStatement updateOwnIntent,
                               long txId,
@@ -473,6 +534,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 尝试更新当前事务已有的写意向。
+     */
     private boolean tryUpdateOwnIntent(PreparedStatement statement, long txId, long startTs, Mutation mutation) throws SQLException {
         statement.setLong(1, startTs);
         statement.setInt(2, mutation.type() == MutationType.DELETE ? 1 : 0);
@@ -487,6 +551,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return statement.executeUpdate() == 1;
     }
 
+    /**
+     * 收集扫描范围内出现过的业务键。
+     */
     private List<String> collectRangeKeys(Connection connection, KeyRange keyRange) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select user_key
@@ -511,14 +578,23 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 将字符串键编码为数据库二进制键。
+     */
     private static byte[] encodeKey(String key) {
         return key.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
+    /**
+     * 将数据库二进制键解码为字符串键。
+     */
     private static String decodeKey(byte[] key) {
         return new String(key, java.nio.charset.StandardCharsets.UTF_8);
     }
 
+    /**
+     * 将底层存储异常包装为 MVCC 异常。
+     */
     private MvccException storageError(Long txId, String message, SQLException ex) {
         String detailedMessage = shardId
                 + ": " + message
@@ -528,6 +604,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, detailedMessage, true, txId, ex);
     }
 
+    /**
+     * 确保指定索引已经存在。
+     */
     private void ensureIndex(Connection connection, String tableName, String indexName, String ddl) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select 1
@@ -550,6 +629,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 加载指定事务的全部写意向行。
+     */
     private List<IntentRow> loadIntentRows(Connection connection, long txId) throws SQLException {
         try (PreparedStatement select = connection.prepareStatement("""
                 select user_key, deleted, value
@@ -572,6 +654,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 提交已加载的写意向行。
+     */
     private void commitInternal(Connection connection, long txId, long commitTs, List<IntentRow> rows) throws SQLException {
         try (PreparedStatement insert = connection.prepareStatement("""
                 insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value)
@@ -585,6 +670,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 delete from mvcc_intent where tx_id = ?
                 """)) {
             for (IntentRow row : rows) {
+                // 将 intent 行转换为不可变的已提交版本，commit_ts 决定快照可见性。
                 insert.setBytes(1, row.userKey());
                 insert.setLong(2, commitTs);
                 insert.setLong(3, txId);
@@ -604,6 +690,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 提交已知写集合对应的意向行。
+     */
     private void commitKnownMutationsInternal(Connection connection,
                                              long txId,
                                              long commitTs,
@@ -634,6 +723,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 直接提交已知写集合。
+     */
     private void directCommitInternal(Connection connection,
                                       long txId,
                                       long startTs,
@@ -650,6 +742,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 values (?, ?, ?, ?, ?)
                 """)) {
             for (Mutation mutation : mutations) {
+                // 单阶段提交仍需检查 startTs 之后是否已有新版本，防止覆盖并发写入。
                 conflictCheck.setBytes(1, encodeKey(mutation.key()));
                 conflictCheck.setLong(2, startTs);
                 try (ResultSet resultSet = conflictCheck.executeQuery()) {
@@ -681,6 +774,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 按事务编号删除写意向。
+     */
     private void deleteIntentsByTransaction(Connection connection, long txId) throws SQLException {
         try (PreparedStatement delete = connection.prepareStatement("""
                 delete from mvcc_intent where tx_id = ?
@@ -690,6 +786,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * 按已知业务键删除写意向。
+     */
     private void deleteKnownIntents(Connection connection, long txId, List<byte[]> userKeys) throws SQLException {
         try (PreparedStatement delete = connection.prepareStatement("""
                 delete from mvcc_intent where user_key = ? and tx_id = ?
@@ -705,6 +804,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * MySQL intent 行数据对象。
+     */
     private record IntentRow(byte[] userKey, int deleted, byte[] value) {
     }
 }

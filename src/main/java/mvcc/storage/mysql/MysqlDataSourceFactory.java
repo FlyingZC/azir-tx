@@ -5,14 +5,23 @@ import com.zaxxer.hikari.HikariDataSource;
 
 import javax.sql.DataSource;
 
+/**
+ * MySQL 数据源工厂，负责创建连接池。
+ */
 public final class MysqlDataSourceFactory {
     private static final int DEFAULT_MAX_POOL_SIZE = 64;
     private static final int DEFAULT_MIN_IDLE = 2;
     private static final long DEFAULT_CONNECTION_TIMEOUT_MS = 3_000L;
 
+    /**
+     * 构造 MysqlDataSourceFactory 实例。
+     */
     private MysqlDataSourceFactory() {
     }
 
+    /**
+     * 创建组件实例或事务记录。
+     */
     public static DataSource create(String jdbcUrl, String username, String password) {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(jdbcUrl);
@@ -30,6 +39,9 @@ public final class MysqlDataSourceFactory {
         return new HikariDataSource(config);
     }
 
+    /**
+     * 读取整型环境变量配置。
+     */
     private static int envInt(String key, int defaultValue) {
         String value = System.getenv(key);
         if (value == null || value.isBlank()) {
@@ -38,6 +50,9 @@ public final class MysqlDataSourceFactory {
         return Integer.parseInt(value);
     }
 
+    /**
+     * 读取长整型环境变量配置。
+     */
     private static long envLong(String key, long defaultValue) {
         String value = System.getenv(key);
         if (value == null || value.isBlank()) {

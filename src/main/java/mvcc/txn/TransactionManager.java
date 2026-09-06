@@ -31,6 +31,9 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
+/**
+ * 事务管理器，协调 TSO、元数据和分片存储完成 MVCC 事务。
+ */
 public final class TransactionManager implements AutoCloseable {
     private final TimestampOracle timestampOracle;
     private final TransactionMetadataStore metadataStore;
@@ -41,12 +44,18 @@ public final class TransactionManager implements AutoCloseable {
     private final ExecutorService asyncCommitExecutor;
     private final ExecutorService intentCleanupExecutor;
 
+    /**
+     * 构造 TransactionManager 实例。
+     */
     public TransactionManager(TimestampOracle timestampOracle,
                               TransactionMetadataStore metadataStore,
                               Map<String, StorageAdapter> adapters) {
         this(timestampOracle, metadataStore, NoOpSafePointStore.INSTANCE, TransactionOptions.defaults(), adapters);
     }
 
+    /**
+     * 构造 TransactionManager 实例。
+     */
     public TransactionManager(TimestampOracle timestampOracle,
                               TransactionMetadataStore metadataStore,
                               SafePointStore safePointStore,
@@ -54,6 +63,9 @@ public final class TransactionManager implements AutoCloseable {
         this(timestampOracle, metadataStore, safePointStore, TransactionOptions.defaults(), adapters);
     }
 
+    /**
+     * 构造 TransactionManager 实例。
+     */
     public TransactionManager(TimestampOracle timestampOracle,
                               TransactionMetadataStore metadataStore,
                               TransactionOptions options,
@@ -61,6 +73,9 @@ public final class TransactionManager implements AutoCloseable {
         this(timestampOracle, metadataStore, NoOpSafePointStore.INSTANCE, options, adapters);
     }
 
+    /**
+     * 构造 TransactionManager 实例。
+     */
     public TransactionManager(TimestampOracle timestampOracle,
                               TransactionMetadataStore metadataStore,
                               SafePointStore safePointStore,
@@ -90,6 +105,9 @@ public final class TransactionManager implements AutoCloseable {
                 : null;
     }
 
+    /**
+     * 开启一个新事务。
+     */
     public Transaction begin(IsolationLevel isolationLevel) {
         long txId = timestampOracle.nextTimestamp();
         long startTs = txId;
@@ -101,6 +119,9 @@ public final class TransactionManager implements AutoCloseable {
         return transaction;
     }
 
+    /**
+     * 读取指定键或事务的当前可见数据。
+     */
     public Optional<byte[]> get(Transaction tx, String shardId, String key) {
         ensureActive(tx);
         StorageAdapter adapter = adapter(shardId);
@@ -117,6 +138,9 @@ public final class TransactionManager implements AutoCloseable {
         return Optional.of(result.get().value());
     }
 
+    /**
+     * 按键范围扫描当前快照可见的数据。
+     */
     public List<VersionedValue> scan(Transaction tx, String shardId, String startKeyInclusive, String endKeyExclusive) {
         ensureActive(tx);
         StorageAdapter adapter = adapter(shardId);
@@ -129,14 +153,23 @@ public final class TransactionManager implements AutoCloseable {
         return overlayBufferedMutations(tx, shardId, startKeyInclusive, endKeyExclusive, result);
     }
 
+    /**
+     * 在事务中写入键值数据。
+     */
     public void put(Transaction tx, String shardId, String key, byte[] value) {
         write(tx, shardId, Mutation.put(key, value));
     }
 
+    /**
+     * 在事务中删除键值数据。
+     */
     public void delete(Transaction tx, String shardId, String key) {
         write(tx, shardId, Mutation.delete(key));
     }
 
+    /**
+     * 在事务模板中执行回调并按策略重试。
+     */
     public <T> T execute(IsolationLevel isolationLevel, TransactionCallback<T> callback) {
         MvccException lastRetryable = null;
         for (int attempt = 1; attempt <= options.retryPolicy().maxAttempts(); attempt++) {
@@ -162,9 +195,13 @@ public final class TransactionManager implements AutoCloseable {
                 : lastRetryable;
     }
 
+    /**
+     * 提交事务意向并生成已提交版本。
+     */
     public TransactionCommitResult commit(Transaction tx) {
         ensureActive(tx);
         if (tx.participants().isEmpty()) {
+            // 没有写入分片时只需要生成提交时间戳并更新事务状态。
             long commitTs = timestampOracle.nextTimestamp();
             if (tx.metadataPersisted()) {
                 metadataStore.markCommitted(tx.txId(), commitTs);
@@ -176,6 +213,7 @@ public final class TransactionManager implements AutoCloseable {
         }
 
         if (tx.participants().size() == 1) {
+            // 单分片事务走直接提交路径，避免完整两阶段提交的额外往返。
             String participant = tx.participants().iterator().next();
             long commitTs = timestampOracle.nextTimestamp();
             boolean skipMetadataFastPath = options.lazyBeginMetadata() && !tx.metadataPersisted();
@@ -199,6 +237,7 @@ public final class TransactionManager implements AutoCloseable {
 
         prewriteBufferedMutations(tx);
 
+        // 多分片事务先持久化可恢复状态，再提交各参与分片，保证异常后可以恢复。
         boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
         if (explicitPrepareRequired) {
             if (tx.metadataPersisted()) {
@@ -231,6 +270,7 @@ public final class TransactionManager implements AutoCloseable {
         }
         String primaryParticipant = primaryParticipant(tx.participants());
         try {
+            // 异步提交模式先保证主分片落盘，从分片提交交给后台执行。
             commitParticipant(tx, primaryParticipant, commitTs);
             Set<String> secondaryParticipants = secondaryParticipants(tx.participants(), primaryParticipant);
             if (options.crossShardCommitPolicy().asyncCommit()) {
@@ -262,6 +302,9 @@ public final class TransactionManager implements AutoCloseable {
         );
     }
 
+    /**
+     * 关闭资源或后台执行器。
+     */
     @Override
     public void close() {
         shutdownExecutor(intentCleanupExecutor);
@@ -269,6 +312,9 @@ public final class TransactionManager implements AutoCloseable {
         shutdownExecutor(participantExecutor);
     }
 
+    /**
+     * 调度异步从分片提交任务。
+     */
     private void scheduleAsyncSecondaryCommit(Transaction tx, long commitTs, Set<String> secondaryParticipants) {
         if (secondaryParticipants.isEmpty()) {
             return;
@@ -283,6 +329,9 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
+    /**
+     * 选择跨分片事务的主参与者。
+     */
     private String primaryParticipant(Set<String> participants) {
         return participants.stream()
                 .sorted()
@@ -290,12 +339,18 @@ public final class TransactionManager implements AutoCloseable {
                 .orElseThrow(() -> new MvccException(ErrorCode.ILLEGAL_STATE, "cross-shard tx has no participants", false, null));
     }
 
+    /**
+     * 计算除主参与者之外的从参与者集合。
+     */
     private Set<String> secondaryParticipants(Set<String> participants, String primaryParticipant) {
         return participants.stream()
                 .filter(participant -> !participant.equals(primaryParticipant))
                 .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
     }
 
+    /**
+     * 回滚事务。
+     */
     public void rollback(Transaction tx) {
         if (tx.status() == TxStatus.ABORTED || tx.status() == TxStatus.COMMITTED) {
             return;
@@ -311,10 +366,16 @@ public final class TransactionManager implements AutoCloseable {
         tx.status(TxStatus.ABORTED);
     }
 
+    /**
+     * 读取事务元数据记录。
+     */
     public Optional<TxRecord> getRecord(long txId) {
         return metadataStore.get(txId);
     }
 
+    /**
+     * 向事务写集合追加一次变更。
+     */
     private void write(Transaction tx, String shardId, Mutation mutation) {
         ensureActive(tx);
         if (options.bufferWrites()) {
@@ -352,18 +413,27 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
+    /**
+     * 确认事务仍处于可操作状态。
+     */
     private void ensureActive(Transaction tx) {
         if (tx.status() != TxStatus.ACTIVE) {
             throw new MvccException(ErrorCode.TRANSACTION_ABORTED, "transaction not active: " + tx.txId(), false, tx.txId());
         }
     }
 
+    /**
+     * 计算事务读取使用的快照时间戳。
+     */
     private long readTs(Transaction tx) {
         return tx.isolationLevel() == IsolationLevel.REPEATABLE_READ
                 ? tx.startTs()
                 : timestampOracle.nextTimestamp();
     }
 
+    /**
+     * 校验读取快照尚未被安全点回收。
+     */
     private void ensureSnapshotVisible(long readTs, long txId) {
         long safePoint = safePointStore.currentSafePoint();
         if (readTs < safePoint) {
@@ -376,6 +446,9 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
+    /**
+     * 获取指定分片的存储适配器。
+     */
     private StorageAdapter adapter(String shardId) {
         StorageAdapter adapter = adapters.get(shardId);
         if (adapter == null) {
@@ -384,6 +457,9 @@ public final class TransactionManager implements AutoCloseable {
         return adapter;
     }
 
+    /**
+     * 判断参与分片是否需要显式 prepare 阶段。
+     */
     private boolean requiresExplicitPreparePhase(Set<String> participants) {
         for (String participant : participants) {
             if (adapter(participant).requiresExplicitPreparePhase()) {
@@ -393,11 +469,17 @@ public final class TransactionManager implements AutoCloseable {
         return false;
     }
 
+    /**
+     * 判断遇到冲突后是否需要等待重试。
+     */
     private boolean shouldWaitOnConflict(MvccException ex, LockWaitPolicy lockWaitPolicy) {
         return lockWaitPolicy.conflictMode() == ConflictMode.WAIT
                 && TransientStorageConflictDetector.isTransientConflict(ex);
     }
 
+    /**
+     * 计算距离截止时间的剩余毫秒数。
+     */
     private long remainingMillis(long deadlineNanos) {
         long remainingNanos = deadlineNanos - System.nanoTime();
         if (remainingNanos <= 0L) {
@@ -406,6 +488,9 @@ public final class TransactionManager implements AutoCloseable {
         return TimeUnit.NANOSECONDS.toMillis(remainingNanos);
     }
 
+    /**
+     * 安全回滚事务并吞掉回滚异常。
+     */
     private void safeRollback(Transaction tx) {
         try {
             rollback(tx);
@@ -413,6 +498,9 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
+    /**
+     * 在多个参与分片上执行操作。
+     */
     private void runAcrossParticipants(Set<String> participants, Consumer<String> operation, boolean parallel) {
         if (!parallel || participants.size() <= 1) {
             for (String participant : participants) {
@@ -444,6 +532,9 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
+    /**
+     * 安静等待指定毫秒数。
+     */
     private void sleepQuietly(long delayMillis) {
         if (delayMillis <= 0L) {
             return;
@@ -456,6 +547,9 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
+    /**
+     * 将事务缓冲写集合预写入各分片。
+     */
     private void prewriteBufferedMutations(Transaction tx) {
         if (!options.bufferWrites()) {
             return;
@@ -472,6 +566,9 @@ public final class TransactionManager implements AutoCloseable {
         );
     }
 
+    /**
+     * 带冲突等待策略地预写入指定分片变更。
+     */
     private void prewriteMutations(Transaction tx, String shardId, List<Mutation> mutations) {
         LockWaitPolicy lockWaitPolicy = options.lockWaitPolicy();
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lockWaitPolicy.lockWaitTimeoutMs());
@@ -494,12 +591,16 @@ public final class TransactionManager implements AutoCloseable {
                             ex
                     );
                 }
+                // 等待型锁策略只对瞬时冲突退避重试，避免对永久错误做无意义重试。
                 long delayMillis = Math.min(lockWaitPolicy.nextDelayMillis(attempt++), remainingMillis(deadlineNanos));
                 sleepQuietly(delayMillis);
             }
         }
     }
 
+    /**
+     * 从事务本地写缓冲读取最新变更。
+     */
     private Optional<byte[]> bufferedRead(Transaction tx, String shardId, String key) {
         if (!options.bufferWrites()) {
             return null;
@@ -513,6 +614,9 @@ public final class TransactionManager implements AutoCloseable {
                 : Optional.of(mutation.get().value());
     }
 
+    /**
+     * 将事务本地缓冲写覆盖到扫描结果上。
+     */
     private List<VersionedValue> overlayBufferedMutations(Transaction tx,
                                                          String shardId,
                                                          String startKeyInclusive,
@@ -541,6 +645,9 @@ public final class TransactionManager implements AutoCloseable {
         return List.copyOf(visible.values());
     }
 
+    /**
+     * 判断提交策略是否需要并行执行器。
+     */
     private boolean requiresParallelExecutor(CrossShardCommitPolicy policy) {
         return policy.parallelPrewrite()
                 || policy.parallelPrepare()
@@ -549,6 +656,9 @@ public final class TransactionManager implements AutoCloseable {
                 || policy.asyncCommit();
     }
 
+    /**
+     * 关闭并行执行器。
+     */
     private void shutdownExecutor(ExecutorService executor) {
         if (executor == null) {
             return;
@@ -561,6 +671,9 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
+    /**
+     * 创建带名称前缀的后台线程工厂。
+     */
     private ThreadFactory namedFactory(String prefix) {
         return Thread.ofPlatform()
                 .daemon(true)
@@ -568,6 +681,9 @@ public final class TransactionManager implements AutoCloseable {
                 .factory();
     }
 
+    /**
+     * 提交指定参与分片。
+     */
     private void commitParticipant(Transaction tx, String shardId, long commitTs) {
         List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
         if (options.bufferWrites() && !bufferedMutations.isEmpty()) {
@@ -586,6 +702,9 @@ public final class TransactionManager implements AutoCloseable {
         adapter(shardId).commit(tx.txId(), commitTs);
     }
 
+    /**
+     * 直接提交单分片参与者。
+     */
     private void directCommitSingleShardParticipant(Transaction tx, String shardId, long commitTs) {
         List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
         if (options.bufferWrites() && !bufferedMutations.isEmpty()) {

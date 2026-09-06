@@ -33,10 +33,19 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 
+/**
+ * 异步提交原型基准测试入口。
+ */
 public final class AsyncCommitPrototypeBenchmark {
+    /**
+     * 构造 AsyncCommitPrototypeBenchmark 实例。
+     */
     private AsyncCommitPrototypeBenchmark() {
     }
 
+    /**
+     * 程序入口方法。
+     */
     public static void main(String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource controlDataSource = MysqlDataSourceFactory.create(config.controlJdbcUrl(), config.username(), config.password());
@@ -82,6 +91,9 @@ public final class AsyncCommitPrototypeBenchmark {
         }
     }
 
+    /**
+     * 执行基准测试并返回统计结果。
+     */
     private static BenchmarkResult runBenchmark(AsyncCommitCoordinator coordinator, Config config) throws Exception {
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
@@ -148,6 +160,9 @@ public final class AsyncCommitPrototypeBenchmark {
         );
     }
 
+    /**
+     * 重置基准测试表数据。
+     */
     private static void reset(DataSource dataSource, String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
@@ -156,16 +171,25 @@ public final class AsyncCommitPrototypeBenchmark {
         }
     }
 
+    /**
+     * 关闭资源或后台执行器。
+     */
     private static void close(DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
+    /**
+     * 将字符串转换为字节数组。
+     */
     private static byte[] bytes(String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
+    /**
+     * 基准测试配置对象。
+     */
     private record Config(String controlJdbcUrl,
                           String shard1JdbcUrl,
                           String shard2JdbcUrl,
@@ -176,6 +200,9 @@ public final class AsyncCommitPrototypeBenchmark {
                           int durationSeconds,
                           boolean asyncCommit,
                           int secondaryFinalizeWorkers) {
+        /**
+         * 从环境变量读取配置对象。
+         */
         private static Config fromEnv() {
             return new Config(
                     env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control"),
@@ -192,6 +219,9 @@ public final class AsyncCommitPrototypeBenchmark {
         }
     }
 
+    /**
+     * 基准测试结果对象。
+     */
     private record BenchmarkResult(double frontendSeconds,
                                    double totalSeconds,
                                    long attempts,
@@ -201,6 +231,9 @@ public final class AsyncCommitPrototypeBenchmark {
                                    long primaryCommits,
                                    long secondaryCommits,
                                    int maxPendingSecondary) {
+        /**
+         * 将基准测试结果格式化为一行文本。
+         */
         private String toLine(Config config) {
             double frontendCommitTps = committed / frontendSeconds;
             double secondaryFinalizeTps = secondaryCommits / totalSeconds;
@@ -222,6 +255,9 @@ public final class AsyncCommitPrototypeBenchmark {
         }
     }
 
+    /**
+     * 异步提交原型协调器。
+     */
     private static final class AsyncCommitCoordinator implements AutoCloseable {
         private final TimestampOracle timestampOracle;
         private final TransactionMetadataStore metadataStore;
@@ -233,6 +269,9 @@ public final class AsyncCommitPrototypeBenchmark {
         private final AtomicInteger pendingSecondary = new AtomicInteger();
         private final AtomicInteger maxPendingSecondary = new AtomicInteger();
 
+        /**
+         * 构造 AsyncCommitCoordinator 实例。
+         */
         private AsyncCommitCoordinator(TimestampOracle timestampOracle,
                                        TransactionMetadataStore metadataStore,
                                        Map<String, StorageAdapter> adapters,
@@ -244,6 +283,9 @@ public final class AsyncCommitPrototypeBenchmark {
             this.secondaryExecutor = Executors.newFixedThreadPool(secondaryFinalizeWorkers);
         }
 
+        /**
+         * 执行一次原型事务流程。
+         */
         private void execute(long sequence, boolean asyncCommit) {
             PrototypeTransaction tx = begin();
             try {
@@ -267,6 +309,9 @@ public final class AsyncCommitPrototypeBenchmark {
             }
         }
 
+        /**
+         * 开启一个新事务。
+         */
         private PrototypeTransaction begin() {
             long txId = timestampOracle.nextTimestamp();
             long startTs = timestampOracle.nextTimestamp();
@@ -274,16 +319,25 @@ public final class AsyncCommitPrototypeBenchmark {
             return new PrototypeTransaction(txId, startTs);
         }
 
+        /**
+         * 执行原型事务预写。
+         */
         private void prewrite(PrototypeTransaction tx, String shardId) {
             adapters.get(shardId).prewrite(tx.txId(), tx.startTs(), tx.mutations(shardId));
             tx.markParticipant(shardId);
         }
 
+        /**
+         * 提交主分片写入。
+         */
         private void commitPrimary(PrototypeTransaction tx, long commitTs) {
             adapters.get(tx.primaryShard()).commit(tx.txId(), commitTs);
             primaryCommits.increment();
         }
 
+        /**
+         * 将从分片提交任务放入后台队列。
+         */
         private void enqueueSecondaryCommit(PrototypeTransaction tx, long commitTs) {
             for (String shardId : tx.secondaryShards()) {
                 incrementPending();
@@ -298,6 +352,9 @@ public final class AsyncCommitPrototypeBenchmark {
             }
         }
 
+        /**
+         * 提交全部从分片写入。
+         */
         private void commitSecondaries(PrototypeTransaction tx, long commitTs) {
             for (String shardId : tx.secondaryShards()) {
                 adapters.get(shardId).commit(tx.txId(), commitTs);
@@ -305,6 +362,9 @@ public final class AsyncCommitPrototypeBenchmark {
             }
         }
 
+        /**
+         * 安静回滚原型事务。
+         */
         private void rollbackQuietly(PrototypeTransaction tx) {
             if (tx.status() != TxStatus.ACTIVE) {
                 return;
@@ -321,29 +381,47 @@ public final class AsyncCommitPrototypeBenchmark {
             }
         }
 
+        /**
+         * 等待后台异步提交任务排空。
+         */
         private void awaitBackgroundDrain() throws InterruptedException {
             while (pendingSecondary.get() > 0) {
                 Thread.sleep(10L);
             }
         }
 
+        /**
+         * 返回主分片提交计数。
+         */
         private long primaryCommits() {
             return primaryCommits.sum();
         }
 
+        /**
+         * 返回从分片提交计数。
+         */
         private long secondaryCommits() {
             return secondaryCommits.sum();
         }
 
+        /**
+         * 返回最大待处理从分片提交数。
+         */
         private int maxPendingSecondary() {
             return maxPendingSecondary.get();
         }
 
+        /**
+         * 递增待处理从分片提交计数。
+         */
         private void incrementPending() {
             int value = pendingSecondary.incrementAndGet();
             maxPendingSecondary.accumulateAndGet(value, Math::max);
         }
 
+        /**
+         * 关闭资源或后台执行器。
+         */
         @Override
         public void close() throws InterruptedException {
             participantExecutor.shutdown();
@@ -352,6 +430,9 @@ public final class AsyncCommitPrototypeBenchmark {
             secondaryExecutor.awaitTermination(10, TimeUnit.SECONDS);
         }
 
+        /**
+         * 在多个参与分片上执行操作。
+         */
         private void runAcrossParticipants(Set<String> participants,
                                            Consumer<String> action,
                                            boolean parallel) {
@@ -390,58 +471,97 @@ public final class AsyncCommitPrototypeBenchmark {
         }
     }
 
+    /**
+     * 原型事务上下文。
+     */
     private static final class PrototypeTransaction {
         private final long txId;
         private final long startTs;
         private final Map<String, List<Mutation>> bufferedMutations = new LinkedHashMap<>();
         private TxStatus status = TxStatus.ACTIVE;
 
+        /**
+         * 构造 PrototypeTransaction 实例。
+         */
         private PrototypeTransaction(long txId, long startTs) {
             this.txId = txId;
             this.startTs = startTs;
         }
 
+        /**
+         * 返回事务编号。
+         */
         private long txId() {
             return txId;
         }
 
+        /**
+         * 返回事务开始时间戳。
+         */
         private long startTs() {
             return startTs;
         }
 
+        /**
+         * 缓存一次分片写入变更。
+         */
         private void buffer(String shardId, Mutation mutation) {
             bufferedMutations.computeIfAbsent(shardId, ignored -> new ArrayList<>()).add(mutation);
         }
 
+        /**
+         * 返回指定分片的写入变更列表。
+         */
         private List<Mutation> mutations(String shardId) {
             return bufferedMutations.getOrDefault(shardId, List.of());
         }
 
+        /**
+         * 标记事务参与分片。
+         */
         private void markParticipant(String shardId) {
             bufferedMutations.computeIfAbsent(shardId, ignored -> new ArrayList<>());
         }
 
+        /**
+         * 返回事务参与分片集合。
+         */
         private Set<String> participants() {
             return bufferedMutations.keySet();
         }
 
+        /**
+         * 返回原型事务主分片。
+         */
         private String primaryShard() {
             return "shard-1";
         }
 
+        /**
+         * 返回原型事务从分片列表。
+         */
         private List<String> secondaryShards() {
             return participants().stream().filter(shardId -> !shardId.equals(primaryShard())).toList();
         }
 
+        /**
+         * 返回事务状态。
+         */
         private TxStatus status() {
             return status;
         }
 
+        /**
+         * 返回事务状态。
+         */
         private void status(TxStatus status) {
             this.status = status;
         }
     }
 
+    /**
+     * 读取字符串环境变量配置。
+     */
     private static String env(String key, String defaultValue) {
         String value = System.getenv(key);
         return value == null || value.isBlank() ? defaultValue : value;

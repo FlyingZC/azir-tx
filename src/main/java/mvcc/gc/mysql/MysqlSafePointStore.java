@@ -10,15 +10,24 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 
+/**
+ * 基于 MySQL 的安全点存储实现。
+ */
 public final class MysqlSafePointStore implements SafePointStore {
     private static final String STORE_ID = "global";
 
     private final DataSource dataSource;
 
+    /**
+     * 构造 MysqlSafePointStore 实例。
+     */
     public MysqlSafePointStore(DataSource dataSource) {
         this.dataSource = dataSource;
     }
 
+    /**
+     * 初始化所需的数据库表结构或运行环境。
+     */
     public void initialize(long initialSafePoint) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement create = connection.prepareStatement("""
@@ -41,6 +50,9 @@ public final class MysqlSafePointStore implements SafePointStore {
         }
     }
 
+    /**
+     * 返回当前安全点时间戳。
+     */
     @Override
     public long currentSafePoint() {
         try (Connection connection = dataSource.getConnection();
@@ -59,6 +71,9 @@ public final class MysqlSafePointStore implements SafePointStore {
         }
     }
 
+    /**
+     * 尝试将安全点推进到候选时间戳。
+     */
     @Override
     public long advanceTo(long candidateSafePoint) {
         try (Connection connection = dataSource.getConnection()) {
@@ -94,6 +109,9 @@ public final class MysqlSafePointStore implements SafePointStore {
         }
     }
 
+    /**
+     * 将底层存储异常包装为 MVCC 异常。
+     */
     private MvccException storageError(String message, SQLException ex) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, null, ex);
     }

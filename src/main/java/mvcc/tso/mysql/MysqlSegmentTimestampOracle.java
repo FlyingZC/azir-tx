@@ -12,6 +12,9 @@ import java.sql.SQLException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
+/**
+ * 基于 MySQL 号段分配的时间戳分配器。
+ */
 public final class MysqlSegmentTimestampOracle implements TimestampOracle {
     private static final String SEQUENCE_NAME = "global";
 
@@ -21,6 +24,9 @@ public final class MysqlSegmentTimestampOracle implements TimestampOracle {
     private final AtomicLong max = new AtomicLong(0L);
     private final LongAdder segmentAllocations = new LongAdder();
 
+    /**
+     * 构造 MysqlSegmentTimestampOracle 实例。
+     */
     public MysqlSegmentTimestampOracle(DataSource dataSource, int batchSize) {
         if (batchSize < 1) {
             throw new IllegalArgumentException("batchSize must be >= 1");
@@ -29,6 +35,9 @@ public final class MysqlSegmentTimestampOracle implements TimestampOracle {
         this.batchSize = batchSize;
     }
 
+    /**
+     * 初始化所需的数据库表结构或运行环境。
+     */
     public void initialize(long initialValue) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement create = connection.prepareStatement("""
@@ -51,6 +60,9 @@ public final class MysqlSegmentTimestampOracle implements TimestampOracle {
         }
     }
 
+    /**
+     * 分配下一个全局单调递增时间戳。
+     */
     @Override
     public long nextTimestamp() {
         while (true) {
@@ -62,6 +74,9 @@ public final class MysqlSegmentTimestampOracle implements TimestampOracle {
         }
     }
 
+    /**
+     * 从底层分配器补充本地时间戳缓存。
+     */
     private synchronized void refill() {
         if (current.get() <= max.get()) {
             return;
@@ -89,6 +104,7 @@ public final class MysqlSegmentTimestampOracle implements TimestampOracle {
                 }
                 long start = currentValue + 1;
                 long end = currentValue + batchSize;
+                // 号段分配必须在持有行锁时推进数据库值，避免多个进程拿到重叠时间戳。
                 update.setLong(1, end);
                 update.setString(2, SEQUENCE_NAME);
                 update.executeUpdate();
@@ -107,10 +123,16 @@ public final class MysqlSegmentTimestampOracle implements TimestampOracle {
         }
     }
 
+    /**
+     * 将底层存储异常包装为 MVCC 异常。
+     */
     private MvccException storageError(String message, SQLException ex) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, null, ex);
     }
 
+    /**
+     * 返回已分配的时间戳号段次数。
+     */
     public long segmentAllocations() {
         return segmentAllocations.sum();
     }

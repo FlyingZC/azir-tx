@@ -19,13 +19,22 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * 基于 MySQL 的事务元数据存储实现，负责事务状态表的读写。
+ */
 public final class MysqlTransactionMetadataStore implements TransactionMetadataStore {
     private final DataSource dataSource;
 
+    /**
+     * 构造 MysqlTransactionMetadataStore 实例。
+     */
     public MysqlTransactionMetadataStore(DataSource dataSource) {
         this.dataSource = dataSource;
     }
 
+    /**
+     * 初始化所需的数据库表结构或运行环境。
+     */
     public void initialize() {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
@@ -44,21 +53,33 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
+    /**
+     * 创建组件实例或事务记录。
+     */
     @Override
     public TxRecord create(long txId, long startTs, IsolationLevel isolationLevel) {
         return insertRecord(txId, startTs, isolationLevel, Set.of(), TxStatus.ACTIVE, null);
     }
 
+    /**
+     * 创建 PREPARING 状态的事务元数据记录。
+     */
     @Override
     public TxRecord createPreparing(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants) {
         return insertRecord(txId, startTs, isolationLevel, participants, TxStatus.PREPARING, null);
     }
 
+    /**
+     * 创建 COMMITTED 状态的事务元数据记录。
+     */
     @Override
     public TxRecord createCommitted(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants, long commitTs) {
         return insertRecord(txId, startTs, isolationLevel, participants, TxStatus.COMMITTED, commitTs);
     }
 
+    /**
+     * 插入一条事务元数据记录。
+     */
     private TxRecord insertRecord(long txId,
                                   long startTs,
                                   IsolationLevel isolationLevel,
@@ -87,6 +108,9 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
+    /**
+     * 读取指定键或事务的当前可见数据。
+     */
     @Override
     public Optional<TxRecord> get(long txId) {
         try (Connection connection = dataSource.getConnection();
@@ -107,46 +131,73 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
+    /**
+     * 将事务标记为 PREPARING 状态。
+     */
     @Override
     public TxRecord markPreparing(long txId, Set<String> participants) {
         return updateRecord(txId, participants, TxStatus.PREPARING, null, false);
     }
 
+    /**
+     * 将事务标记为 COMMITTED 状态。
+     */
     @Override
     public TxRecord markCommitted(long txId, long commitTs) {
         return updateRecord(txId, null, TxStatus.COMMITTED, commitTs, true);
     }
 
+    /**
+     * 将事务标记为 COMMITTED 状态。
+     */
     @Override
     public TxRecord markCommitted(long txId, Set<String> participants, long commitTs) {
         return updateRecord(txId, participants, TxStatus.COMMITTED, commitTs, true);
     }
 
+    /**
+     * 快速持久化 PREPARING 状态。
+     */
     @Override
     public void persistPreparing(long txId, Set<String> participants) {
         fastUpdateStatus(txId, participants, TxStatus.PREPARING, null, false);
     }
 
+    /**
+     * 快速持久化 COMMITTED 状态。
+     */
     @Override
     public void persistCommitted(long txId, long commitTs) {
         fastUpdateStatus(txId, null, TxStatus.COMMITTED, commitTs, true);
     }
 
+    /**
+     * 快速持久化 COMMITTED 状态。
+     */
     @Override
     public void persistCommitted(long txId, Set<String> participants, long commitTs) {
         fastUpdateStatus(txId, participants, TxStatus.COMMITTED, commitTs, true);
     }
 
+    /**
+     * 将单分片事务标记为已提交。
+     */
     @Override
     public TxRecord markSingleShardCommitted(long txId, String participant, long commitTs) {
         return updateRecord(txId, Set.of(participant), TxStatus.COMMITTED, commitTs, true);
     }
 
+    /**
+     * 将事务标记为 ABORTED 状态。
+     */
     @Override
     public TxRecord markAborted(long txId) {
         return updateRecord(txId, null, TxStatus.ABORTED, null, false);
     }
 
+    /**
+     * 查询当前最老的活跃事务开始时间戳。
+     */
     @Override
     public Optional<Long> oldestActiveStartTs() {
         try (Connection connection = dataSource.getConnection();
@@ -165,6 +216,9 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
+    /**
+     * 在事务内锁定并更新事务元数据记录。
+     */
     private TxRecord updateRecord(long txId,
                                   Set<String> participants,
                                   TxStatus targetStatus,
@@ -175,6 +229,7 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
             try {
                 TxRecord current = lockRecord(connection, txId);
                 if (current.status() == TxStatus.COMMITTED || current.status() == TxStatus.ABORTED) {
+                    // 终态事务保持幂等，恢复或重复提交时直接返回已有记录。
                     connection.commit();
                     return current;
                 }
@@ -217,6 +272,9 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
+    /**
+     * 使用单条 SQL 快速更新事务状态。
+     */
     private void fastUpdateStatus(long txId,
                                   Set<String> participants,
                                   TxStatus targetStatus,
@@ -268,6 +326,9 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
+    /**
+     * 锁定并读取指定事务元数据记录。
+     */
     private TxRecord lockRecord(Connection connection, long txId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select tx_id, start_ts, isolation_level, status, commit_ts, participants
@@ -285,6 +346,9 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
+    /**
+     * 将结果集映射为事务元数据对象。
+     */
     private static TxRecord mapRecord(ResultSet resultSet) throws SQLException {
         Long commitTs = resultSet.getObject("commit_ts") == null ? null : resultSet.getLong("commit_ts");
         return new TxRecord(
@@ -297,10 +361,16 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         );
     }
 
+    /**
+     * 将参与分片集合编码为存储字符串。
+     */
     private static String encodeParticipants(Set<String> participants) {
         return participants.stream().sorted().collect(Collectors.joining(","));
     }
 
+    /**
+     * 将存储字符串解码为参与分片集合。
+     */
     private static Set<String> decodeParticipants(String value) {
         if (value == null || value.isBlank()) {
             return Set.of();
@@ -310,6 +380,9 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
+    /**
+     * 将底层存储异常包装为 MVCC 异常。
+     */
     private MvccException storageError(Long txId, String message, SQLException ex) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, txId, ex);
     }
