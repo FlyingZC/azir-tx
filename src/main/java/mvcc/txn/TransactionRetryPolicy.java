@@ -1,6 +1,5 @@
 package mvcc.txn;
 
-import mvcc.common.ErrorCode;
 import mvcc.common.MvccException;
 
 import java.util.Objects;
@@ -39,10 +38,7 @@ public record TransactionRetryPolicy(int maxAttempts,
         if (attempt >= maxAttempts) {
             return false;
         }
-        return switch (exception.errorCode()) {
-            case LOCK_CONFLICT, LOCK_WAIT_TIMEOUT, WRITE_CONFLICT -> exception.retryable();
-            default -> false;
-        };
+        return TransientStorageConflictDetector.isTransientConflict(exception);
     }
 
     long nextDelayMillis(int attempt) {

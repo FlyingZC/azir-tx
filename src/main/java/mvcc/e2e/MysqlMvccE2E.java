@@ -255,9 +255,9 @@ public final class MysqlMvccE2E {
                           boolean resetTables) {
         private static Config fromEnv() {
             return new Config(
-                    env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:3306/control"),
-                    env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:3306/shard_1"),
-                    env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:3306/shard_2"),
+                    env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control"),
+                    env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_1"),
+                    env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_2"),
                     env("AZIR_TX_USERNAME", "root"),
                     env("AZIR_TX_PASSWORD", "root"),
                     Boolean.parseBoolean(env("AZIR_TX_RESET", "true"))

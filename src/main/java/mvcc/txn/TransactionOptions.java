@@ -6,7 +6,8 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
                                  TransactionRetryPolicy retryPolicy,
                                  CrossShardCommitPolicy crossShardCommitPolicy,
                                  boolean bufferWrites,
-                                 boolean lazyBeginMetadata) {
+                                 boolean lazyBeginMetadata,
+                                 boolean deferIntentCleanup) {
     public TransactionOptions {
         Objects.requireNonNull(lockWaitPolicy, "lockWaitPolicy");
         Objects.requireNonNull(retryPolicy, "retryPolicy");
@@ -19,6 +20,7 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
                 TransactionRetryPolicy.noRetry(),
                 CrossShardCommitPolicy.serial(),
                 false,
+                false,
                 false
         );
     }
@@ -27,9 +29,10 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
         return new TransactionOptions(
                 LockWaitPolicy.mysqlLikeDefaults(),
                 TransactionRetryPolicy.mysqlLikeDefaults(),
-                CrossShardCommitPolicy.asyncParallel(8),
+                CrossShardCommitPolicy.asyncParallel(16),
                 true,
-                true
+                true,
+                false
         );
     }
 }

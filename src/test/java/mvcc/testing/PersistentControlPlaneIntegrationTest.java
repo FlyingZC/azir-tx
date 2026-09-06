@@ -137,6 +137,52 @@ class PersistentControlPlaneIntegrationTest {
     }
 
     @Test
+    void restartedCoordinatorShouldRecoverCommittedTransactionWithoutPreparingMetadataStep() {
+        MysqlTimestampOracle tso1 = new MysqlTimestampOracle(controlDataSource);
+        TransactionMetadataStore metadataStore1 = new MysqlTransactionMetadataStore(controlDataSource);
+        TransactionManager manager1 = new TransactionManager(
+                tso1,
+                metadataStore1,
+                new mvcc.txn.TransactionOptions(
+                        mvcc.txn.LockWaitPolicy.mysqlLikeDefaults(),
+                        mvcc.txn.TransactionRetryPolicy.mysqlLikeDefaults(),
+                        mvcc.txn.CrossShardCommitPolicy.parallel(),
+                        true,
+                        false,
+                        false
+                ),
+                Map.of(
+                        shard1.shardId(), shard1,
+                        shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)
+                )
+        );
+
+        Transaction tx = manager1.begin(IsolationLevel.REPEATABLE_READ);
+        manager1.put(tx, "shard-1", "acct:no-prepare:1", bytes("100"));
+        manager1.put(tx, "shard-2", "acct:no-prepare:2", bytes("200"));
+
+        MvccException error = assertThrows(MvccException.class, () -> manager1.commit(tx));
+        assertTrue(error.retryable());
+
+        MysqlTimestampOracle tso2 = new MysqlTimestampOracle(controlDataSource);
+        TransactionMetadataStore metadataStore2 = new MysqlTransactionMetadataStore(controlDataSource);
+        RecoveryManager recoveryManager = new RecoveryManager(metadataStore2, Map.of(
+                shard1.shardId(), shard1,
+                shard2.shardId(), shard2
+        ));
+
+        recoveryManager.recover(tx.txId());
+
+        TransactionManager manager2 = new TransactionManager(tso2, metadataStore2, Map.of(
+                shard1.shardId(), shard1,
+                shard2.shardId(), shard2
+        ));
+        Transaction reader = manager2.begin(IsolationLevel.READ_COMMITTED);
+        assertEquals("100", readString(manager2, reader, "shard-1", "acct:no-prepare:1"));
+        assertEquals("200", readString(manager2, reader, "shard-2", "acct:no-prepare:2"));
+    }
+
+    @Test
     void backgroundRecoveryRunnerShouldScanLingeringIntentsAndRecover() {
         MysqlTimestampOracle tso1 = new MysqlTimestampOracle(controlDataSource);
         TransactionMetadataStore metadataStore1 = new MysqlTransactionMetadataStore(controlDataSource);

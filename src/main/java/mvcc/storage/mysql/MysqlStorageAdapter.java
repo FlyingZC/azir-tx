@@ -153,12 +153,14 @@ public class MysqlStorageAdapter implements StorageAdapter {
     public void prepare(long txId) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
-                     select count(*) from mvcc_intent where tx_id = ?
+                     select 1
+                     from mvcc_intent
+                     where tx_id = ?
+                     limit 1
                      """)) {
             statement.setLong(1, txId);
             try (ResultSet resultSet = statement.executeQuery()) {
-                resultSet.next();
-                if (resultSet.getLong(1) == 0L) {
+                if (!resultSet.next()) {
                     throw new MvccException(ErrorCode.ILLEGAL_STATE, "no intent to prepare for tx " + txId, false, txId);
                 }
             }
@@ -187,17 +189,15 @@ public class MysqlStorageAdapter implements StorageAdapter {
 
     @Override
     public void commit(long txId, long commitTs, List<Mutation> mutations) {
+        commit(txId, commitTs, mutations, true);
+    }
+
+    @Override
+    public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
-                List<IntentRow> rows = mutations.stream()
-                        .map(mutation -> new IntentRow(
-                                encodeKey(mutation.key()),
-                                mutation.type() == MutationType.DELETE ? 1 : 0,
-                                mutation.value()
-                        ))
-                        .toList();
-                commitKnownRowsInternal(connection, txId, commitTs, rows);
+                commitKnownMutationsInternal(connection, txId, commitTs, mutations, cleanupIntents);
                 connection.commit();
             } catch (SQLException | RuntimeException ex) {
                 connection.rollback();
@@ -207,6 +207,47 @@ public class MysqlStorageAdapter implements StorageAdapter {
             }
         } catch (SQLException ex) {
             throw storageError(txId, "commit failed", ex);
+        }
+    }
+
+    @Override
+    public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                directCommitInternal(connection, txId, startTs, commitTs, mutations);
+                connection.commit();
+            } catch (SQLException | RuntimeException ex) {
+                connection.rollback();
+                throw ex;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException ex) {
+            throw storageError(txId, "direct commit failed", ex);
+        }
+    }
+
+    @Override
+    public void cleanupIntents(long txId, List<Mutation> mutations) {
+        cleanupIntents(txId);
+    }
+
+    @Override
+    public void cleanupIntents(long txId) {
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                deleteIntentsByTransaction(connection, txId);
+                connection.commit();
+            } catch (SQLException | RuntimeException ex) {
+                connection.rollback();
+                throw ex;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException ex) {
+            throw storageError(txId, "cleanup intents failed", ex);
         }
     }
 
@@ -256,8 +297,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
     public Set<Long> findPendingTransactionIds(int limit) {
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement("""
-                     select distinct tx_id
+                     select tx_id
                      from mvcc_intent
+                     group by tx_id
                      order by tx_id
                      limit ?
                      """)) {
@@ -562,32 +604,102 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    private void commitKnownRowsInternal(Connection connection, long txId, long commitTs, List<IntentRow> rows) throws SQLException {
+    private void commitKnownMutationsInternal(Connection connection,
+                                             long txId,
+                                             long commitTs,
+                                             List<Mutation> mutations,
+                                             boolean cleanupIntents) throws SQLException {
         try (PreparedStatement insert = connection.prepareStatement("""
                 insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value)
                 values (?, ?, ?, ?, ?)
-                """);
-             PreparedStatement delete = connection.prepareStatement("""
-                delete from mvcc_intent where user_key = ? and tx_id = ?
                 """)) {
-            for (IntentRow row : rows) {
-                insert.setBytes(1, row.userKey());
+            for (Mutation mutation : mutations) {
+                insert.setBytes(1, encodeKey(mutation.key()));
                 insert.setLong(2, commitTs);
                 insert.setLong(3, txId);
-                insert.setInt(4, row.deleted());
-                if (row.value() == null) {
+                insert.setInt(4, mutation.type() == MutationType.DELETE ? 1 : 0);
+                if (mutation.value() == null) {
                     insert.setNull(5, Types.BLOB);
                 } else {
-                    insert.setBytes(5, row.value());
+                    insert.setBytes(5, mutation.value());
                 }
                 insert.addBatch();
+            }
+            if (!mutations.isEmpty()) {
+                insert.executeBatch();
+            }
+        }
+        if (cleanupIntents) {
+            deleteIntentsByTransaction(connection, txId);
+        }
+    }
 
-                delete.setBytes(1, row.userKey());
+    private void directCommitInternal(Connection connection,
+                                      long txId,
+                                      long startTs,
+                                      long commitTs,
+                                      List<Mutation> mutations) throws SQLException {
+        try (PreparedStatement conflictCheck = connection.prepareStatement("""
+                select 1
+                from mvcc_data
+                where user_key = ? and commit_ts > ?
+                limit 1
+                """);
+             PreparedStatement insert = connection.prepareStatement("""
+                insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value)
+                values (?, ?, ?, ?, ?)
+                """)) {
+            for (Mutation mutation : mutations) {
+                conflictCheck.setBytes(1, encodeKey(mutation.key()));
+                conflictCheck.setLong(2, startTs);
+                try (ResultSet resultSet = conflictCheck.executeQuery()) {
+                    if (resultSet.next()) {
+                        throw new MvccException(
+                                ErrorCode.WRITE_CONFLICT,
+                                "write conflict on key " + mutation.key() + ", newer version exists",
+                                true,
+                                txId
+                        );
+                    }
+                }
+            }
+            for (Mutation mutation : mutations) {
+                insert.setBytes(1, encodeKey(mutation.key()));
+                insert.setLong(2, commitTs);
+                insert.setLong(3, txId);
+                insert.setInt(4, mutation.type() == MutationType.DELETE ? 1 : 0);
+                if (mutation.value() == null) {
+                    insert.setNull(5, Types.BLOB);
+                } else {
+                    insert.setBytes(5, mutation.value());
+                }
+                insert.addBatch();
+            }
+            if (!mutations.isEmpty()) {
+                insert.executeBatch();
+            }
+        }
+    }
+
+    private void deleteIntentsByTransaction(Connection connection, long txId) throws SQLException {
+        try (PreparedStatement delete = connection.prepareStatement("""
+                delete from mvcc_intent where tx_id = ?
+                """)) {
+            delete.setLong(1, txId);
+            delete.executeUpdate();
+        }
+    }
+
+    private void deleteKnownIntents(Connection connection, long txId, List<byte[]> userKeys) throws SQLException {
+        try (PreparedStatement delete = connection.prepareStatement("""
+                delete from mvcc_intent where user_key = ? and tx_id = ?
+                """)) {
+            for (byte[] userKey : userKeys) {
+                delete.setBytes(1, userKey);
                 delete.setLong(2, txId);
                 delete.addBatch();
             }
-            if (!rows.isEmpty()) {
-                insert.executeBatch();
+            if (!userKeys.isEmpty()) {
                 delete.executeBatch();
             }
         }

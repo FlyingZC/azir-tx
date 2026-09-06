@@ -6,7 +6,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import javax.sql.DataSource;
 
 public final class MysqlDataSourceFactory {
-    private static final int DEFAULT_MAX_POOL_SIZE = 16;
+    private static final int DEFAULT_MAX_POOL_SIZE = 64;
     private static final int DEFAULT_MIN_IDLE = 2;
     private static final long DEFAULT_CONNECTION_TIMEOUT_MS = 3_000L;
 

@@ -3,6 +3,7 @@ package mvcc.testing;
 import mvcc.api.Transaction;
 import mvcc.api.TransactionCommitMode;
 import mvcc.api.TransactionCommitResult;
+import mvcc.common.ErrorCode;
 import mvcc.common.IsolationLevel;
 import mvcc.common.MvccException;
 import mvcc.metadata.InMemoryTransactionMetadataStore;
@@ -33,6 +34,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
 import java.util.Optional;
@@ -151,6 +153,7 @@ class MysqlMvccIntegrationTest {
                         TransactionRetryPolicy.noRetry(),
                         CrossShardCommitPolicy.parallel(),
                         true,
+                        false,
                         false
                 ),
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
@@ -181,6 +184,7 @@ class MysqlMvccIntegrationTest {
                         TransactionRetryPolicy.noRetry(),
                         CrossShardCommitPolicy.parallel(),
                         true,
+                        false,
                         false
                 ),
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
@@ -196,6 +200,60 @@ class MysqlMvccIntegrationTest {
         assertEquals("right", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "buffered:commit:2"));
         assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
         assertEquals(0, countRows(shard2DataSource, "mvcc_intent"));
+    }
+
+    @Test
+    void singleShardBufferedCommitShouldBypassIntentWritePath() throws Exception {
+        TransactionManager bufferedManager = new TransactionManager(
+                tso,
+                metadataStore,
+                new TransactionOptions(
+                        LockWaitPolicy.failFast(),
+                        TransactionRetryPolicy.noRetry(),
+                        CrossShardCommitPolicy.parallel(),
+                        true,
+                        false,
+                        false
+                ),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = bufferedManager.begin(IsolationLevel.REPEATABLE_READ);
+        bufferedManager.put(tx, "shard-1", "single:buffered:1", bytes("v1"));
+        bufferedManager.put(tx, "shard-1", "single:buffered:2", bytes("v2"));
+
+        bufferedManager.commit(tx);
+
+        assertEquals("v1", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:buffered:1"));
+        assertEquals("v2", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:buffered:2"));
+        assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
+        assertEquals(2, countRows(shard1DataSource, "mvcc_data"));
+    }
+
+    @Test
+    void singleShardBufferedCommitShouldSkipMetadataWhenLazyBeginEnabled() {
+        TransactionMetadataStore lazyMetadataStore = new InMemoryTransactionMetadataStore();
+        TransactionManager bufferedManager = new TransactionManager(
+                tso,
+                lazyMetadataStore,
+                new TransactionOptions(
+                        LockWaitPolicy.failFast(),
+                        TransactionRetryPolicy.noRetry(),
+                        CrossShardCommitPolicy.parallel(),
+                        true,
+                        true,
+                        false
+                ),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = bufferedManager.begin(IsolationLevel.REPEATABLE_READ);
+        bufferedManager.put(tx, "shard-1", "single:lazy-metadata:1", bytes("v1"));
+
+        bufferedManager.commit(tx);
+
+        assertTrue(lazyMetadataStore.get(tx.txId()).isEmpty());
+        assertEquals("v1", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:lazy-metadata:1"));
     }
 
     @Test
@@ -339,6 +397,7 @@ class MysqlMvccIntegrationTest {
                         new TransactionRetryPolicy(3, 5L, 20L, 2.0d, false),
                         CrossShardCommitPolicy.serial(),
                         false,
+                        false,
                         false
                 ),
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
@@ -386,6 +445,7 @@ class MysqlMvccIntegrationTest {
                         new TransactionRetryPolicy(3, 5L, 20L, 2.0d, false),
                         CrossShardCommitPolicy.serial(),
                         false,
+                        false,
                         false
                 ),
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
@@ -406,6 +466,64 @@ class MysqlMvccIntegrationTest {
         assertEquals(2, countVersionsForKey(shard1DataSource, "retry:001"));
         Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         assertEquals("second", readString(reader, "shard-1", "retry:001"));
+    }
+
+    @Test
+    void putShouldWaitThroughDeadlockShapedStorageUnavailable() {
+        TransactionManager waitManager = new TransactionManager(
+                tso,
+                metadataStore,
+                new TransactionOptions(
+                        new LockWaitPolicy(ConflictMode.WAIT, 1_000L, 1L, 5L, 2.0d, false),
+                        TransactionRetryPolicy.noRetry(),
+                        CrossShardCommitPolicy.serial(),
+                        false,
+                        false,
+                        false
+                ),
+                Map.of(
+                        shard1.shardId(), new FailOnceOnPrewriteStorageAdapter(shard1, deadlockLikeStorageError(1L)),
+                        shard2.shardId(), shard2
+                )
+        );
+
+        Transaction tx = waitManager.begin(IsolationLevel.REPEATABLE_READ);
+        waitManager.put(tx, "shard-1", "deadlock:wait:001", bytes("v1"));
+        waitManager.commit(tx);
+
+        Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
+        assertEquals("v1", readString(reader, "shard-1", "deadlock:wait:001"));
+    }
+
+    @Test
+    void executeShouldRetryWholeTransactionAfterDeadlockShapedStorageUnavailable() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        TransactionManager retryingManager = new TransactionManager(
+                tso,
+                metadataStore,
+                new TransactionOptions(
+                        LockWaitPolicy.failFast(),
+                        new TransactionRetryPolicy(3, 1L, 5L, 2.0d, false),
+                        CrossShardCommitPolicy.serial(),
+                        false,
+                        false,
+                        false
+                ),
+                Map.of(
+                        shard1.shardId(), new FailOnceOnPrewriteStorageAdapter(shard1, deadlockLikeStorageError(2L)),
+                        shard2.shardId(), shard2
+                )
+        );
+
+        retryingManager.execute(IsolationLevel.REPEATABLE_READ, tx -> {
+            attempts.incrementAndGet();
+            retryingManager.put(tx, "shard-1", "deadlock:retry:001", bytes("v2"));
+            return null;
+        });
+
+        assertEquals(2, attempts.get());
+        Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
+        assertEquals("v2", readString(reader, "shard-1", "deadlock:retry:001"));
     }
 
     private void seedCommittedValue(String shardId, String key, String value) {
@@ -492,6 +610,16 @@ class MysqlMvccIntegrationTest {
         }
     }
 
+    private static MvccException deadlockLikeStorageError(Long txId) {
+        return new MvccException(
+                ErrorCode.STORAGE_UNAVAILABLE,
+                "simulated deadlock from mysql",
+                true,
+                txId,
+                new SQLException("Deadlock found when trying to get lock", "40001", 1213)
+        );
+    }
+
     private static final class FailOnceOnCommitStorageAdapter implements StorageAdapter {
         private final StorageAdapter delegate;
         private final AtomicBoolean shouldFail = new AtomicBoolean(true);
@@ -535,6 +663,70 @@ class MysqlMvccIntegrationTest {
             if (shouldFail.compareAndSet(true, false)) {
                 throw new IllegalStateException("simulated commit failure");
             }
+            delegate.commit(txId, commitTs);
+        }
+
+        @Override
+        public void abort(long txId) {
+            delegate.abort(txId);
+        }
+
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return delegate.findPendingTransactionIds(limit);
+        }
+
+        @Override
+        public int gc(long safePoint, int limit) {
+            return delegate.gc(safePoint, limit);
+        }
+    }
+
+    private static final class FailOnceOnPrewriteStorageAdapter implements StorageAdapter {
+        private final StorageAdapter delegate;
+        private final AtomicBoolean shouldFail = new AtomicBoolean(true);
+        private final MvccException failure;
+
+        private FailOnceOnPrewriteStorageAdapter(StorageAdapter delegate, MvccException failure) {
+            this.delegate = delegate;
+            this.failure = failure;
+        }
+
+        @Override
+        public String shardId() {
+            return delegate.shardId();
+        }
+
+        @Override
+        public void initialize() {
+            delegate.initialize();
+        }
+
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return delegate.get(context, key);
+        }
+
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return delegate.scan(context, keyRange);
+        }
+
+        @Override
+        public void prewrite(long txId, long startTs, java.util.List<mvcc.storage.Mutation> mutations) {
+            if (shouldFail.compareAndSet(true, false)) {
+                throw failure;
+            }
+            delegate.prewrite(txId, startTs, mutations);
+        }
+
+        @Override
+        public void prepare(long txId) {
+            delegate.prepare(txId);
+        }
+
+        @Override
+        public void commit(long txId, long commitTs) {
             delegate.commit(txId, commitTs);
         }
 

@@ -69,6 +69,11 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
 
     @Override
     public TxRecord markCommitted(long txId, long commitTs) {
+        return markCommitted(txId, null, commitTs);
+    }
+
+    @Override
+    public TxRecord markCommitted(long txId, Set<String> participants, long commitTs) {
         return records.compute(txId, (id, current) -> {
             TxRecord existing = requireRecord(id, current);
             if (existing.status() == TxStatus.ABORTED) {
@@ -77,7 +82,11 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
             if (existing.status() == TxStatus.COMMITTED) {
                 return existing;
             }
-            return existing.withCommitted(commitTs);
+            TxRecord next = existing.withCommitted(commitTs);
+            if (participants != null) {
+                next = next.withParticipants(new LinkedHashSet<>(participants));
+            }
+            return next;
         });
     }
 

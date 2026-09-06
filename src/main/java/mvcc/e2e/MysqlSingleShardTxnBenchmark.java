@@ -7,8 +7,8 @@ import mvcc.metadata.TransactionMetadataStore;
 import mvcc.metadata.mysql.MysqlTransactionMetadataStore;
 import mvcc.storage.mysql.MysqlDataSourceFactory;
 import mvcc.storage.mysql.MysqlStorageAdapter;
-import mvcc.tso.BatchingTimestampOracle;
 import mvcc.tso.TimestampOracle;
+import mvcc.tso.mysql.MysqlSegmentTimestampOracle;
 import mvcc.tso.mysql.MysqlTimestampOracle;
 import mvcc.txn.ConflictMode;
 import mvcc.txn.CrossShardCommitPolicy;
@@ -38,18 +38,23 @@ public final class MysqlSingleShardTxnBenchmark {
 
         try {
             MysqlTimestampOracle mysqlTso = new MysqlTimestampOracle(controlDataSource);
-            TimestampOracle tso = new BatchingTimestampOracle(mysqlTso, config.tsoBatchSize());
+            MysqlSegmentTimestampOracle segmentTso = new MysqlSegmentTimestampOracle(controlDataSource, config.tsoBatchSize());
+            TimestampOracle tso = config.segmentTso()
+                    ? segmentTso
+                    : mysqlTso;
             TransactionMetadataStore metadataStore = new MysqlTransactionMetadataStore(controlDataSource);
             MysqlStorageAdapter shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource);
 
             shard1.initialize();
             mysqlTso.initialize(100);
+            segmentTso.initialize(100);
             ((MysqlTransactionMetadataStore) metadataStore).initialize();
 
             if (config.resetTables()) {
                 reset(controlDataSource, "mvcc_txn", "mvcc_tso");
                 reset(shard1DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
                 mysqlTso.initialize(100);
+                segmentTso.initialize(100);
                 ((MysqlTransactionMetadataStore) metadataStore).initialize();
             }
 
@@ -74,6 +79,7 @@ public final class MysqlSingleShardTxnBenchmark {
                             ),
                             CrossShardCommitPolicy.serial(),
                             config.bufferWrites(),
+                            config.lazyBeginMetadata(),
                             false
                     ),
                     Map.of(shard1.shardId(), shard1)
@@ -183,12 +189,14 @@ public final class MysqlSingleShardTxnBenchmark {
                           long retryBackoffMaxMs,
                           double retryBackoffMultiplier,
                           boolean retryBackoffJitter,
+                          boolean segmentTso,
                           int tsoBatchSize,
-                          boolean bufferWrites) {
+                          boolean bufferWrites,
+                          boolean lazyBeginMetadata) {
         private static Config fromEnv() {
             return new Config(
-                    env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:3306/control"),
-                    env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:3306/shard_1"),
+                    env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control"),
+                    env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_1"),
                     env("AZIR_TX_USERNAME", "root"),
                     env("AZIR_TX_PASSWORD", "root"),
                     Boolean.parseBoolean(env("AZIR_TX_RESET", "true")),
@@ -206,8 +214,10 @@ public final class MysqlSingleShardTxnBenchmark {
                     Long.parseLong(env("AZIR_TX_RETRY_BACKOFF_MAX_MS", "100")),
                     Double.parseDouble(env("AZIR_TX_RETRY_BACKOFF_MULTIPLIER", "2.0")),
                     Boolean.parseBoolean(env("AZIR_TX_RETRY_BACKOFF_JITTER", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_SEGMENT_TSO", "true")),
                     Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "256")),
-                    Boolean.parseBoolean(env("AZIR_TX_BUFFER_WRITES", "true"))
+                    Boolean.parseBoolean(env("AZIR_TX_BUFFER_WRITES", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_LAZY_BEGIN_METADATA", "true"))
             );
         }
     }
@@ -227,8 +237,10 @@ public final class MysqlSingleShardTxnBenchmark {
                     + " mode=" + (config.conflictMode() ? "conflict" : "no_conflict")
                     + " conflict_mode=" + config.conflictModeSetting()
                     + " retry_max_attempts=" + config.maxAttempts()
+                    + " segment_tso=" + config.segmentTso()
                     + " tso_batch_size=" + config.tsoBatchSize()
                     + " buffer_writes=" + config.bufferWrites()
+                    + " lazy_begin_metadata=" + config.lazyBeginMetadata()
                     + " attempts=" + attempts
                     + " committed=" + committed
                     + " conflicts=" + conflicts

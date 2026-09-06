@@ -197,7 +197,7 @@ public final class MysqlLocalTxnBenchmark {
                           boolean conflictMode) {
         private static Config fromEnv() {
             return new Config(
-                    env("AZIR_TX_LOCAL_BENCH_JDBC", "jdbc:mysql://127.0.0.1:3306/single_tx"),
+                    env("AZIR_TX_LOCAL_BENCH_JDBC", "jdbc:mysql://127.0.0.1:23306/single_tx"),
                     env("AZIR_TX_USERNAME", "root"),
                     env("AZIR_TX_PASSWORD", "root"),
                     Boolean.parseBoolean(env("AZIR_TX_RESET", "true")),

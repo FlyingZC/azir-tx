@@ -27,6 +27,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -38,6 +39,7 @@ public final class TransactionManager implements AutoCloseable {
     private final TransactionOptions options;
     private final ExecutorService participantExecutor;
     private final ExecutorService asyncCommitExecutor;
+    private final ExecutorService intentCleanupExecutor;
 
     public TransactionManager(TimestampOracle timestampOracle,
                               TransactionMetadataStore metadataStore,
@@ -74,7 +76,18 @@ public final class TransactionManager implements AutoCloseable {
                         .name("mvcc-participant-", 0)
                         .factory())
                 : null;
-        this.asyncCommitExecutor = options.crossShardCommitPolicy().asyncCommit() ? participantExecutor : null;
+        this.asyncCommitExecutor = options.crossShardCommitPolicy().asyncCommit()
+                ? Executors.newFixedThreadPool(
+                options.crossShardCommitPolicy().asyncCommitWorkers(),
+                namedFactory("mvcc-async-commit-")
+        )
+                : null;
+        this.intentCleanupExecutor = options.crossShardCommitPolicy().asyncCommit() && options.deferIntentCleanup()
+                ? Executors.newFixedThreadPool(
+                options.crossShardCommitPolicy().asyncCommitWorkers(),
+                namedFactory("mvcc-intent-cleanup-")
+        )
+                : null;
     }
 
     public Transaction begin(IsolationLevel isolationLevel) {
@@ -162,21 +175,15 @@ public final class TransactionManager implements AutoCloseable {
             return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
         }
 
-        prewriteBufferedMutations(tx);
-
         if (tx.participants().size() == 1) {
             String participant = tx.participants().iterator().next();
             long commitTs = timestampOracle.nextTimestamp();
-            if (tx.metadataPersisted()) {
-                metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
-            } else if (options.lazyBeginMetadata()) {
-                metadataStore.createCommitted(tx.txId(), tx.startTs(), tx.isolationLevel(), Set.of(participant), commitTs);
-                tx.metadataPersisted(true);
-            } else {
+            boolean skipMetadataFastPath = options.lazyBeginMetadata() && !tx.metadataPersisted();
+            if (!skipMetadataFastPath) {
                 metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
             }
             try {
-                commitParticipant(tx, participant, commitTs);
+                directCommitSingleShardParticipant(tx, participant, commitTs);
             } catch (RuntimeException ex) {
                 throw new MvccException(
                         ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -190,16 +197,19 @@ public final class TransactionManager implements AutoCloseable {
             return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
         }
 
-        if (tx.metadataPersisted()) {
-            metadataStore.markPreparing(tx.txId(), tx.participants());
-        } else if (options.lazyBeginMetadata()) {
-            metadataStore.createPreparing(tx.txId(), tx.startTs(), tx.isolationLevel(), tx.participants());
-            tx.metadataPersisted(true);
-        } else {
-            metadataStore.markPreparing(tx.txId(), tx.participants());
-            tx.metadataPersisted(true);
-        }
-        if (requiresExplicitPreparePhase(tx.participants())) {
+        prewriteBufferedMutations(tx);
+
+        boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
+        if (explicitPrepareRequired) {
+            if (tx.metadataPersisted()) {
+                metadataStore.persistPreparing(tx.txId(), tx.participants());
+            } else if (options.lazyBeginMetadata()) {
+                metadataStore.createPreparing(tx.txId(), tx.startTs(), tx.isolationLevel(), tx.participants());
+                tx.metadataPersisted(true);
+            } else {
+                metadataStore.persistPreparing(tx.txId(), tx.participants());
+                tx.metadataPersisted(true);
+            }
             runAcrossParticipants(
                     tx.participants(),
                     participant -> adapter(participant).prepare(tx.txId()),
@@ -208,7 +218,17 @@ public final class TransactionManager implements AutoCloseable {
         }
 
         long commitTs = timestampOracle.nextTimestamp();
-        metadataStore.markCommitted(tx.txId(), commitTs);
+        if (explicitPrepareRequired) {
+            metadataStore.persistCommitted(tx.txId(), commitTs);
+        } else if (tx.metadataPersisted()) {
+            metadataStore.persistCommitted(tx.txId(), tx.participants(), commitTs);
+        } else if (options.lazyBeginMetadata()) {
+            metadataStore.createCommitted(tx.txId(), tx.startTs(), tx.isolationLevel(), tx.participants(), commitTs);
+            tx.metadataPersisted(true);
+        } else {
+            metadataStore.persistCommitted(tx.txId(), tx.participants(), commitTs);
+            tx.metadataPersisted(true);
+        }
         String primaryParticipant = primaryParticipant(tx.participants());
         try {
             commitParticipant(tx, primaryParticipant, commitTs);
@@ -244,14 +264,9 @@ public final class TransactionManager implements AutoCloseable {
 
     @Override
     public void close() {
-        if (participantExecutor != null) {
-            participantExecutor.shutdown();
-            try {
-                participantExecutor.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException ex) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        shutdownExecutor(intentCleanupExecutor);
+        shutdownExecutor(asyncCommitExecutor);
+        shutdownExecutor(participantExecutor);
     }
 
     private void scheduleAsyncSecondaryCommit(Transaction tx, long commitTs, Set<String> secondaryParticipants) {
@@ -380,8 +395,7 @@ public final class TransactionManager implements AutoCloseable {
 
     private boolean shouldWaitOnConflict(MvccException ex, LockWaitPolicy lockWaitPolicy) {
         return lockWaitPolicy.conflictMode() == ConflictMode.WAIT
-                && ex.errorCode() == ErrorCode.LOCK_CONFLICT
-                && ex.retryable();
+                && TransientStorageConflictDetector.isTransientConflict(ex);
     }
 
     private long remainingMillis(long deadlineNanos) {
@@ -535,12 +549,49 @@ public final class TransactionManager implements AutoCloseable {
                 || policy.asyncCommit();
     }
 
+    private void shutdownExecutor(ExecutorService executor) {
+        if (executor == null) {
+            return;
+        }
+        executor.shutdown();
+        try {
+            executor.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private ThreadFactory namedFactory(String prefix) {
+        return Thread.ofPlatform()
+                .daemon(true)
+                .name(prefix, 0)
+                .factory();
+    }
+
     private void commitParticipant(Transaction tx, String shardId, long commitTs) {
         List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
         if (options.bufferWrites() && !bufferedMutations.isEmpty()) {
-            adapter(shardId).commit(tx.txId(), commitTs, bufferedMutations);
+            boolean cleanupIntents = !options.deferIntentCleanup() || asyncCommitExecutor == null;
+            adapter(shardId).commit(tx.txId(), commitTs, bufferedMutations, cleanupIntents);
+            if (!cleanupIntents) {
+                intentCleanupExecutor.submit(() -> {
+                    try {
+                        adapter(shardId).cleanupIntents(tx.txId());
+                    } catch (RuntimeException ignored) {
+                    }
+                });
+            }
             return;
         }
         adapter(shardId).commit(tx.txId(), commitTs);
+    }
+
+    private void directCommitSingleShardParticipant(Transaction tx, String shardId, long commitTs) {
+        List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
+        if (options.bufferWrites() && !bufferedMutations.isEmpty()) {
+            adapter(shardId).directCommit(tx.txId(), tx.startTs(), commitTs, bufferedMutations);
+            return;
+        }
+        commitParticipant(tx, shardId, commitTs);
     }
 }

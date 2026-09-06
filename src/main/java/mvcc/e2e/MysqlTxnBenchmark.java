@@ -97,7 +97,8 @@ public final class MysqlTxnBenchmark {
                                     config.asyncCommitWorkers()
                             ),
                             config.bufferWrites(),
-                            config.lazyBeginMetadata()
+                            config.lazyBeginMetadata(),
+                            config.deferIntentCleanup()
                     ),
                     Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
             )) {
@@ -244,6 +245,7 @@ public final class MysqlTxnBenchmark {
                           int tsoBatchSize,
                           boolean bufferWrites,
                           boolean lazyBeginMetadata,
+                          boolean deferIntentCleanup,
                           boolean parallelPrewrite,
                           boolean parallelPrepare,
                           boolean parallelCommit,
@@ -252,9 +254,9 @@ public final class MysqlTxnBenchmark {
                           int asyncCommitWorkers) {
         private static Config fromEnv() {
             return new Config(
-                    env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:3306/control"),
-                    env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:3306/shard_1"),
-                    env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:3306/shard_2"),
+                    env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control"),
+                    env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_1"),
+                    env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_2"),
                     env("AZIR_TX_USERNAME", "root"),
                     env("AZIR_TX_PASSWORD", "root"),
                     Boolean.parseBoolean(env("AZIR_TX_RESET", "true")),
@@ -276,12 +278,13 @@ public final class MysqlTxnBenchmark {
                     Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "256")),
                     Boolean.parseBoolean(env("AZIR_TX_BUFFER_WRITES", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_LAZY_BEGIN_METADATA", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_DEFER_INTENT_CLEANUP", "false")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_PREWRITE", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_PREPARE", "false")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_COMMIT", "false")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "false")),
                     Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "false")),
-                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "8"))
+                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "16"))
             );
         }
     }
@@ -306,6 +309,7 @@ public final class MysqlTxnBenchmark {
                     + " tso_batch_size=" + config.tsoBatchSize()
                     + " buffer_writes=" + config.bufferWrites()
                     + " lazy_begin_metadata=" + config.lazyBeginMetadata()
+                    + " defer_intent_cleanup=" + config.deferIntentCleanup()
                     + " parallel_prewrite=" + config.parallelPrewrite()
                     + " parallel_prepare=" + config.parallelPrepare()
                     + " parallel_commit=" + config.parallelCommit()

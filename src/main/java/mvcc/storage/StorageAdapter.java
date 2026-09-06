@@ -27,6 +27,21 @@ public interface StorageAdapter {
         commit(txId, commitTs);
     }
 
+    default void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        commit(txId, commitTs, mutations);
+    }
+
+    default void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        commit(txId, commitTs, mutations, false);
+    }
+
+    default void cleanupIntents(long txId, List<Mutation> mutations) {
+    }
+
+    default void cleanupIntents(long txId) {
+        cleanupIntents(txId, List.of());
+    }
+
     void abort(long txId);
 
     Set<Long> findPendingTransactionIds(int limit);

@@ -18,6 +18,20 @@ public interface TransactionMetadataStore {
 
     TxRecord markCommitted(long txId, long commitTs);
 
+    TxRecord markCommitted(long txId, Set<String> participants, long commitTs);
+
+    default void persistPreparing(long txId, Set<String> participants) {
+        markPreparing(txId, participants);
+    }
+
+    default void persistCommitted(long txId, long commitTs) {
+        markCommitted(txId, commitTs);
+    }
+
+    default void persistCommitted(long txId, Set<String> participants, long commitTs) {
+        markCommitted(txId, participants, commitTs);
+    }
+
     TxRecord markSingleShardCommitted(long txId, String participant, long commitTs);
 
     TxRecord markAborted(long txId);

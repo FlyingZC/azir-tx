@@ -118,6 +118,26 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
     }
 
     @Override
+    public TxRecord markCommitted(long txId, Set<String> participants, long commitTs) {
+        return updateRecord(txId, participants, TxStatus.COMMITTED, commitTs, true);
+    }
+
+    @Override
+    public void persistPreparing(long txId, Set<String> participants) {
+        fastUpdateStatus(txId, participants, TxStatus.PREPARING, null, false);
+    }
+
+    @Override
+    public void persistCommitted(long txId, long commitTs) {
+        fastUpdateStatus(txId, null, TxStatus.COMMITTED, commitTs, true);
+    }
+
+    @Override
+    public void persistCommitted(long txId, Set<String> participants, long commitTs) {
+        fastUpdateStatus(txId, participants, TxStatus.COMMITTED, commitTs, true);
+    }
+
+    @Override
     public TxRecord markSingleShardCommitted(long txId, String participant, long commitTs) {
         return updateRecord(txId, Set.of(participant), TxStatus.COMMITTED, commitTs, true);
     }
@@ -194,6 +214,57 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
             }
         } catch (SQLException ex) {
             throw storageError(txId, "update tx metadata failed", ex);
+        }
+    }
+
+    private void fastUpdateStatus(long txId,
+                                  Set<String> participants,
+                                  TxStatus targetStatus,
+                                  Long commitTs,
+                                  boolean setCommitTs) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement update = connection.prepareStatement("""
+                     update mvcc_txn
+                     set status = ?,
+                         commit_ts = case
+                             when ? = 1 then ?
+                             else commit_ts
+                         end,
+                         participants = case
+                             when ? is null then participants
+                             else ?
+                         end
+                     where tx_id = ?
+                       and status <> 'ABORTED'
+                     """)) {
+            String encodedParticipants = participants == null ? null : encodeParticipants(participants);
+            update.setString(1, targetStatus.name());
+            update.setInt(2, setCommitTs && commitTs != null ? 1 : 0);
+            if (commitTs == null) {
+                update.setNull(3, Types.BIGINT);
+            } else {
+                update.setLong(3, commitTs);
+            }
+            if (encodedParticipants == null) {
+                update.setNull(4, Types.VARCHAR);
+                update.setNull(5, Types.VARCHAR);
+            } else {
+                update.setString(4, encodedParticipants);
+                update.setString(5, encodedParticipants);
+            }
+            update.setLong(6, txId);
+            int updated = update.executeUpdate();
+            if (updated == 1) {
+                return;
+            }
+        } catch (SQLException ex) {
+            throw storageError(txId, "fast update tx metadata failed", ex);
+        }
+
+        TxRecord current = get(txId)
+                .orElseThrow(() -> new MvccException(ErrorCode.ILLEGAL_STATE, "transaction not found: " + txId, false, txId));
+        if (current.status() == TxStatus.ABORTED) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "cannot update aborted tx: " + txId, false, txId);
         }
     }
 
