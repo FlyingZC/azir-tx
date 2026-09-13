@@ -40,6 +40,7 @@ public final class TransactionManager implements AutoCloseable {
     private final SafePointStore safePointStore;
     private final Map<String, StorageAdapter> adapters;
     private final TransactionOptions options;
+    private final TransactionClassifier transactionClassifier;
     private final ExecutorService participantExecutor;
     private final ExecutorService asyncCommitExecutor;
     private final ExecutorService intentCleanupExecutor;
@@ -85,6 +86,7 @@ public final class TransactionManager implements AutoCloseable {
         this.metadataStore = metadataStore;
         this.safePointStore = safePointStore;
         this.options = options;
+        this.transactionClassifier = new TransactionClassifier();
         this.adapters = Map.copyOf(adapters);
         this.participantExecutor = requiresParallelExecutor(options.crossShardCommitPolicy())
                 ? Executors.newThreadPerTaskExecutor(Thread.ofVirtual()
@@ -200,41 +202,71 @@ public final class TransactionManager implements AutoCloseable {
      */
     public TransactionCommitResult commit(Transaction tx) {
         ensureActive(tx);
-        if (tx.participants().isEmpty()) {
-            // 没有写入分片时只需要生成提交时间戳并更新事务状态。
-            long commitTs = timestampOracle.nextTimestamp();
-            if (tx.metadataPersisted()) {
-                metadataStore.markCommitted(tx.txId(), commitTs);
-            } else if (!options.lazyBeginMetadata()) {
-                metadataStore.markCommitted(tx.txId(), commitTs);
-            }
-            tx.status(TxStatus.COMMITTED);
-            return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
-        }
-
-        if (tx.participants().size() == 1) {
-            // 单分片事务走直接提交路径，避免完整两阶段提交的额外往返。
-            String participant = tx.participants().iterator().next();
-            long commitTs = timestampOracle.nextTimestamp();
-            boolean skipMetadataFastPath = options.lazyBeginMetadata() && !tx.metadataPersisted();
-            if (!skipMetadataFastPath) {
-                metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
-            }
-            try {
-                directCommitSingleShardParticipant(tx, participant, commitTs);
-            } catch (RuntimeException ex) {
+        TransactionClassification classification = transactionClassifier.classifyForCommit(tx, options);
+        switch (classification.protocolType()) {
+            case READ_ONLY_SNAPSHOT:
+                return commitReadOnly(tx);
+            case SINGLE_SHARD_1PC:
+                return commitSingleShard(tx, classification.participants().iterator().next());
+            case CROSS_SHARD_ASYNC_COMMIT:
+            case CROSS_SHARD_SYNC_2PC:
+                return commitCrossShard(tx);
+            case HOT_KEY_SERIALIZED:
+            case LARGE_WRITE_BATCH:
+            default:
                 throw new MvccException(
-                        ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                        "single-shard tx committed in metadata but not fully applied: " + tx.txId(),
-                        true,
-                        tx.txId(),
-                        ex
+                        ErrorCode.ILLEGAL_STATE,
+                        "unsupported transaction protocol: " + classification.protocolType(),
+                        false,
+                        tx.txId()
                 );
-            }
-            tx.status(TxStatus.COMMITTED);
-            return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
         }
+    }
 
+    /**
+     * 提交只读事务。
+     */
+    private TransactionCommitResult commitReadOnly(Transaction tx) {
+        // 没有写入分片时只需要生成提交时间戳并更新事务状态。
+        long commitTs = timestampOracle.nextTimestamp();
+        if (tx.metadataPersisted()) {
+            metadataStore.markCommitted(tx.txId(), commitTs);
+        } else if (!options.lazyBeginMetadata()) {
+            metadataStore.markCommitted(tx.txId(), commitTs);
+        }
+        tx.status(TxStatus.COMMITTED);
+        return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
+    }
+
+    /**
+     * 提交单分片事务。
+     */
+    private TransactionCommitResult commitSingleShard(Transaction tx, String participant) {
+        // 单分片事务走直接提交路径，避免完整两阶段提交的额外往返。
+        long commitTs = timestampOracle.nextTimestamp();
+        boolean skipMetadataFastPath = options.lazyBeginMetadata() && !tx.metadataPersisted();
+        if (!skipMetadataFastPath) {
+            metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
+        }
+        try {
+            directCommitSingleShardParticipant(tx, participant, commitTs);
+        } catch (RuntimeException ex) {
+            throw new MvccException(
+                    ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                    "single-shard tx committed in metadata but not fully applied: " + tx.txId(),
+                    true,
+                    tx.txId(),
+                    ex
+            );
+        }
+        tx.status(TxStatus.COMMITTED);
+        return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
+    }
+
+    /**
+     * 提交跨分片事务。
+     */
+    private TransactionCommitResult commitCrossShard(Transaction tx) {
         prewriteBufferedMutations(tx);
 
         // 多分片事务先持久化可恢复状态，再提交各参与分片，保证异常后可以恢复。
