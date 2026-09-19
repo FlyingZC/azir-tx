@@ -302,18 +302,19 @@ public final class TransactionManager implements AutoCloseable {
         }
         String primaryParticipant = primaryParticipant(tx.participants());
         try {
+            if (options.crossShardCommitPolicy().asyncCommit()) {
+                scheduleAsyncParticipantCommit(tx, commitTs, tx.participants());
+                tx.status(TxStatus.COMMITTED);
+                return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.ASYNC_PRIMARY_COMMIT);
+            }
             // 异步提交模式先保证主分片落盘，从分片提交交给后台执行。
             commitParticipant(tx, primaryParticipant, commitTs);
             Set<String> secondaryParticipants = secondaryParticipants(tx.participants(), primaryParticipant);
-            if (options.crossShardCommitPolicy().asyncCommit()) {
-                scheduleAsyncSecondaryCommit(tx, commitTs, secondaryParticipants);
-            } else {
-                runAcrossParticipants(
-                        secondaryParticipants,
-                        participant -> commitParticipant(tx, participant, commitTs),
-                        options.crossShardCommitPolicy().parallelCommit()
-                );
-            }
+            runAcrossParticipants(
+                    secondaryParticipants,
+                    participant -> commitParticipant(tx, participant, commitTs),
+                    options.crossShardCommitPolicy().parallelCommit()
+            );
         } catch (RuntimeException ex) {
             throw new MvccException(
                     ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -347,18 +348,18 @@ public final class TransactionManager implements AutoCloseable {
     /**
      * 调度异步从分片提交任务。
      */
-    private void scheduleAsyncSecondaryCommit(Transaction tx, long commitTs, Set<String> secondaryParticipants) {
-        if (secondaryParticipants.isEmpty()) {
+    private void scheduleAsyncParticipantCommit(Transaction tx, long commitTs, Set<String> participants) {
+        if (participants.isEmpty()) {
             return;
         }
-        for (String participant : secondaryParticipants) {
-            asyncCommitExecutor.submit(() -> {
+        asyncCommitExecutor.submit(() -> {
+            for (String participant : participants) {
                 try {
                     commitParticipant(tx, participant, commitTs);
                 } catch (RuntimeException ignored) {
                 }
-            });
-        }
+            }
+        });
     }
 
     /**
@@ -534,7 +535,7 @@ public final class TransactionManager implements AutoCloseable {
      * 在多个参与分片上执行操作。
      */
     private void runAcrossParticipants(Set<String> participants, Consumer<String> operation, boolean parallel) {
-        if (!parallel || participants.size() <= 1) {
+        if (!parallel || participants.size() <= 2) {
             for (String participant : participants) {
                 operation.accept(participant);
             }

@@ -3,6 +3,9 @@ package mvcc.storage.mysql;
 import mvcc.common.ErrorCode;
 import mvcc.common.MvccException;
 import mvcc.common.MutationType;
+import mvcc.common.TxStatus;
+import mvcc.metadata.TransactionMetadataStore;
+import mvcc.metadata.TxRecord;
 import mvcc.storage.KeyRange;
 import mvcc.storage.Mutation;
 import mvcc.storage.ReadContext;
@@ -28,13 +31,22 @@ import java.util.Set;
 public class MysqlStorageAdapter implements StorageAdapter {
     private final String shardId;
     private final DataSource dataSource;
+    private final TransactionMetadataStore metadataStore;
 
     /**
      * 构造 MysqlStorageAdapter 实例。
      */
     public MysqlStorageAdapter(String shardId, DataSource dataSource) {
+        this(shardId, dataSource, null);
+    }
+
+    /**
+     * 构造可解析全局提交决策的 MysqlStorageAdapter 实例。
+     */
+    public MysqlStorageAdapter(String shardId, DataSource dataSource, TransactionMetadataStore metadataStore) {
         this.shardId = shardId;
         this.dataSource = dataSource;
+        this.metadataStore = metadataStore;
     }
 
     /**
@@ -99,7 +111,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
     @Override
     public Optional<VersionedValue> get(ReadContext context, String key) {
         try (Connection connection = dataSource.getConnection()) {
-            Optional<VersionedValue> ownIntent = findIntent(connection, context.txId(), key);
+            Optional<VersionedValue> ownIntent = findIntent(connection, context, key);
             if (ownIntent.isPresent()) {
                 return ownIntent;
             }
@@ -118,7 +130,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
             List<String> keys = collectRangeKeys(connection, keyRange);
             List<VersionedValue> result = new ArrayList<>();
             for (String key : keys) {
-                Optional<VersionedValue> visible = findIntent(connection, context.txId(), key);
+                Optional<VersionedValue> visible = findIntent(connection, context, key);
                 if (visible.isEmpty()) {
                     visible = findCommitted(connection, context.readTs(), key);
                 }
@@ -137,6 +149,10 @@ public class MysqlStorageAdapter implements StorageAdapter {
      */
     @Override
     public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        if (mutations.size() == 1) {
+            prewriteSingleMutation(txId, startTs, mutations.get(0));
+            return;
+        }
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try (PreparedStatement insertIntentIfNoWriteConflict = connection.prepareStatement("""
@@ -166,6 +182,33 @@ public class MysqlStorageAdapter implements StorageAdapter {
             } finally {
                 connection.setAutoCommit(true);
             }
+        } catch (SQLException ex) {
+            throw storageError(txId, "prewrite failed", ex);
+        }
+    }
+
+    /**
+     * 写入单个事务意向，避免单语句场景反复切换事务模式。
+     */
+    private void prewriteSingleMutation(long txId, long startTs, Mutation mutation) {
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement insertIntentIfNoWriteConflict = connection.prepareStatement("""
+                    insert into mvcc_intent(user_key, tx_id, start_ts, deleted, value, expire_at)
+                    select ?, ?, ?, ?, ?, ?
+                    from dual
+                    where not exists (
+                        select 1
+                        from mvcc_data
+                        where user_key = ? and commit_ts > ?
+                        limit 1
+                    )
+                    """);
+             PreparedStatement updateOwnIntent = connection.prepareStatement("""
+                    update mvcc_intent
+                    set start_ts = ?, deleted = ?, value = ?, expire_at = ?
+                    where user_key = ? and tx_id = ?
+                    """)) {
+            upsertIntent(insertIntentIfNoWriteConflict, updateOwnIntent, txId, startTs, mutation);
         } catch (SQLException ex) {
             throw storageError(txId, "prewrite failed", ex);
         }
@@ -442,7 +485,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
     /**
      * 查找指定事务自己的写意向。
      */
-    private Optional<VersionedValue> findIntent(Connection connection, long txId, String key) throws SQLException {
+    private Optional<VersionedValue> findIntent(Connection connection, ReadContext context, String key) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select tx_id, deleted, value, start_ts
                 from mvcc_intent
@@ -454,8 +497,8 @@ public class MysqlStorageAdapter implements StorageAdapter {
                     return Optional.empty();
                 }
                 long intentTxId = resultSet.getLong("tx_id");
-                if (intentTxId != txId) {
-                    return Optional.empty();
+                if (intentTxId != context.txId()) {
+                    return committedForeignIntent(intentTxId, key, resultSet, context.readTs());
                 }
                 return Optional.of(new VersionedValue(
                         key,
@@ -466,6 +509,32 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 ));
             }
         }
+    }
+
+    /**
+     * 将已提交事务残留的 intent 作为逻辑已提交版本返回。
+     */
+    private Optional<VersionedValue> committedForeignIntent(long intentTxId,
+                                                            String key,
+                                                            ResultSet resultSet,
+                                                            long readTs) throws SQLException {
+        if (metadataStore == null) {
+            return Optional.empty();
+        }
+        Optional<TxRecord> record = metadataStore.get(intentTxId);
+        if (record.isEmpty() || record.get().status() != TxStatus.COMMITTED || record.get().commitTs() == null) {
+            return Optional.empty();
+        }
+        if (record.get().commitTs() > readTs) {
+            return Optional.empty();
+        }
+        return Optional.of(new VersionedValue(
+                key,
+                resultSet.getBytes("value"),
+                resultSet.getInt("deleted") == 1,
+                record.get().commitTs(),
+                false
+        ));
     }
 
     /**

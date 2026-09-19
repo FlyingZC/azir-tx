@@ -10,6 +10,7 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
+      - --max-connections=1000
     volumes:
       - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
       - azir-tx-mysql-data:/var/lib/mysql

@@ -57,8 +57,8 @@ public final class MysqlTxnBenchmark {
                     : mysqlTso;
             TransactionMetadataStore metadataStore = new MysqlTransactionMetadataStore(controlDataSource);
             SafePointStore safePointStore = new MysqlSafePointStore(controlDataSource);
-            MysqlStorageAdapter shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource);
-            MysqlStorageAdapter shard2 = new MysqlStorageAdapter("shard-2", shard2DataSource);
+            MysqlStorageAdapter shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource, metadataStore);
+            MysqlStorageAdapter shard2 = new MysqlStorageAdapter("shard-2", shard2DataSource, metadataStore);
 
             shard1.initialize();
             shard2.initialize();
@@ -293,28 +293,28 @@ public final class MysqlTxnBenchmark {
                     Integer.parseInt(env("AZIR_TX_BENCH_CONCURRENCY", "50")),
                     Integer.parseInt(env("AZIR_TX_BENCH_DURATION_SECONDS", "10")),
                     Boolean.parseBoolean(env("AZIR_TX_BENCH_CONFLICT", "false")),
-                    ConflictMode.valueOf(env("AZIR_TX_CONFLICT_MODE", "FAIL_FAST")),
+                    ConflictMode.valueOf(env("AZIR_TX_CONFLICT_MODE", "WAIT")),
                     Long.parseLong(env("AZIR_TX_LOCK_WAIT_TIMEOUT_MS", "5000")),
                     Long.parseLong(env("AZIR_TX_LOCK_WAIT_BACKOFF_INITIAL_MS", "5")),
                     Long.parseLong(env("AZIR_TX_LOCK_WAIT_BACKOFF_MAX_MS", "100")),
                     Double.parseDouble(env("AZIR_TX_LOCK_WAIT_BACKOFF_MULTIPLIER", "2.0")),
                     Boolean.parseBoolean(env("AZIR_TX_LOCK_WAIT_BACKOFF_JITTER", "true")),
-                    Integer.parseInt(env("AZIR_TX_RETRY_MAX_ATTEMPTS", "1")),
+                    Integer.parseInt(env("AZIR_TX_RETRY_MAX_ATTEMPTS", "8")),
                     Long.parseLong(env("AZIR_TX_RETRY_BACKOFF_INITIAL_MS", "5")),
                     Long.parseLong(env("AZIR_TX_RETRY_BACKOFF_MAX_MS", "100")),
                     Double.parseDouble(env("AZIR_TX_RETRY_BACKOFF_MULTIPLIER", "2.0")),
                     Boolean.parseBoolean(env("AZIR_TX_RETRY_BACKOFF_JITTER", "true")),
-                    Boolean.parseBoolean(env("AZIR_TX_SEGMENT_TSO", "false")),
+                    Boolean.parseBoolean(env("AZIR_TX_SEGMENT_TSO", "true")),
                     Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "256")),
                     Boolean.parseBoolean(env("AZIR_TX_BUFFER_WRITES", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_LAZY_BEGIN_METADATA", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_DEFER_INTENT_CLEANUP", "false")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_PREWRITE", "true")),
-                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_PREPARE", "false")),
-                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_COMMIT", "false")),
-                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "false")),
-                    Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "false")),
-                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "16"))
+                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_PREPARE", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_COMMIT", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "true")),
+                    Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "true")),
+                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "1"))
             );
         }
     }

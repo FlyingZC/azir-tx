@@ -70,6 +70,19 @@ run_case() {
   mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.MysqlTxnBenchmark
 }
 
+run_direct_case() {
+  local concurrency="$1"
+  export AZIR_TX_RESET=true
+  export AZIR_TX_BENCH_CONCURRENCY="$concurrency"
+  export AZIR_TX_BENCH_DURATION_SECONDS
+  export AZIR_TX_BENCH_CONFLICT=false
+  mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.MysqlDirectTwoShardTxnBenchmark
+}
+
+for c in 50 100 200; do
+  run_direct_case "$c"
+done
+
 for c in 50 100 200; do
   run_case "$c" false
 done

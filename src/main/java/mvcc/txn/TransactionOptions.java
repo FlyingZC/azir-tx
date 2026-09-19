@@ -24,6 +24,27 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
      * 返回默认事务选项。
      */
     public static TransactionOptions defaults() {
+        return safePerformanceDefaults();
+    }
+
+    /**
+     * 返回 ACID 安全的性能优先默认配置。
+     */
+    public static TransactionOptions safePerformanceDefaults() {
+        return new TransactionOptions(
+                LockWaitPolicy.mysqlLikeDefaults(),
+                TransactionRetryPolicy.mysqlLikeDefaults(),
+                CrossShardCommitPolicy.parallel(),
+                true,
+                false,
+                false
+        );
+    }
+
+    /**
+     * 返回失败优先的显式配置。
+     */
+    public static TransactionOptions failFastDefaults() {
         return new TransactionOptions(
                 LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(),

@@ -22,6 +22,7 @@ import mvcc.txn.CrossShardCommitPolicy;
 import mvcc.txn.LockWaitPolicy;
 import mvcc.txn.TransactionManager;
 import mvcc.txn.TransactionOptions;
+import mvcc.txn.TransactionOptionsPresets;
 import mvcc.txn.TransactionRetryPolicy;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -288,6 +289,87 @@ class MysqlMvccIntegrationTest {
         assertEquals("reserved", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "stock:skip-prepare"));
     }
 
+    /**
+     * 验证全局提交决策已落盘后，尚未物化的其他事务 intent 对新读者原子可见。
+     */
+    @Test
+    void committedForeignIntentShouldBeVisibleBeforeMaterialization() throws Exception {
+        MysqlStorageAdapter resolvingShard = new MysqlStorageAdapter("shard-1", shard1DataSource, metadataStore);
+        long txId = 201L;
+        long startTs = 201L;
+        long commitTs = 202L;
+
+        resolvingShard.prewrite(txId, startTs, List.of(mvcc.storage.Mutation.put("async-visible:1", bytes("v1"))));
+        metadataStore.createCommitted(txId, startTs, IsolationLevel.REPEATABLE_READ, Set.of("shard-1"), commitTs);
+
+        assertEquals(0, countRows(shard1DataSource, "mvcc_data"));
+        assertEquals(
+                "v1",
+                resolvingShard.get(new ReadContext(300L, commitTs, IsolationLevel.READ_COMMITTED), "async-visible:1")
+                        .map(value -> new String(value.value()))
+                        .orElse(null)
+        );
+        assertTrue(resolvingShard.get(new ReadContext(301L, commitTs - 1, IsolationLevel.REPEATABLE_READ), "async-visible:1").isEmpty());
+    }
+
+    /**
+     * 验证安全异步提交在物化完成前返回，并依赖已提交 intent 保持跨分片原子可见。
+     */
+    @Test
+    void asyncCommitShouldReturnAfterCommittedDecisionAndExposeCommittedIntents() throws Exception {
+        MysqlStorageAdapter resolvingShard1 = new MysqlStorageAdapter("shard-1", shard1DataSource, metadataStore);
+        MysqlStorageAdapter resolvingShard2 = new MysqlStorageAdapter("shard-2", shard2DataSource, metadataStore);
+        BlockingCommitStorageAdapter blockedShard1 = new BlockingCommitStorageAdapter(resolvingShard1);
+        BlockingCommitStorageAdapter blockedShard2 = new BlockingCommitStorageAdapter(resolvingShard2);
+        TransactionManager manager = new TransactionManager(
+                tso,
+                metadataStore,
+                new TransactionOptions(
+                        LockWaitPolicy.mysqlLikeDefaults(),
+                        TransactionRetryPolicy.mysqlLikeDefaults(),
+                        CrossShardCommitPolicy.asyncParallel(2),
+                        true,
+                        false,
+                        false
+                ),
+                Map.of(blockedShard1.shardId(), blockedShard1, blockedShard2.shardId(), blockedShard2)
+        );
+
+        ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            Future<TransactionCommitResult> future = executor.submit(() -> {
+                Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
+                manager.put(tx, "shard-1", "async-safe:1", bytes("left"));
+                manager.put(tx, "shard-2", "async-safe:2", bytes("right"));
+                return manager.commit(tx);
+            });
+
+            TransactionCommitResult result = future.get(1, TimeUnit.SECONDS);
+
+            assertEquals(TransactionCommitMode.ASYNC_PRIMARY_COMMIT, result.mode());
+            assertEquals(0, countRows(shard1DataSource, "mvcc_data"));
+            assertEquals(0, countRows(shard2DataSource, "mvcc_data"));
+            assertEquals(
+                    "left",
+                    resolvingShard1.get(new ReadContext(500L, result.commitTs(), IsolationLevel.READ_COMMITTED), "async-safe:1")
+                            .map(value -> new String(value.value()))
+                            .orElse(null)
+            );
+            assertEquals(
+                    "right",
+                    resolvingShard2.get(new ReadContext(501L, result.commitTs(), IsolationLevel.READ_COMMITTED), "async-safe:2")
+                            .map(value -> new String(value.value()))
+                            .orElse(null)
+            );
+        } finally {
+            blockedShard1.allowCommit();
+            blockedShard2.allowCommit();
+            executor.shutdownNow();
+            executor.awaitTermination(1, TimeUnit.SECONDS);
+            manager.close();
+        }
+    }
+
     @Test
     void crossShardCommitShouldCallPrepareWhenAdapterRequiresIt() {
         CountingPrepareStorageAdapter prepareAwareShard2 = new CountingPrepareStorageAdapter(shard2);
@@ -376,11 +458,17 @@ class MysqlMvccIntegrationTest {
 
     @Test
     void rollbackShouldBeIdempotentAndPersistRollbackMarker() throws Exception {
-        Transaction tx = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
-        transactionManager.put(tx, "shard-1", "account:9", bytes("pending"));
+        TransactionManager eagerManager = new TransactionManager(
+                tso,
+                metadataStore,
+                TransactionOptionsPresets.failFast(),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+        Transaction tx = eagerManager.begin(IsolationLevel.REPEATABLE_READ);
+        eagerManager.put(tx, "shard-1", "account:9", bytes("pending"));
 
-        transactionManager.rollback(tx);
-        transactionManager.rollback(tx);
+        eagerManager.rollback(tx);
+        eagerManager.rollback(tx);
 
         assertEquals(1, countRows(shard1DataSource, "mvcc_rollback"));
         assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
@@ -403,8 +491,14 @@ class MysqlMvccIntegrationTest {
                 Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
         );
 
-        Transaction holder = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
-        transactionManager.put(holder, "shard-1", "wait:001", bytes("holder"));
+        TransactionManager eagerHolderManager = new TransactionManager(
+                tso,
+                metadataStore,
+                TransactionOptionsPresets.failFast(),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+        Transaction holder = eagerHolderManager.begin(IsolationLevel.REPEATABLE_READ);
+        eagerHolderManager.put(holder, "shard-1", "wait:001", bytes("holder"));
 
         CountDownLatch started = new CountDownLatch(1);
         ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
@@ -421,7 +515,7 @@ class MysqlMvccIntegrationTest {
 
             assertTrue(started.await(1, TimeUnit.SECONDS));
             Thread.sleep(150L);
-            transactionManager.commit(holder);
+            eagerHolderManager.commit(holder);
 
             long elapsedMillis = getFuture(elapsedFuture);
             assertTrue(elapsedMillis >= 100L, "expected waiter to observe lock wait, elapsed=" + elapsedMillis);
@@ -801,6 +895,85 @@ class MysqlMvccIntegrationTest {
         @Override
         public int gc(long safePoint, int limit) {
             return delegate.gc(safePoint, limit);
+        }
+    }
+
+    private static final class BlockingCommitStorageAdapter implements StorageAdapter {
+        private final StorageAdapter delegate;
+        private final CountDownLatch allowCommit = new CountDownLatch(1);
+
+        private BlockingCommitStorageAdapter(StorageAdapter delegate) {
+            this.delegate = delegate;
+        }
+
+        private void allowCommit() {
+            allowCommit.countDown();
+        }
+
+        @Override
+        public String shardId() {
+            return delegate.shardId();
+        }
+
+        @Override
+        public void initialize() {
+            delegate.initialize();
+        }
+
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return delegate.get(context, key);
+        }
+
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return delegate.scan(context, keyRange);
+        }
+
+        @Override
+        public void prewrite(long txId, long startTs, java.util.List<mvcc.storage.Mutation> mutations) {
+            delegate.prewrite(txId, startTs, mutations);
+        }
+
+        @Override
+        public void prepare(long txId) {
+            delegate.prepare(txId);
+        }
+
+        @Override
+        public void commit(long txId, long commitTs) {
+            awaitCommit();
+            delegate.commit(txId, commitTs);
+        }
+
+        @Override
+        public void commit(long txId, long commitTs, java.util.List<mvcc.storage.Mutation> mutations, boolean cleanupIntents) {
+            awaitCommit();
+            delegate.commit(txId, commitTs, mutations, cleanupIntents);
+        }
+
+        @Override
+        public void abort(long txId) {
+            delegate.abort(txId);
+        }
+
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return delegate.findPendingTransactionIds(limit);
+        }
+
+        @Override
+        public int gc(long safePoint, int limit) {
+            return delegate.gc(safePoint, limit);
+        }
+
+        private void awaitCommit() {
+            try {
+                allowCommit.await();
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "interrupted in blocking commit adapter", true, null, ex);
+            }
         }
     }
 

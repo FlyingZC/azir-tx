@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 : "${JAVA_HOME:=/Users/zc/0zc/01-my/01-soft/jdk-21.0.10+7/Contents/Home}"
 : "${AZIR_TX_BENCH_DURATION_SECONDS:=5}"
 : "${AZIR_TX_JDBC_MAX_POOL_SIZE:=256}"
+: "${AZIR_TX_JDBC_CONNECTION_TIMEOUT_MS:=10000}"
 : "${AZIR_TX_BENCH_CONCURRENCY_LIST:=50 100 200}"
 : "${AZIR_TX_WAIT_SECONDS:=120}"
 
@@ -13,6 +14,7 @@ export JAVA_HOME
 export PATH="$JAVA_HOME/bin:$PATH"
 export AZIR_TX_BENCH_DURATION_SECONDS
 export AZIR_TX_JDBC_MAX_POOL_SIZE
+export AZIR_TX_JDBC_CONNECTION_TIMEOUT_MS
 
 docker compose up -d
 

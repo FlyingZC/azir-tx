@@ -21,6 +21,6 @@ public final class TransactionOptionsPresets {
      * 返回失败优先的配置。
      */
     public static TransactionOptions failFast() {
-        return TransactionOptions.defaults();
+        return TransactionOptions.failFastDefaults();
     }
 }
