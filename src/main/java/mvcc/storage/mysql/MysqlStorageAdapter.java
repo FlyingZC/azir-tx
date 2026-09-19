@@ -596,12 +596,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
      * 将底层存储异常包装为 MVCC 异常。
      */
     private MvccException storageError(Long txId, String message, SQLException ex) {
-        String detailedMessage = shardId
-                + ": " + message
-                + " [sqlState=" + ex.getSQLState()
-                + ", vendorCode=" + ex.getErrorCode()
-                + "]";
-        return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, detailedMessage, true, txId, ex);
+        return MysqlStorageExceptionMapper.toMvccException(shardId, txId, message, ex);
     }
 
     /**
