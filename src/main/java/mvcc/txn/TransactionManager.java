@@ -227,6 +227,11 @@ public final class TransactionManager implements AutoCloseable {
      * 提交只读事务。
      */
     private TransactionCommitResult commitReadOnly(Transaction tx) {
+        if (options.lazyBeginMetadata() && !tx.metadataPersisted()) {
+            // lazy 只读事务没有外部状态需要提交，复用 startTs 避免额外访问 TSO。
+            tx.status(TxStatus.COMMITTED);
+            return new TransactionCommitResult(tx.txId(), tx.startTs(), TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
+        }
         // 没有写入分片时只需要生成提交时间戳并更新事务状态。
         long commitTs = timestampOracle.nextTimestamp();
         if (tx.metadataPersisted()) {
