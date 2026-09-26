@@ -24,6 +24,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * 基于 MySQL 表结构的 MVCC 分片存储适配器。
@@ -648,6 +650,20 @@ public class MysqlStorageAdapter implements StorageAdapter {
     }
 
     /**
+     * 构造 direct commit 批量冲突检查 SQL。
+     */
+    static String directCommitConflictSql(int keyCount) {
+        if (keyCount < 1) {
+            throw new IllegalArgumentException("keyCount must be >= 1");
+        }
+        return "select user_key from mvcc_data where user_key in ("
+                + IntStream.range(0, keyCount)
+                .mapToObj(ignored -> "?")
+                .collect(Collectors.joining(", "))
+                + ") and commit_ts > ? limit 1";
+    }
+
+    /**
      * 将字符串键编码为数据库二进制键。
      */
     private static byte[] encodeKey(String key) {
@@ -795,31 +811,11 @@ public class MysqlStorageAdapter implements StorageAdapter {
                                       long startTs,
                                       long commitTs,
                                       List<Mutation> mutations) throws SQLException {
-        try (PreparedStatement conflictCheck = connection.prepareStatement("""
-                select 1
-                from mvcc_data
-                where user_key = ? and commit_ts > ?
-                limit 1
-                """);
-             PreparedStatement insert = connection.prepareStatement("""
+        checkDirectCommitConflicts(connection, txId, startTs, mutations);
+        try (PreparedStatement insert = connection.prepareStatement("""
                 insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value)
                 values (?, ?, ?, ?, ?)
                 """)) {
-            for (Mutation mutation : mutations) {
-                // 单阶段提交仍需检查 startTs 之后是否已有新版本，防止覆盖并发写入。
-                conflictCheck.setBytes(1, encodeKey(mutation.key()));
-                conflictCheck.setLong(2, startTs);
-                try (ResultSet resultSet = conflictCheck.executeQuery()) {
-                    if (resultSet.next()) {
-                        throw new MvccException(
-                                ErrorCode.WRITE_CONFLICT,
-                                "write conflict on key " + mutation.key() + ", newer version exists",
-                                true,
-                                txId
-                        );
-                    }
-                }
-            }
             for (Mutation mutation : mutations) {
                 insert.setBytes(1, encodeKey(mutation.key()));
                 insert.setLong(2, commitTs);
@@ -834,6 +830,32 @@ public class MysqlStorageAdapter implements StorageAdapter {
             }
             if (!mutations.isEmpty()) {
                 insert.executeBatch();
+            }
+        }
+    }
+
+    /**
+     * 批量检查直接提交写集合是否与 startTs 之后的新版本冲突。
+     */
+    private void checkDirectCommitConflicts(Connection connection, long txId, long startTs, List<Mutation> mutations) throws SQLException {
+        if (mutations.isEmpty()) {
+            return;
+        }
+        try (PreparedStatement statement = connection.prepareStatement(directCommitConflictSql(mutations.size()))) {
+            int parameterIndex = 1;
+            for (Mutation mutation : mutations) {
+                statement.setBytes(parameterIndex++, encodeKey(mutation.key()));
+            }
+            statement.setLong(parameterIndex, startTs);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (resultSet.next()) {
+                    throw new MvccException(
+                            ErrorCode.WRITE_CONFLICT,
+                            "write conflict before direct commit, newer version exists",
+                            true,
+                            txId
+                    );
+                }
             }
         }
     }

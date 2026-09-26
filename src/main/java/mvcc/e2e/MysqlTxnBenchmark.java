@@ -314,7 +314,7 @@ public final class MysqlTxnBenchmark {
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_COMMIT", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "true")),
-                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "1"))
+                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "16"))
             );
         }
     }
