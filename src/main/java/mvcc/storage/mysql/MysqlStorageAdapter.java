@@ -31,6 +31,8 @@ import java.util.stream.IntStream;
  * 基于 MySQL 表结构的 MVCC 分片存储适配器。
  */
 public class MysqlStorageAdapter implements StorageAdapter {
+    private static final int DIRECT_COMMIT_CONFLICT_CHECK_CHUNK_SIZE = 512;
+
     private final String shardId;
     private final DataSource dataSource;
     private final TransactionMetadataStore metadataStore;
@@ -664,6 +666,16 @@ public class MysqlStorageAdapter implements StorageAdapter {
     }
 
     /**
+     * 计算 direct commit 冲突检查需要拆分的批次数。
+     */
+    static int directCommitConflictChunkCount(int keyCount) {
+        if (keyCount < 1) {
+            throw new IllegalArgumentException("keyCount must be >= 1");
+        }
+        return (keyCount + DIRECT_COMMIT_CONFLICT_CHECK_CHUNK_SIZE - 1) / DIRECT_COMMIT_CONFLICT_CHECK_CHUNK_SIZE;
+    }
+
+    /**
      * 将字符串键编码为数据库二进制键。
      */
     private static byte[] encodeKey(String key) {
@@ -841,6 +853,16 @@ public class MysqlStorageAdapter implements StorageAdapter {
         if (mutations.isEmpty()) {
             return;
         }
+        for (int fromIndex = 0; fromIndex < mutations.size(); fromIndex += DIRECT_COMMIT_CONFLICT_CHECK_CHUNK_SIZE) {
+            int toIndex = Math.min(fromIndex + DIRECT_COMMIT_CONFLICT_CHECK_CHUNK_SIZE, mutations.size());
+            checkDirectCommitConflictChunk(connection, txId, startTs, mutations.subList(fromIndex, toIndex));
+        }
+    }
+
+    /**
+     * 检查一个有界写集合分片是否与 startTs 之后的新版本冲突。
+     */
+    private void checkDirectCommitConflictChunk(Connection connection, long txId, long startTs, List<Mutation> mutations) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(directCommitConflictSql(mutations.size()))) {
             int parameterIndex = 1;
             for (Mutation mutation : mutations) {

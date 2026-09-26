@@ -29,4 +29,14 @@ class MysqlStorageAdapterSqlTest {
                 MysqlStorageAdapter.directCommitConflictSql(1)
         );
     }
+
+    /**
+     * 验证大写集合会被拆成有界冲突检查批次。
+     */
+    @Test
+    void shouldSplitLargeDirectCommitConflictChecksIntoBoundedChunks() {
+        assertEquals(1, MysqlStorageAdapter.directCommitConflictChunkCount(512));
+        assertEquals(2, MysqlStorageAdapter.directCommitConflictChunkCount(513));
+        assertEquals(3, MysqlStorageAdapter.directCommitConflictChunkCount(1025));
+    }
 }
