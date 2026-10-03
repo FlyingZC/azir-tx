@@ -540,7 +540,7 @@ public final class TransactionManager implements AutoCloseable {
      * 在多个参与分片上执行操作。
      */
     private void runAcrossParticipants(Set<String> participants, Consumer<String> operation, boolean parallel) {
-        if (!parallel || participants.size() <= 2) {
+        if (!parallel || participants.size() <= 1) {
             for (String participant : participants) {
                 operation.accept(participant);
             }
