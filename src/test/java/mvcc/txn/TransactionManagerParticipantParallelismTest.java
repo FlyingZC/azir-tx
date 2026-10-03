@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * 事务管理器参与者阶段并行执行测试。
@@ -56,6 +57,36 @@ class TransactionManagerParticipantParallelismTest {
         assertDoesNotThrow(() -> manager.commit(tx));
         assertEquals(1, shard1.prewriteCalls());
         assertEquals(1, shard2.prewriteCalls());
+    }
+
+    /**
+     * 验证并行参与者抛出的 Error 不会被吞掉。
+     */
+    @Test
+    void parallelParticipantErrorShouldPropagateToCaller() {
+        ErrorPrewriteStorageAdapter shard1 = new ErrorPrewriteStorageAdapter("shard-1");
+        BlockingPrewriteStorageAdapter shard2 = new BlockingPrewriteStorageAdapter("shard-2", new CountDownLatch(1));
+        TransactionOptions options = new TransactionOptions(
+                LockWaitPolicy.failFast(),
+                TransactionRetryPolicy.noRetry(),
+                CrossShardCommitPolicy.asyncParallel(2),
+                true,
+                true,
+                false
+        );
+        TransactionManager manager = new TransactionManager(
+                new AtomicTimestampOracle(100L),
+                new InMemoryTransactionMetadataStore(),
+                options,
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
+        manager.put(tx, "shard-1", "parallel:error:1", new byte[]{1});
+        manager.put(tx, "shard-2", "parallel:error:2", new byte[]{2});
+
+        AssertionError actual = assertThrows(AssertionError.class, () -> manager.commit(tx));
+        assertEquals("participant error", actual.getMessage());
     }
 
     /**
@@ -171,6 +202,103 @@ class TransactionManagerParticipantParallelismTest {
          */
         private int prewriteCalls() {
             return prewriteCalls.get();
+        }
+    }
+
+    /**
+     * 会在预写阶段抛出 Error 的存储适配器。
+     */
+    private static final class ErrorPrewriteStorageAdapter implements StorageAdapter {
+        private final String shardId;
+
+        /**
+         * 构造错误预写适配器。
+         */
+        private ErrorPrewriteStorageAdapter(String shardId) {
+            this.shardId = shardId;
+        }
+
+        /**
+         * 返回当前分片编号。
+         */
+        @Override
+        public String shardId() {
+            return shardId;
+        }
+
+        /**
+         * 初始化测试适配器。
+         */
+        @Override
+        public void initialize() {
+        }
+
+        /**
+         * 读取指定键。
+         */
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return Optional.empty();
+        }
+
+        /**
+         * 扫描指定范围。
+         */
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return List.of();
+        }
+
+        /**
+         * 预写时抛出测试错误。
+         */
+        @Override
+        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+            throw new AssertionError("participant error");
+        }
+
+        /**
+         * 准备测试事务。
+         */
+        @Override
+        public void prepare(long txId) {
+        }
+
+        /**
+         * 提交测试事务。
+         */
+        @Override
+        public void commit(long txId, long commitTs) {
+        }
+
+        /**
+         * 提交已知测试写集合。
+         */
+        @Override
+        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        }
+
+        /**
+         * 回滚测试事务。
+         */
+        @Override
+        public void abort(long txId) {
+        }
+
+        /**
+         * 查找待恢复事务编号。
+         */
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return Set.of();
+        }
+
+        /**
+         * 清理历史版本。
+         */
+        @Override
+        public int gc(long safePoint, int limit) {
+            return 0;
         }
     }
 }

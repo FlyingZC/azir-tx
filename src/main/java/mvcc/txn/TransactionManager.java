@@ -547,12 +547,13 @@ public final class TransactionManager implements AutoCloseable {
             return;
         }
 
-        ConcurrentLinkedQueue<RuntimeException> failures = new ConcurrentLinkedQueue<>();
+        ConcurrentLinkedQueue<Throwable> failures = new ConcurrentLinkedQueue<>();
         CompletableFuture<?>[] futures = participants.stream()
                 .map(participant -> CompletableFuture.runAsync(() -> {
                     try {
                         operation.accept(participant);
-                    } catch (RuntimeException ex) {
+                    } catch (Throwable ex) {
+                        // 并行参与者抛出的 Error 也必须回传给调用方，避免提交路径误判成功。
                         failures.add(ex);
                         throw ex;
                     }
@@ -564,9 +565,15 @@ public final class TransactionManager implements AutoCloseable {
         } catch (CompletionException ignored) {
         }
 
-        RuntimeException failure = failures.peek();
+        Throwable failure = failures.peek();
         if (failure != null) {
-            throw failure;
+            if (failure instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            if (failure instanceof Error error) {
+                throw error;
+            }
+            throw new CompletionException(failure);
         }
     }
 
