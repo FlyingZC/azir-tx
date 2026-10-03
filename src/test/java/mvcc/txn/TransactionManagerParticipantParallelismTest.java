@@ -90,6 +90,36 @@ class TransactionManagerParticipantParallelismTest {
     }
 
     /**
+     * 验证并行参与者抛出的 RuntimeException 不会被 CompletableFuture 包装后吞掉。
+     */
+    @Test
+    void parallelParticipantRuntimeExceptionShouldPropagateToCaller() {
+        RuntimeExceptionPrewriteStorageAdapter shard1 = new RuntimeExceptionPrewriteStorageAdapter("shard-1");
+        BlockingPrewriteStorageAdapter shard2 = new BlockingPrewriteStorageAdapter("shard-2", new CountDownLatch(1));
+        TransactionOptions options = new TransactionOptions(
+                LockWaitPolicy.failFast(),
+                TransactionRetryPolicy.noRetry(),
+                CrossShardCommitPolicy.asyncParallel(2),
+                true,
+                true,
+                false
+        );
+        TransactionManager manager = new TransactionManager(
+                new AtomicTimestampOracle(100L),
+                new InMemoryTransactionMetadataStore(),
+                options,
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
+        manager.put(tx, "shard-1", "parallel:runtime:1", new byte[]{1});
+        manager.put(tx, "shard-2", "parallel:runtime:2", new byte[]{2});
+
+        IllegalStateException actual = assertThrows(IllegalStateException.class, () -> manager.commit(tx));
+        assertEquals("participant runtime failure", actual.getMessage());
+    }
+
+    /**
      * 会在预写阶段等待另一个分片同时进入的存储适配器。
      */
     private static final class BlockingPrewriteStorageAdapter implements StorageAdapter {
@@ -255,6 +285,103 @@ class TransactionManagerParticipantParallelismTest {
         @Override
         public void prewrite(long txId, long startTs, List<Mutation> mutations) {
             throw new AssertionError("participant error");
+        }
+
+        /**
+         * 准备测试事务。
+         */
+        @Override
+        public void prepare(long txId) {
+        }
+
+        /**
+         * 提交测试事务。
+         */
+        @Override
+        public void commit(long txId, long commitTs) {
+        }
+
+        /**
+         * 提交已知测试写集合。
+         */
+        @Override
+        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        }
+
+        /**
+         * 回滚测试事务。
+         */
+        @Override
+        public void abort(long txId) {
+        }
+
+        /**
+         * 查找待恢复事务编号。
+         */
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return Set.of();
+        }
+
+        /**
+         * 清理历史版本。
+         */
+        @Override
+        public int gc(long safePoint, int limit) {
+            return 0;
+        }
+    }
+
+    /**
+     * 会在预写阶段抛出 RuntimeException 的存储适配器。
+     */
+    private static final class RuntimeExceptionPrewriteStorageAdapter implements StorageAdapter {
+        private final String shardId;
+
+        /**
+         * 构造运行时异常预写适配器。
+         */
+        private RuntimeExceptionPrewriteStorageAdapter(String shardId) {
+            this.shardId = shardId;
+        }
+
+        /**
+         * 返回当前分片编号。
+         */
+        @Override
+        public String shardId() {
+            return shardId;
+        }
+
+        /**
+         * 初始化测试适配器。
+         */
+        @Override
+        public void initialize() {
+        }
+
+        /**
+         * 读取指定键。
+         */
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return Optional.empty();
+        }
+
+        /**
+         * 扫描指定范围。
+         */
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return List.of();
+        }
+
+        /**
+         * 预写时抛出测试运行时异常。
+         */
+        @Override
+        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+            throw new IllegalStateException("participant runtime failure");
         }
 
         /**
