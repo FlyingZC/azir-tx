@@ -11,6 +11,9 @@ import mvcc.gc.NoOpSafePointStore;
 import mvcc.gc.SafePointStore;
 import mvcc.metadata.TransactionMetadataStore;
 import mvcc.metadata.TxRecord;
+import mvcc.metrics.NoOpTransactionMetrics;
+import mvcc.metrics.TransactionMetrics;
+import mvcc.metrics.TransactionStage;
 import mvcc.storage.KeyRange;
 import mvcc.storage.Mutation;
 import mvcc.storage.ReadContext;
@@ -20,6 +23,7 @@ import mvcc.tso.TimestampOracle;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -30,6 +34,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * 事务管理器，协调 TSO、元数据和分片存储完成 MVCC 事务。
@@ -41,6 +46,7 @@ public final class TransactionManager implements AutoCloseable {
     private final Map<String, StorageAdapter> adapters;
     private final TransactionOptions options;
     private final TransactionClassifier transactionClassifier;
+    private final TransactionMetrics metrics;
     private final ExecutorService participantExecutor;
     private final ExecutorService asyncCommitExecutor;
     private final ExecutorService intentCleanupExecutor;
@@ -79,14 +85,38 @@ public final class TransactionManager implements AutoCloseable {
      */
     public TransactionManager(TimestampOracle timestampOracle,
                               TransactionMetadataStore metadataStore,
+                              TransactionOptions options,
+                              Map<String, StorageAdapter> adapters,
+                              TransactionMetrics metrics) {
+        this(timestampOracle, metadataStore, NoOpSafePointStore.INSTANCE, options, adapters, metrics);
+    }
+
+    /**
+     * 构造 TransactionManager 实例。
+     */
+    public TransactionManager(TimestampOracle timestampOracle,
+                              TransactionMetadataStore metadataStore,
                               SafePointStore safePointStore,
                               TransactionOptions options,
                               Map<String, StorageAdapter> adapters) {
+        this(timestampOracle, metadataStore, safePointStore, options, adapters, NoOpTransactionMetrics.INSTANCE);
+    }
+
+    /**
+     * 构造 TransactionManager 实例。
+     */
+    public TransactionManager(TimestampOracle timestampOracle,
+                              TransactionMetadataStore metadataStore,
+                              SafePointStore safePointStore,
+                              TransactionOptions options,
+                              Map<String, StorageAdapter> adapters,
+                              TransactionMetrics metrics) {
         this.timestampOracle = timestampOracle;
         this.metadataStore = metadataStore;
         this.safePointStore = safePointStore;
         this.options = options;
         this.transactionClassifier = new TransactionClassifier();
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.adapters = Map.copyOf(adapters);
         this.participantExecutor = requiresParallelExecutor(options.crossShardCommitPolicy())
                 ? Executors.newThreadPerTaskExecutor(Thread.ofVirtual()
@@ -111,11 +141,11 @@ public final class TransactionManager implements AutoCloseable {
      * 开启一个新事务。
      */
     public Transaction begin(IsolationLevel isolationLevel) {
-        long txId = timestampOracle.nextTimestamp();
+        long txId = recordStage(TransactionStage.BEGIN_TSO, timestampOracle::nextTimestamp);
         long startTs = txId;
         Transaction transaction = new Transaction(txId, startTs, isolationLevel);
         if (!options.lazyBeginMetadata()) {
-            metadataStore.create(txId, startTs, isolationLevel);
+            recordStage(TransactionStage.BEGIN_METADATA, () -> metadataStore.create(txId, startTs, isolationLevel));
             transaction.metadataPersisted(true);
         }
         return transaction;
@@ -233,7 +263,7 @@ public final class TransactionManager implements AutoCloseable {
             return new TransactionCommitResult(tx.txId(), tx.startTs(), TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
         }
         // 没有写入分片时只需要生成提交时间戳并更新事务状态。
-        long commitTs = timestampOracle.nextTimestamp();
+        long commitTs = recordStage(TransactionStage.COMMIT_TSO, timestampOracle::nextTimestamp);
         if (tx.metadataPersisted()) {
             metadataStore.markCommitted(tx.txId(), commitTs);
         } else if (!options.lazyBeginMetadata()) {
@@ -248,13 +278,19 @@ public final class TransactionManager implements AutoCloseable {
      */
     private TransactionCommitResult commitSingleShard(Transaction tx, String participant) {
         // 单分片事务走直接提交路径，避免完整两阶段提交的额外往返。
-        long commitTs = timestampOracle.nextTimestamp();
+        long commitTs = recordStage(TransactionStage.COMMIT_TSO, timestampOracle::nextTimestamp);
         boolean skipMetadataFastPath = options.lazyBeginMetadata() && !tx.metadataPersisted();
         if (!skipMetadataFastPath) {
-            metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
+            recordStage(
+                    TransactionStage.SINGLE_SHARD_METADATA_COMMIT,
+                    () -> metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs)
+            );
         }
         try {
-            directCommitSingleShardParticipant(tx, participant, commitTs);
+            recordStage(
+                    TransactionStage.SINGLE_SHARD_PARTICIPANT_COMMIT,
+                    () -> directCommitSingleShardParticipant(tx, participant, commitTs)
+            );
         } catch (RuntimeException ex) {
             throw new MvccException(
                     ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -272,39 +308,28 @@ public final class TransactionManager implements AutoCloseable {
      * 提交跨分片事务。
      */
     private TransactionCommitResult commitCrossShard(Transaction tx) {
-        prewriteBufferedMutations(tx);
+        if (options.bufferWrites()) {
+            recordStage(TransactionStage.BUFFERED_PREWRITE, () -> prewriteBufferedMutations(tx));
+        } else {
+            prewriteBufferedMutations(tx);
+        }
 
         // 多分片事务先持久化可恢复状态，再提交各参与分片，保证异常后可以恢复。
         boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
         if (explicitPrepareRequired) {
-            if (tx.metadataPersisted()) {
-                metadataStore.persistPreparing(tx.txId(), tx.participants());
-            } else if (options.lazyBeginMetadata()) {
-                metadataStore.createPreparing(tx.txId(), tx.startTs(), tx.isolationLevel(), tx.participants());
-                tx.metadataPersisted(true);
-            } else {
-                metadataStore.persistPreparing(tx.txId(), tx.participants());
-                tx.metadataPersisted(true);
-            }
-            runAcrossParticipants(
-                    tx.participants(),
-                    participant -> adapter(participant).prepare(tx.txId()),
-                    options.crossShardCommitPolicy().parallelPrepare()
+            persistPreparingMetadata(tx);
+            recordStage(
+                    TransactionStage.PREPARE,
+                    () -> runAcrossParticipants(
+                            tx.participants(),
+                            participant -> adapter(participant).prepare(tx.txId()),
+                            options.crossShardCommitPolicy().parallelPrepare()
+                    )
             );
         }
 
-        long commitTs = timestampOracle.nextTimestamp();
-        if (explicitPrepareRequired) {
-            metadataStore.persistCommitted(tx.txId(), commitTs);
-        } else if (tx.metadataPersisted()) {
-            metadataStore.persistCommitted(tx.txId(), tx.participants(), commitTs);
-        } else if (options.lazyBeginMetadata()) {
-            metadataStore.createCommitted(tx.txId(), tx.startTs(), tx.isolationLevel(), tx.participants(), commitTs);
-            tx.metadataPersisted(true);
-        } else {
-            metadataStore.persistCommitted(tx.txId(), tx.participants(), commitTs);
-            tx.metadataPersisted(true);
-        }
+        long commitTs = recordStage(TransactionStage.COMMIT_TSO, timestampOracle::nextTimestamp);
+        recordStage(TransactionStage.CROSS_SHARD_METADATA_COMMIT, () -> persistCommittedMetadata(tx, commitTs, explicitPrepareRequired));
         String primaryParticipant = primaryParticipant(tx.participants());
         try {
             if (options.crossShardCommitPolicy().asyncCommit()) {
@@ -312,12 +337,15 @@ public final class TransactionManager implements AutoCloseable {
                 tx.status(TxStatus.COMMITTED);
                 return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.ASYNC_PRIMARY_COMMIT);
             }
-            // 异步提交模式先保证主分片落盘，从分片提交交给后台执行。
-            commitParticipant(tx, primaryParticipant, commitTs);
+            // 同步提交模式先提交主参与者，再提交其余参与者，保留状态未知异常边界。
+            recordStage(TransactionStage.PRIMARY_PARTICIPANT_COMMIT, () -> commitParticipant(tx, primaryParticipant, commitTs));
             Set<String> secondaryParticipants = secondaryParticipants(tx.participants(), primaryParticipant);
             runAcrossParticipants(
                     secondaryParticipants,
-                    participant -> commitParticipant(tx, participant, commitTs),
+                    participant -> recordStage(
+                            TransactionStage.SECONDARY_PARTICIPANT_COMMIT,
+                            () -> commitParticipant(tx, participant, commitTs)
+                    ),
                     options.crossShardCommitPolicy().parallelCommit()
             );
         } catch (RuntimeException ex) {
@@ -345,13 +373,14 @@ public final class TransactionManager implements AutoCloseable {
      */
     @Override
     public void close() {
-        shutdownExecutor(intentCleanupExecutor);
         shutdownExecutor(asyncCommitExecutor);
+        // async commit 可能继续提交 intent cleanup 任务，必须先 drain async 再关闭 cleanup。
+        shutdownExecutor(intentCleanupExecutor);
         shutdownExecutor(participantExecutor);
     }
 
     /**
-     * 调度异步从分片提交任务。
+     * 调度异步参与者提交任务。
      */
     private void scheduleAsyncParticipantCommit(Transaction tx, long commitTs, Set<String> participants) {
         if (participants.isEmpty()) {
@@ -360,11 +389,43 @@ public final class TransactionManager implements AutoCloseable {
         asyncCommitExecutor.submit(() -> {
             for (String participant : participants) {
                 try {
-                    commitParticipant(tx, participant, commitTs);
+                    recordStage(TransactionStage.ASYNC_PARTICIPANT_COMMIT, () -> commitParticipant(tx, participant, commitTs));
                 } catch (RuntimeException ignored) {
                 }
             }
         });
+    }
+
+    /**
+     * 持久化跨分片事务准备中元数据。
+     */
+    private void persistPreparingMetadata(Transaction tx) {
+        if (tx.metadataPersisted()) {
+            metadataStore.persistPreparing(tx.txId(), tx.participants());
+        } else if (options.lazyBeginMetadata()) {
+            metadataStore.createPreparing(tx.txId(), tx.startTs(), tx.isolationLevel(), tx.participants());
+            tx.metadataPersisted(true);
+        } else {
+            metadataStore.persistPreparing(tx.txId(), tx.participants());
+            tx.metadataPersisted(true);
+        }
+    }
+
+    /**
+     * 持久化跨分片事务已提交元数据。
+     */
+    private void persistCommittedMetadata(Transaction tx, long commitTs, boolean explicitPrepareRequired) {
+        if (explicitPrepareRequired) {
+            metadataStore.persistCommitted(tx.txId(), commitTs);
+        } else if (tx.metadataPersisted()) {
+            metadataStore.persistCommitted(tx.txId(), tx.participants(), commitTs);
+        } else if (options.lazyBeginMetadata()) {
+            metadataStore.createCommitted(tx.txId(), tx.startTs(), tx.isolationLevel(), tx.participants(), commitTs);
+            tx.metadataPersisted(true);
+        } else {
+            metadataStore.persistCommitted(tx.txId(), tx.participants(), commitTs);
+            tx.metadataPersisted(true);
+        }
     }
 
     /**
@@ -393,14 +454,16 @@ public final class TransactionManager implements AutoCloseable {
         if (tx.status() == TxStatus.ABORTED || tx.status() == TxStatus.COMMITTED) {
             return;
         }
-        if (tx.metadataPersisted()) {
-            metadataStore.markAborted(tx.txId());
-        }
-        runAcrossParticipants(
-                tx.participants(),
-                participant -> adapter(participant).abort(tx.txId()),
-                options.crossShardCommitPolicy().parallelRollback()
-        );
+        recordStage(TransactionStage.ROLLBACK, () -> {
+            if (tx.metadataPersisted()) {
+                metadataStore.markAborted(tx.txId());
+            }
+            runAcrossParticipants(
+                    tx.participants(),
+                    participant -> adapter(participant).abort(tx.txId()),
+                    options.crossShardCommitPolicy().parallelRollback()
+            );
+        });
         tx.status(TxStatus.ABORTED);
     }
 
@@ -421,13 +484,20 @@ public final class TransactionManager implements AutoCloseable {
             return;
         }
         StorageAdapter adapter = adapter(shardId);
+        recordStage(TransactionStage.EAGER_PREWRITE, () -> prewriteEagerMutation(tx, shardId, mutation, adapter));
+        tx.addParticipant(shardId);
+    }
+
+    /**
+     * 带冲突等待策略地预写入非缓冲单条变更。
+     */
+    private void prewriteEagerMutation(Transaction tx, String shardId, Mutation mutation, StorageAdapter adapter) {
         LockWaitPolicy lockWaitPolicy = options.lockWaitPolicy();
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lockWaitPolicy.lockWaitTimeoutMs());
         int attempt = 0;
         while (true) {
             try {
                 adapter.prewrite(tx.txId(), tx.startTs(), java.util.List.of(mutation));
-                tx.addParticipant(shardId);
                 return;
             } catch (MvccException ex) {
                 if (!shouldWaitOnConflict(ex, lockWaitPolicy)) {
@@ -466,7 +536,7 @@ public final class TransactionManager implements AutoCloseable {
     private long readTs(Transaction tx) {
         return tx.isolationLevel() == IsolationLevel.REPEATABLE_READ
                 ? tx.startTs()
-                : timestampOracle.nextTimestamp();
+                : recordStage(TransactionStage.READ_TSO, timestampOracle::nextTimestamp);
     }
 
     /**
@@ -737,7 +807,7 @@ public final class TransactionManager implements AutoCloseable {
             if (!cleanupIntents) {
                 intentCleanupExecutor.submit(() -> {
                     try {
-                        adapter(shardId).cleanupIntents(tx.txId());
+                        recordStage(TransactionStage.INTENT_CLEANUP, () -> adapter(shardId).cleanupIntents(tx.txId()));
                     } catch (RuntimeException ignored) {
                     }
                 });
@@ -757,5 +827,61 @@ public final class TransactionManager implements AutoCloseable {
             return;
         }
         commitParticipant(tx, shardId, commitTs);
+    }
+
+    /**
+     * 记录带返回值阶段的执行结果。
+     */
+    private <T> T recordStage(TransactionStage stage, Supplier<T> action) {
+        if (metrics == NoOpTransactionMetrics.INSTANCE) {
+            return action.get();
+        }
+        long startNanos = System.nanoTime();
+        try {
+            T result = action.get();
+            recordMetricSuccess(stage, System.nanoTime() - startNanos);
+            return result;
+        } catch (RuntimeException | Error ex) {
+            recordMetricFailure(stage, System.nanoTime() - startNanos);
+            throw ex;
+        }
+    }
+
+    /**
+     * 记录无返回值阶段的执行结果。
+     */
+    private void recordStage(TransactionStage stage, Runnable action) {
+        if (metrics == NoOpTransactionMetrics.INSTANCE) {
+            action.run();
+            return;
+        }
+        long startNanos = System.nanoTime();
+        try {
+            action.run();
+            recordMetricSuccess(stage, System.nanoTime() - startNanos);
+        } catch (RuntimeException | Error ex) {
+            recordMetricFailure(stage, System.nanoTime() - startNanos);
+            throw ex;
+        }
+    }
+
+    /**
+     * 尽力记录成功指标，避免指标实现异常反向影响事务语义。
+     */
+    private void recordMetricSuccess(TransactionStage stage, long elapsedNanos) {
+        try {
+            metrics.recordSuccess(stage, elapsedNanos);
+        } catch (RuntimeException | Error ignored) {
+        }
+    }
+
+    /**
+     * 尽力记录失败指标，避免遮蔽原始业务异常。
+     */
+    private void recordMetricFailure(TransactionStage stage, long elapsedNanos) {
+        try {
+            metrics.recordFailure(stage, elapsedNanos);
+        } catch (RuntimeException | Error ignored) {
+        }
     }
 }

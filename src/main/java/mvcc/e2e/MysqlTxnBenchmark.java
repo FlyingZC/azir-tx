@@ -7,6 +7,9 @@ import mvcc.gc.SafePointStore;
 import mvcc.gc.mysql.MysqlSafePointStore;
 import mvcc.metadata.TransactionMetadataStore;
 import mvcc.metadata.mysql.MysqlTransactionMetadataStore;
+import mvcc.metrics.InMemoryTransactionMetrics;
+import mvcc.metrics.NoOpTransactionMetrics;
+import mvcc.metrics.TransactionMetricsFormatter;
 import mvcc.storage.mysql.MysqlDataSourceFactory;
 import mvcc.storage.mysql.MysqlStorageAdapter;
 import mvcc.tso.TimestampOracle;
@@ -77,6 +80,10 @@ public final class MysqlTxnBenchmark {
                 ((MysqlSafePointStore) safePointStore).initialize(0L);
             }
 
+            InMemoryTransactionMetrics metrics = config.stageMetrics()
+                    ? new InMemoryTransactionMetrics()
+                    : null;
+            BenchmarkResult result;
             try (TransactionManager transactionManager = new TransactionManager(
                     tso,
                     metadataStore,
@@ -109,10 +116,14 @@ public final class MysqlTxnBenchmark {
                             config.lazyBeginMetadata(),
                             config.deferIntentCleanup()
                     ),
-                    Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+                    Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2),
+                    metrics == null ? NoOpTransactionMetrics.INSTANCE : metrics
             )) {
-                BenchmarkResult result = runBenchmark(transactionManager, config);
-                System.out.println(result.toLine(config));
+                result = runBenchmark(transactionManager, config);
+            }
+            System.out.println(result.toLine(config));
+            if (metrics != null) {
+                TransactionMetricsFormatter.formatNonEmpty(metrics).forEach(System.out::println);
             }
         } finally {
             close(controlDataSource);
@@ -278,7 +289,8 @@ public final class MysqlTxnBenchmark {
                           boolean parallelCommit,
                           boolean parallelRollback,
                           boolean asyncCommit,
-                          int asyncCommitWorkers) {
+                          int asyncCommitWorkers,
+                          boolean stageMetrics) {
         /**
          * 从环境变量读取配置对象。
          */
@@ -314,7 +326,8 @@ public final class MysqlTxnBenchmark {
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_COMMIT", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "true")),
-                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "16"))
+                    Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "16")),
+                    Boolean.parseBoolean(env("AZIR_TX_STAGE_METRICS", "false"))
             );
         }
     }
@@ -351,6 +364,7 @@ public final class MysqlTxnBenchmark {
                     + " parallel_commit=" + config.parallelCommit()
                     + " parallel_rollback=" + config.parallelRollback()
                     + " async_commit=" + config.asyncCommit()
+                    + " stage_metrics=" + config.stageMetrics()
                     + " attempts=" + attempts
                     + " committed=" + committed
                     + " conflicts=" + conflicts
