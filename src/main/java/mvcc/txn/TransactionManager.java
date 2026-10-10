@@ -141,11 +141,11 @@ public final class TransactionManager implements AutoCloseable {
      * 开启一个新事务。
      */
     public Transaction begin(IsolationLevel isolationLevel) {
-        long txId = recordStage(TransactionStage.BEGIN_TSO, timestampOracle::nextTimestamp);
+        long txId = nextTimestamp(TransactionStage.BEGIN_TSO);
         long startTs = txId;
         Transaction transaction = new Transaction(txId, startTs, isolationLevel);
         if (!options.lazyBeginMetadata()) {
-            recordStage(TransactionStage.BEGIN_METADATA, () -> metadataStore.create(txId, startTs, isolationLevel));
+            createBeginMetadata(txId, startTs, isolationLevel);
             transaction.metadataPersisted(true);
         }
         return transaction;
@@ -263,7 +263,7 @@ public final class TransactionManager implements AutoCloseable {
             return new TransactionCommitResult(tx.txId(), tx.startTs(), TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
         }
         // 没有写入分片时只需要生成提交时间戳并更新事务状态。
-        long commitTs = recordStage(TransactionStage.COMMIT_TSO, timestampOracle::nextTimestamp);
+        long commitTs = nextTimestamp(TransactionStage.COMMIT_TSO);
         if (tx.metadataPersisted()) {
             metadataStore.markCommitted(tx.txId(), commitTs);
         } else if (!options.lazyBeginMetadata()) {
@@ -278,19 +278,13 @@ public final class TransactionManager implements AutoCloseable {
      */
     private TransactionCommitResult commitSingleShard(Transaction tx, String participant) {
         // 单分片事务走直接提交路径，避免完整两阶段提交的额外往返。
-        long commitTs = recordStage(TransactionStage.COMMIT_TSO, timestampOracle::nextTimestamp);
+        long commitTs = nextTimestamp(TransactionStage.COMMIT_TSO);
         boolean skipMetadataFastPath = options.lazyBeginMetadata() && !tx.metadataPersisted();
         if (!skipMetadataFastPath) {
-            recordStage(
-                    TransactionStage.SINGLE_SHARD_METADATA_COMMIT,
-                    () -> metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs)
-            );
+            markSingleShardCommittedStage(tx, participant, commitTs);
         }
         try {
-            recordStage(
-                    TransactionStage.SINGLE_SHARD_PARTICIPANT_COMMIT,
-                    () -> directCommitSingleShardParticipant(tx, participant, commitTs)
-            );
+            directCommitSingleShardParticipantStage(tx, participant, commitTs);
         } catch (RuntimeException ex) {
             throw new MvccException(
                     ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -309,7 +303,7 @@ public final class TransactionManager implements AutoCloseable {
      */
     private TransactionCommitResult commitCrossShard(Transaction tx) {
         if (options.bufferWrites()) {
-            recordStage(TransactionStage.BUFFERED_PREWRITE, () -> prewriteBufferedMutations(tx));
+            prewriteBufferedMutationsStage(tx);
         } else {
             prewriteBufferedMutations(tx);
         }
@@ -318,18 +312,11 @@ public final class TransactionManager implements AutoCloseable {
         boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
         if (explicitPrepareRequired) {
             persistPreparingMetadata(tx);
-            recordStage(
-                    TransactionStage.PREPARE,
-                    () -> runAcrossParticipants(
-                            tx.participants(),
-                            participant -> adapter(participant).prepare(tx.txId()),
-                            options.crossShardCommitPolicy().parallelPrepare()
-                    )
-            );
+            prepareParticipantsStage(tx);
         }
 
-        long commitTs = recordStage(TransactionStage.COMMIT_TSO, timestampOracle::nextTimestamp);
-        recordStage(TransactionStage.CROSS_SHARD_METADATA_COMMIT, () -> persistCommittedMetadata(tx, commitTs, explicitPrepareRequired));
+        long commitTs = nextTimestamp(TransactionStage.COMMIT_TSO);
+        persistCommittedMetadataStage(tx, commitTs, explicitPrepareRequired);
         String primaryParticipant = primaryParticipant(tx.participants());
         try {
             if (options.crossShardCommitPolicy().asyncCommit()) {
@@ -338,13 +325,15 @@ public final class TransactionManager implements AutoCloseable {
                 return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.ASYNC_PRIMARY_COMMIT);
             }
             // 同步提交模式先提交主参与者，再提交其余参与者，保留状态未知异常边界。
-            recordStage(TransactionStage.PRIMARY_PARTICIPANT_COMMIT, () -> commitParticipant(tx, primaryParticipant, commitTs));
+            commitParticipantStage(TransactionStage.PRIMARY_PARTICIPANT_COMMIT, tx, primaryParticipant, commitTs);
             Set<String> secondaryParticipants = secondaryParticipants(tx.participants(), primaryParticipant);
             runAcrossParticipants(
                     secondaryParticipants,
-                    participant -> recordStage(
+                    participant -> commitParticipantStage(
                             TransactionStage.SECONDARY_PARTICIPANT_COMMIT,
-                            () -> commitParticipant(tx, participant, commitTs)
+                            tx,
+                            participant,
+                            commitTs
                     ),
                     options.crossShardCommitPolicy().parallelCommit()
             );
@@ -389,7 +378,7 @@ public final class TransactionManager implements AutoCloseable {
         asyncCommitExecutor.submit(() -> {
             for (String participant : participants) {
                 try {
-                    recordStage(TransactionStage.ASYNC_PARTICIPANT_COMMIT, () -> commitParticipant(tx, participant, commitTs));
+                    commitParticipantStage(TransactionStage.ASYNC_PARTICIPANT_COMMIT, tx, participant, commitTs);
                 } catch (RuntimeException ignored) {
                 }
             }
@@ -454,16 +443,7 @@ public final class TransactionManager implements AutoCloseable {
         if (tx.status() == TxStatus.ABORTED || tx.status() == TxStatus.COMMITTED) {
             return;
         }
-        recordStage(TransactionStage.ROLLBACK, () -> {
-            if (tx.metadataPersisted()) {
-                metadataStore.markAborted(tx.txId());
-            }
-            runAcrossParticipants(
-                    tx.participants(),
-                    participant -> adapter(participant).abort(tx.txId()),
-                    options.crossShardCommitPolicy().parallelRollback()
-            );
-        });
+        rollbackStage(tx);
         tx.status(TxStatus.ABORTED);
     }
 
@@ -484,7 +464,7 @@ public final class TransactionManager implements AutoCloseable {
             return;
         }
         StorageAdapter adapter = adapter(shardId);
-        recordStage(TransactionStage.EAGER_PREWRITE, () -> prewriteEagerMutation(tx, shardId, mutation, adapter));
+        prewriteEagerMutationStage(tx, shardId, mutation, adapter);
         tx.addParticipant(shardId);
     }
 
@@ -536,7 +516,7 @@ public final class TransactionManager implements AutoCloseable {
     private long readTs(Transaction tx) {
         return tx.isolationLevel() == IsolationLevel.REPEATABLE_READ
                 ? tx.startTs()
-                : recordStage(TransactionStage.READ_TSO, timestampOracle::nextTimestamp);
+                : nextTimestamp(TransactionStage.READ_TSO);
     }
 
     /**
@@ -807,7 +787,7 @@ public final class TransactionManager implements AutoCloseable {
             if (!cleanupIntents) {
                 intentCleanupExecutor.submit(() -> {
                     try {
-                        recordStage(TransactionStage.INTENT_CLEANUP, () -> adapter(shardId).cleanupIntents(tx.txId()));
+                        cleanupIntentsStage(tx, shardId);
                     } catch (RuntimeException ignored) {
                     }
                 });
@@ -830,12 +810,170 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 记录带返回值阶段的执行结果。
+     * 判断当前是否启用事务阶段指标。
      */
-    private <T> T recordStage(TransactionStage stage, Supplier<T> action) {
-        if (metrics == NoOpTransactionMetrics.INSTANCE) {
-            return action.get();
+    private boolean metricsEnabled() {
+        return metrics != NoOpTransactionMetrics.INSTANCE;
+    }
+
+    /**
+     * 按需记录时间戳分配阶段。
+     */
+    private long nextTimestamp(TransactionStage stage) {
+        if (!metricsEnabled()) {
+            return timestampOracle.nextTimestamp();
         }
+        return recordMeasuredStage(stage, timestampOracle::nextTimestamp);
+    }
+
+    /**
+     * 按需记录 begin metadata 创建阶段。
+     */
+    private void createBeginMetadata(long txId, long startTs, IsolationLevel isolationLevel) {
+        if (!metricsEnabled()) {
+            metadataStore.create(txId, startTs, isolationLevel);
+            return;
+        }
+        recordMeasuredStage(TransactionStage.BEGIN_METADATA, () -> metadataStore.create(txId, startTs, isolationLevel));
+    }
+
+    /**
+     * 按需记录单分片 metadata 提交阶段。
+     */
+    private void markSingleShardCommittedStage(Transaction tx, String participant, long commitTs) {
+        if (!metricsEnabled()) {
+            metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
+            return;
+        }
+        recordMeasuredStage(
+                TransactionStage.SINGLE_SHARD_METADATA_COMMIT,
+                () -> metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs)
+        );
+    }
+
+    /**
+     * 按需记录缓冲写预写阶段。
+     */
+    private void prewriteBufferedMutationsStage(Transaction tx) {
+        if (!metricsEnabled()) {
+            prewriteBufferedMutations(tx);
+            return;
+        }
+        recordMeasuredStage(TransactionStage.BUFFERED_PREWRITE, () -> prewriteBufferedMutations(tx));
+    }
+
+    /**
+     * 按需记录非缓冲预写阶段。
+     */
+    private void prewriteEagerMutationStage(Transaction tx, String shardId, Mutation mutation, StorageAdapter adapter) {
+        if (!metricsEnabled()) {
+            prewriteEagerMutation(tx, shardId, mutation, adapter);
+            return;
+        }
+        recordMeasuredStage(TransactionStage.EAGER_PREWRITE, () -> prewriteEagerMutation(tx, shardId, mutation, adapter));
+    }
+
+    /**
+     * 按需记录显式 prepare 阶段。
+     */
+    private void prepareParticipantsStage(Transaction tx) {
+        if (!metricsEnabled()) {
+            runAcrossParticipants(
+                    tx.participants(),
+                    participant -> adapter(participant).prepare(tx.txId()),
+                    options.crossShardCommitPolicy().parallelPrepare()
+            );
+            return;
+        }
+        recordMeasuredStage(
+                TransactionStage.PREPARE,
+                () -> runAcrossParticipants(
+                        tx.participants(),
+                        participant -> adapter(participant).prepare(tx.txId()),
+                        options.crossShardCommitPolicy().parallelPrepare()
+                )
+        );
+    }
+
+    /**
+     * 按需记录跨分片 metadata 提交阶段。
+     */
+    private void persistCommittedMetadataStage(Transaction tx, long commitTs, boolean explicitPrepareRequired) {
+        if (!metricsEnabled()) {
+            persistCommittedMetadata(tx, commitTs, explicitPrepareRequired);
+            return;
+        }
+        recordMeasuredStage(
+                TransactionStage.CROSS_SHARD_METADATA_COMMIT,
+                () -> persistCommittedMetadata(tx, commitTs, explicitPrepareRequired)
+        );
+    }
+
+    /**
+     * 按需记录参与者提交阶段。
+     */
+    private void commitParticipantStage(TransactionStage stage, Transaction tx, String shardId, long commitTs) {
+        if (!metricsEnabled()) {
+            commitParticipant(tx, shardId, commitTs);
+            return;
+        }
+        recordMeasuredStage(stage, () -> commitParticipant(tx, shardId, commitTs));
+    }
+
+    /**
+     * 按需记录单分片直接提交阶段。
+     */
+    private void directCommitSingleShardParticipantStage(Transaction tx, String shardId, long commitTs) {
+        if (!metricsEnabled()) {
+            directCommitSingleShardParticipant(tx, shardId, commitTs);
+            return;
+        }
+        recordMeasuredStage(
+                TransactionStage.SINGLE_SHARD_PARTICIPANT_COMMIT,
+                () -> directCommitSingleShardParticipant(tx, shardId, commitTs)
+        );
+    }
+
+    /**
+     * 按需记录回滚阶段。
+     */
+    private void rollbackStage(Transaction tx) {
+        if (!metricsEnabled()) {
+            rollbackInternal(tx);
+            return;
+        }
+        recordMeasuredStage(TransactionStage.ROLLBACK, () -> rollbackInternal(tx));
+    }
+
+    /**
+     * 执行事务回滚的实际动作。
+     */
+    private void rollbackInternal(Transaction tx) {
+        if (tx.metadataPersisted()) {
+            metadataStore.markAborted(tx.txId());
+        }
+        runAcrossParticipants(
+                tx.participants(),
+                participant -> adapter(participant).abort(tx.txId()),
+                options.crossShardCommitPolicy().parallelRollback()
+        );
+    }
+
+    /**
+     * 按需记录 intent 清理阶段。
+     */
+    private void cleanupIntentsStage(Transaction tx, String shardId) {
+        if (!metricsEnabled()) {
+            adapter(shardId).cleanupIntents(tx.txId());
+            return;
+        }
+        recordMeasuredStage(TransactionStage.INTENT_CLEANUP, () -> adapter(shardId).cleanupIntents(tx.txId()));
+    }
+
+    /**
+     * 记录带返回值的计量阶段执行结果。
+     */
+    private <T> T recordMeasuredStage(TransactionStage stage, Supplier<T> action) {
         long startNanos = System.nanoTime();
         try {
             T result = action.get();
@@ -848,13 +986,9 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 记录无返回值阶段的执行结果。
+     * 记录无返回值的计量阶段执行结果。
      */
-    private void recordStage(TransactionStage stage, Runnable action) {
-        if (metrics == NoOpTransactionMetrics.INSTANCE) {
-            action.run();
-            return;
-        }
+    private void recordMeasuredStage(TransactionStage stage, Runnable action) {
         long startNanos = System.nanoTime();
         try {
             action.run();
