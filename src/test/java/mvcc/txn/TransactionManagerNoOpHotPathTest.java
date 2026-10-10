@@ -20,6 +20,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 事务管理器 no-op metrics 热路径测试。
@@ -30,9 +31,40 @@ class TransactionManagerNoOpHotPathTest {
      */
     @Test
     void noOpHotPathShouldNotUseGenericRecordStageWrapper() throws Exception {
-        String source = Files.readString(Path.of("src/main/java/mvcc/txn/TransactionManager.java"));
+        String source = readTransactionManagerSource();
 
         assertFalse(source.contains("recordStage("));
+    }
+
+    /**
+     * 验证事务入口不会直接进入计量包装方法。
+     */
+    @Test
+    void publicHotPathShouldNotCallMeasuredStageDirectly() throws Exception {
+        String source = readTransactionManagerSource();
+        String publicAndBusinessSource = source.substring(0, source.indexOf("private boolean metricsEnabled()"));
+
+        assertFalse(publicAndBusinessSource.contains("recordMeasuredStage("));
+    }
+
+    /**
+     * 验证所有计量 helper 都先短路默认 no-op metrics。
+     */
+    @Test
+    void measuredStageHelpersShouldGuardNoOpMetricsBeforeWrappingAction() throws Exception {
+        String source = readTransactionManagerSource();
+
+        assertMeasuredStageGuard(source, "nextTimestamp(TransactionStage stage)");
+        assertMeasuredStageGuard(source, "createBeginMetadata(long txId, long startTs, IsolationLevel isolationLevel)");
+        assertMeasuredStageGuard(source, "markSingleShardCommittedStage(Transaction tx, String participant, long commitTs)");
+        assertMeasuredStageGuard(source, "prewriteBufferedMutationsStage(Transaction tx)");
+        assertMeasuredStageGuard(source, "prewriteEagerMutationStage(Transaction tx, String shardId, Mutation mutation, StorageAdapter adapter)");
+        assertMeasuredStageGuard(source, "prepareParticipantsStage(Transaction tx)");
+        assertMeasuredStageGuard(source, "persistCommittedMetadataStage(Transaction tx, long commitTs, boolean explicitPrepareRequired)");
+        assertMeasuredStageGuard(source, "commitParticipantStage(TransactionStage stage, Transaction tx, String shardId, long commitTs)");
+        assertMeasuredStageGuard(source, "directCommitSingleShardParticipantStage(Transaction tx, String shardId, long commitTs)");
+        assertMeasuredStageGuard(source, "rollbackStage(Transaction tx)");
+        assertMeasuredStageGuard(source, "cleanupIntentsStage(Transaction tx, String shardId)");
     }
 
     /**
@@ -96,6 +128,50 @@ class TransactionManagerNoOpHotPathTest {
         manager.rollback(tx);
 
         assertEquals(1, shard.abortCount());
+    }
+
+    /**
+     * 读取事务管理器源码。
+     */
+    private static String readTransactionManagerSource() throws Exception {
+        return Files.readString(Path.of("src/main/java/mvcc/txn/TransactionManager.java"));
+    }
+
+    /**
+     * 断言计量 helper 在包装业务动作前先判断 no-op metrics。
+     */
+    private static void assertMeasuredStageGuard(String source, String signature) {
+        String methodSource = extractMethodSource(source, signature);
+        int guardIndex = methodSource.indexOf("if (!metricsEnabled())");
+        int measuredIndex = methodSource.indexOf("recordMeasuredStage(");
+
+        assertTrue(guardIndex >= 0, signature + " should guard no-op metrics");
+        assertTrue(measuredIndex >= 0, signature + " should record measured metrics when enabled");
+        assertTrue(guardIndex < measuredIndex, signature + " should guard before recordMeasuredStage");
+    }
+
+    /**
+     * 从源码中截取指定方法体。
+     */
+    private static String extractMethodSource(String source, String signature) {
+        int signatureIndex = source.indexOf(signature);
+        assertTrue(signatureIndex >= 0, signature + " should exist");
+        int bodyStart = source.indexOf('{', signatureIndex);
+        assertTrue(bodyStart >= 0, signature + " should have method body");
+
+        int depth = 0;
+        for (int index = bodyStart; index < source.length(); index++) {
+            char current = source.charAt(index);
+            if (current == '{') {
+                depth++;
+            } else if (current == '}') {
+                depth--;
+                if (depth == 0) {
+                    return source.substring(signatureIndex, index + 1);
+                }
+            }
+        }
+        throw new AssertionError(signature + " should have balanced braces");
     }
 
     /**
