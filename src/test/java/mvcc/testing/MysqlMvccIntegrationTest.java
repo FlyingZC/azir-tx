@@ -9,6 +9,11 @@ import mvcc.common.MvccException;
 import mvcc.metadata.InMemoryTransactionMetadataStore;
 import mvcc.metadata.TransactionMetadataStore;
 import mvcc.recovery.RecoveryManager;
+import mvcc.sql.AzirSqlEngine;
+import mvcc.sql.ShardResolver;
+import mvcc.sql.SqlExecutionResult;
+import mvcc.sql.SqlSession;
+import mvcc.sql.SqlValueCodec;
 import mvcc.storage.ReadContext;
 import mvcc.storage.KeyRange;
 import mvcc.storage.StorageAdapter;
@@ -116,6 +121,40 @@ class MysqlMvccIntegrationTest {
         transactionManager.commit(writer);
 
         assertEquals("v2", readString(reader, "shard-1", "account:1"));
+    }
+
+    /**
+     * 验证 Calcite 复杂 SQL 通过真实 MySQL MVCC 适配器完成跨分片 DML、JOIN 和聚合。
+     */
+    @Test
+    void calciteSqlShouldExecuteAgainstMysqlMvccShards() {
+        AzirSqlEngine sqlEngine = AzirSqlEngine.calcite(
+                transactionManager,
+                ShardResolver.hashByKey(List.of(shard1.shardId(), shard2.shardId())),
+                SqlValueCodec.utf8(),
+                IsolationLevel.READ_COMMITTED
+        );
+
+        try (SqlSession session = sqlEngine.openSession()) {
+            session.execute("insert into account (id, value) values ('a', 'gold'), ('b', 'silver'), ('c', 'gold')");
+            session.execute("insert into profile (id, value) values ('a', 'active'), ('b', 'inactive'), ('c', 'active')");
+            session.execute("update account set value = upper(value) where id = 'b'");
+
+            SqlExecutionResult result = session.execute("""
+                    select a.value as category, count(*) as total
+                    from account a join profile p on a.id = p.id
+                    where p.value = 'active'
+                    group by a.value
+                    having count(*) >= 2
+                    order by total desc
+                    """);
+
+            assertEquals(1, result.rows().size());
+            assertEquals("gold", result.singleRow().get("category"));
+            assertEquals("2", result.singleRow().get("total"));
+            assertEquals(1, session.execute("delete from account where value = 'SILVER'").updateCount());
+            assertEquals(2, session.execute("select * from account").rows().size());
+        }
     }
 
     @Test

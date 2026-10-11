@@ -12,6 +12,7 @@ public final class AzirSqlEngine {
     private final ShardResolver shardResolver;
     private final SqlValueCodec valueCodec;
     private final IsolationLevel defaultIsolationLevel;
+    private final SqlStorageKeyCodec keyCodec;
 
     /**
      * 构造 Azir SQL 引擎。
@@ -26,12 +27,36 @@ public final class AzirSqlEngine {
         this.shardResolver = shardResolver;
         this.valueCodec = valueCodec;
         this.defaultIsolationLevel = defaultIsolationLevel;
+        this.keyCodec = new SqlStorageKeyCodec();
+    }
+
+    /**
+     * 创建使用 Calcite 计划器的 Azir SQL 引擎。
+     */
+    public static AzirSqlEngine calcite(TransactionManager transactionManager,
+                                        ShardResolver shardResolver,
+                                        SqlValueCodec valueCodec,
+                                        IsolationLevel defaultIsolationLevel) {
+        return new AzirSqlEngine(
+                transactionManager,
+                new CalciteSqlPlanner(),
+                shardResolver,
+                valueCodec,
+                defaultIsolationLevel
+        );
     }
 
     /**
      * 创建新的 SQL 会话。
      */
     public SqlSession openSession() {
-        return new AzirSqlSession(transactionManager, planner, shardResolver, valueCodec, defaultIsolationLevel);
+        return new AzirSqlSession(
+                transactionManager,
+                planner,
+                shardResolver,
+                valueCodec,
+                keyCodec,
+                defaultIsolationLevel
+        );
     }
 }

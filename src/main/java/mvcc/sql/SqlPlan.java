@@ -2,6 +2,8 @@ package mvcc.sql;
 
 import mvcc.common.IsolationLevel;
 
+import java.util.List;
+
 /**
  * SQL 执行计划封闭接口，描述当前轻量 SQL 层支持的计划类型。
  */
@@ -46,5 +48,17 @@ public sealed interface SqlPlan {
      * 主键删除计划。
      */
     record DeleteByKeyPlan(String table, String key) implements SqlPlan {
+    }
+
+    /**
+     * Calcite 关系计划，保存已校验语句及其可能访问的表。
+     */
+    record CalcitePlan(String sql, CalciteStatementType statementType, List<String> tableNames) implements SqlPlan {
+        /**
+         * 构造不可变的 Calcite 关系计划。
+         */
+        public CalcitePlan {
+            tableNames = List.copyOf(tableNames);
+        }
     }
 }

@@ -117,7 +117,7 @@ class AzirSqlSessionTest {
         try (SqlSession session = engine.openSession()) {
             session.execute("external syntax");
 
-            assertEquals("v4", readCommittedValue(storage, "u4"));
+            assertEquals("v4", readCommittedValue(storage, "account", "u4"));
         }
     }
 
@@ -246,6 +246,161 @@ class AzirSqlSessionTest {
     }
 
     /**
+     * 验证 Calcite 可以执行投影、表达式、过滤、排序和限制行数。
+     */
+    @Test
+    void calciteShouldExecuteProjectionFilterSortAndLimit() {
+        AzirSqlEngine engine = calciteEngine(new InMemoryTestStorageAdapter("s0"));
+
+        try (SqlSession session = engine.openSession()) {
+            SqlExecutionResult inserted = session.execute(
+                    "insert into account (id, value) values ('1', 'alpha'), ('2', 'beta'), ('3', 'gamma')"
+            );
+            SqlExecutionResult selected = session.execute("""
+                    select id, upper(value) as normalized
+                    from account
+                    where value >= 'beta'
+                    order by value desc
+                    limit 2
+                    """);
+
+            assertEquals(3, inserted.updateCount());
+            assertEquals(List.of("3", "2"), selected.rows().stream().map(row -> row.get("id")).toList());
+            assertEquals(List.of("GAMMA", "BETA"), selected.rows().stream().map(row -> row.get("normalized")).toList());
+        }
+    }
+
+    /**
+     * 验证 Calcite JOIN、分组聚合、HAVING 和排序在 MVCC 快照行上执行。
+     */
+    @Test
+    void calciteShouldExecuteJoinAggregationAndHaving() {
+        InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
+        AzirSqlEngine engine = calciteEngine(storage);
+
+        try (SqlSession session = engine.openSession()) {
+            session.execute("insert into account (id, value) values ('1', 'gold'), ('2', 'gold'), ('3', 'silver')");
+            session.execute("insert into profile (id, value) values ('1', 'active'), ('2', 'active'), ('3', 'inactive')");
+            storage.clearScanReadTimestamps();
+
+            SqlExecutionResult result = session.execute("""
+                    select a.value as category, count(*) as total
+                    from account a
+                    join profile p on a.id = p.id
+                    where p.value = 'active'
+                    group by a.value
+                    having count(*) >= 2
+                    order by total desc
+                    """);
+
+            assertEquals(1, result.rows().size());
+            assertEquals("gold", result.singleRow().get("category"));
+            assertEquals("2", result.singleRow().get("total"));
+            assertEquals(2, storage.scanReadTimestamps().size());
+            assertEquals(1, new HashSet<>(storage.scanReadTimestamps()).size());
+        }
+    }
+
+    /**
+     * 验证 INSERT SELECT、表达式 UPDATE 和条件 DELETE 均写回 MVCC 事务核心。
+     */
+    @Test
+    void calciteShouldExecuteInsertSelectUpdateAndDelete() {
+        AzirSqlEngine engine = calciteEngine(new InMemoryTestStorageAdapter("s0"));
+
+        try (SqlSession session = engine.openSession()) {
+            session.execute("insert into account (id, value) values ('1', 'alpha'), ('2', 'beta'), ('3', 'delta')");
+
+            SqlExecutionResult updated = session.execute(
+                    "update account set value = upper(value) where id in ('1', '2')"
+            );
+            SqlExecutionResult copied = session.execute("""
+                    insert into archive (id, value)
+                    select id, value from account where value like 'A%'
+                    """);
+            SqlExecutionResult deleted = session.execute("delete from account where value like 'd%'");
+
+            assertEquals(2, updated.updateCount());
+            assertEquals(1, copied.updateCount());
+            assertEquals(1, deleted.updateCount());
+            assertEquals("ALPHA", session.execute("select value from archive where id = '1'").singleRow().get("value"));
+            assertTrue(session.execute("select * from account where id = '3'").rows().isEmpty());
+        }
+    }
+
+    /**
+     * 验证同一物理分片中相同主键的不同逻辑表不会互相覆盖。
+     */
+    @Test
+    void sqlTablesShouldUseIndependentPhysicalKeyNamespaces() {
+        AzirSqlEngine engine = calciteEngine(new InMemoryTestStorageAdapter("s0"));
+
+        try (SqlSession session = engine.openSession()) {
+            session.execute("insert into account (id, value) values ('same', 'account-value')");
+            session.execute("insert into profile (id, value) values ('same', 'profile-value')");
+
+            assertEquals(
+                    "account-value",
+                    session.execute("select value from account where id = 'same'").singleRow().get("value")
+            );
+            assertEquals(
+                    "profile-value",
+                    session.execute("select value from profile where id = 'same'").singleRow().get("value")
+            );
+        }
+    }
+
+    /**
+     * 验证显式事务中的复杂扫描可以读取尚未提交的本事务缓冲写。
+     */
+    @Test
+    void calciteQueryShouldReadOwnWritesInsideExplicitTransaction() {
+        AzirSqlEngine engine = calciteEngine(new InMemoryTestStorageAdapter("s0"));
+
+        try (SqlSession session = engine.openSession()) {
+            session.execute("begin repeatable read");
+            session.execute("insert into account (id, value) values ('1', 'alpha'), ('2', 'beta')");
+
+            SqlExecutionResult result = session.execute(
+                    "select count(*) as total from account where value is not null"
+            );
+
+            assertEquals("2", result.singleRow().get("total"));
+            session.execute("rollback");
+        }
+
+        try (SqlSession verification = engine.openSession()) {
+            assertTrue(verification.execute("select * from account").rows().isEmpty());
+        }
+    }
+
+    /**
+     * 验证哈希路由下的复杂查询会扫描全部分片并合并排序结果。
+     */
+    @Test
+    void calciteQueryShouldScanAllHashShards() {
+        InMemoryTestStorageAdapter shard0 = new InMemoryTestStorageAdapter("s0");
+        InMemoryTestStorageAdapter shard1 = new InMemoryTestStorageAdapter("s1");
+        ShardResolver resolver = ShardResolver.hashByKey(List.of("s0", "s1"));
+        AzirSqlEngine engine = AzirSqlEngine.calcite(
+                manager(shard0, shard1),
+                resolver,
+                SqlValueCodec.utf8(),
+                IsolationLevel.READ_COMMITTED
+        );
+
+        try (SqlSession session = engine.openSession()) {
+            session.execute("insert into account (id, value) values ('a', 'one'), ('b', 'two'), ('c', 'three')");
+
+            SqlExecutionResult result = session.execute("select id from account order by id");
+
+            assertEquals(List.of("a", "b", "c"), result.rows().stream().map(row -> row.get("id")).toList());
+            assertFalse(shard0.committedValues.isEmpty());
+            assertFalse(shard1.committedValues.isEmpty());
+        }
+    }
+
+    /**
      * 创建默认测试 SQL 引擎。
      */
     private AzirSqlEngine engine(InMemoryTestStorageAdapter storage) {
@@ -259,22 +414,45 @@ class AzirSqlSessionTest {
     }
 
     /**
+     * 创建使用 Calcite 关系计划器的测试 SQL 引擎。
+     */
+    private AzirSqlEngine calciteEngine(InMemoryTestStorageAdapter storage) {
+        return AzirSqlEngine.calcite(
+                manager(storage),
+                ShardResolver.singleShard(storage.shardId()),
+                SqlValueCodec.utf8(),
+                IsolationLevel.READ_COMMITTED
+        );
+    }
+
+    /**
      * 创建默认测试事务管理器。
      */
     private TransactionManager manager(InMemoryTestStorageAdapter storage) {
+        return manager(new InMemoryTestStorageAdapter[]{storage});
+    }
+
+    /**
+     * 创建包含多个测试分片的事务管理器。
+     */
+    private TransactionManager manager(InMemoryTestStorageAdapter... storages) {
         return new TransactionManager(
                 new AtomicTimestampOracle(1L),
                 new InMemoryTransactionMetadataStore(),
                 TransactionOptions.defaults(),
-                Map.of(storage.shardId(), storage)
+                java.util.Arrays.stream(storages).collect(java.util.stream.Collectors.toMap(
+                        InMemoryTestStorageAdapter::shardId,
+                        storage -> storage
+                ))
         );
     }
 
     /**
      * 读取测试存储中的最新已提交字符串。
      */
-    private String readCommittedValue(InMemoryTestStorageAdapter storage, String key) {
-        return storage.get(new ReadContext(-1L, Long.MAX_VALUE, IsolationLevel.READ_COMMITTED), key)
+    private String readCommittedValue(InMemoryTestStorageAdapter storage, String table, String key) {
+        String physicalKey = new SqlStorageKeyCodec().encode(table, key);
+        return storage.get(new ReadContext(-1L, Long.MAX_VALUE, IsolationLevel.READ_COMMITTED), physicalKey)
                 .map(VersionedValue::value)
                 .map(value -> new String(value, StandardCharsets.UTF_8))
                 .orElseThrow();
@@ -287,6 +465,7 @@ class AzirSqlSessionTest {
         private final String shardId;
         private final Map<String, NavigableMap<Long, VersionedValue>> committedValues = new HashMap<>();
         private final Map<Long, Map<String, Mutation>> intentsByTx = new HashMap<>();
+        private final List<Long> scanReadTimestamps = new ArrayList<>();
         private boolean failDirectCommitWithStatusUnknown;
         private int abortCount;
 
@@ -309,6 +488,20 @@ class AzirSqlSessionTest {
          */
         private int abortCount() {
             return abortCount;
+        }
+
+        /**
+         * 清空扫描读取时间戳记录。
+         */
+        private void clearScanReadTimestamps() {
+            scanReadTimestamps.clear();
+        }
+
+        /**
+         * 返回扫描读取时间戳记录。
+         */
+        private List<Long> scanReadTimestamps() {
+            return List.copyOf(scanReadTimestamps);
         }
 
         /**
@@ -348,6 +541,7 @@ class AzirSqlSessionTest {
          */
         @Override
         public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            scanReadTimestamps.add(context.readTs());
             List<VersionedValue> result = new ArrayList<>();
             for (String key : committedValues.keySet()) {
                 if (key.compareTo(keyRange.startKeyInclusive()) >= 0 && key.compareTo(keyRange.endKeyExclusive()) < 0) {

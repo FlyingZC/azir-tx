@@ -18,6 +18,8 @@ final class AzirSqlSession implements SqlSession {
     private final SqlPlanner planner;
     private final ShardResolver shardResolver;
     private final SqlValueCodec valueCodec;
+    private final SqlStorageKeyCodec keyCodec;
+    private final CalciteSqlExecutor calciteExecutor;
     private final IsolationLevel defaultIsolationLevel;
     private Transaction activeTransaction;
 
@@ -28,11 +30,14 @@ final class AzirSqlSession implements SqlSession {
                    SqlPlanner planner,
                    ShardResolver shardResolver,
                    SqlValueCodec valueCodec,
+                   SqlStorageKeyCodec keyCodec,
                    IsolationLevel defaultIsolationLevel) {
         this.transactionManager = transactionManager;
         this.planner = planner;
         this.shardResolver = shardResolver;
         this.valueCodec = valueCodec;
+        this.keyCodec = keyCodec;
+        this.calciteExecutor = new CalciteSqlExecutor(transactionManager, shardResolver, valueCodec, keyCodec);
         this.defaultIsolationLevel = defaultIsolationLevel;
     }
 
@@ -119,6 +124,7 @@ final class AzirSqlSession implements SqlSession {
             case SqlPlan.InsertByKeyPlan insertPlan -> executeDataPlan(insertPlan);
             case SqlPlan.UpdateByKeyPlan updatePlan -> executeDataPlan(updatePlan);
             case SqlPlan.DeleteByKeyPlan deletePlan -> executeDataPlan(deletePlan);
+            case SqlPlan.CalcitePlan calcitePlan -> executeDataPlan(calcitePlan);
         };
     }
 
@@ -167,6 +173,7 @@ final class AzirSqlSession implements SqlSession {
             case SqlPlan.InsertByKeyPlan insertPlan -> executePut(tx, insertPlan.table(), insertPlan.key(), insertPlan.value());
             case SqlPlan.UpdateByKeyPlan updatePlan -> executePut(tx, updatePlan.table(), updatePlan.key(), updatePlan.value());
             case SqlPlan.DeleteByKeyPlan deletePlan -> executeDelete(tx, deletePlan);
+            case SqlPlan.CalcitePlan calcitePlan -> calciteExecutor.execute(tx, calcitePlan);
             default -> throw new MvccException(ErrorCode.ILLEGAL_STATE, "not a data plan: " + plan, false, tx.txId());
         };
     }
@@ -176,7 +183,7 @@ final class AzirSqlSession implements SqlSession {
      */
     private SqlExecutionResult executeSelect(Transaction tx, SqlPlan.SelectByKeyPlan plan) {
         String shardId = shardResolver.resolveShard(plan.table(), plan.key());
-        Optional<byte[]> value = transactionManager.get(tx, shardId, plan.key());
+        Optional<byte[]> value = transactionManager.get(tx, shardId, keyCodec.encode(plan.table(), plan.key()));
         if (value.isEmpty()) {
             return SqlExecutionResult.rows(java.util.List.of());
         }
@@ -191,7 +198,7 @@ final class AzirSqlSession implements SqlSession {
      */
     private SqlExecutionResult executePut(Transaction tx, String table, String key, String value) {
         String shardId = shardResolver.resolveShard(table, key);
-        transactionManager.put(tx, shardId, key, valueCodec.encode(value));
+        transactionManager.put(tx, shardId, keyCodec.encode(table, key), valueCodec.encode(value));
         return SqlExecutionResult.updateCount(1);
     }
 
@@ -200,7 +207,7 @@ final class AzirSqlSession implements SqlSession {
      */
     private SqlExecutionResult executeDelete(Transaction tx, SqlPlan.DeleteByKeyPlan plan) {
         String shardId = shardResolver.resolveShard(plan.table(), plan.key());
-        transactionManager.delete(tx, shardId, plan.key());
+        transactionManager.delete(tx, shardId, keyCodec.encode(plan.table(), plan.key()));
         return SqlExecutionResult.updateCount(1);
     }
 

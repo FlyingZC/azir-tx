@@ -157,13 +157,15 @@ public final class TransactionManager implements AutoCloseable {
     public Optional<byte[]> get(Transaction tx, String shardId, String key) {
         ensureActive(tx);
         StorageAdapter adapter = adapter(shardId);
-        long readTs = readTs(tx);
-        ensureSnapshotVisible(readTs, tx.txId());
+        StatementReadSnapshot snapshot = beginReadStatement(tx);
         Optional<byte[]> bufferedValue = bufferedRead(tx, shardId, key);
         if (bufferedValue != null) {
             return bufferedValue;
         }
-        Optional<VersionedValue> result = adapter.get(new ReadContext(tx.txId(), readTs, tx.isolationLevel()), key);
+        Optional<VersionedValue> result = adapter.get(
+                new ReadContext(tx.txId(), snapshot.readTs(), tx.isolationLevel()),
+                key
+        );
         if (result.isEmpty() || result.get().deleted()) {
             return Optional.empty();
         }
@@ -174,12 +176,40 @@ public final class TransactionManager implements AutoCloseable {
      * 按键范围扫描当前快照可见的数据。
      */
     public List<VersionedValue> scan(Transaction tx, String shardId, String startKeyInclusive, String endKeyExclusive) {
+        return scan(tx, shardId, startKeyInclusive, endKeyExclusive, beginReadStatement(tx));
+    }
+
+    /**
+     * 创建绑定当前事务的语句级读取快照。
+     */
+    public StatementReadSnapshot beginReadStatement(Transaction tx) {
         ensureActive(tx);
-        StorageAdapter adapter = adapter(shardId);
         long readTs = readTs(tx);
         ensureSnapshotVisible(readTs, tx.txId());
+        return new StatementReadSnapshot(tx.txId(), readTs);
+    }
+
+    /**
+     * 使用指定语句级快照扫描键范围，供一次 SQL 内的多表或多分片扫描复用同一可见边界。
+     */
+    public List<VersionedValue> scan(Transaction tx,
+                                     String shardId,
+                                     String startKeyInclusive,
+                                     String endKeyExclusive,
+                                     StatementReadSnapshot snapshot) {
+        ensureActive(tx);
+        if (snapshot.txId() != tx.txId()) {
+            throw new MvccException(
+                    ErrorCode.ILLEGAL_STATE,
+                    "statement snapshot belongs to another transaction: " + snapshot.txId(),
+                    false,
+                    tx.txId()
+            );
+        }
+        ensureSnapshotVisible(snapshot.readTs(), tx.txId());
+        StorageAdapter adapter = adapter(shardId);
         List<VersionedValue> result = adapter.scan(
-                new ReadContext(tx.txId(), readTs, tx.isolationLevel()),
+                new ReadContext(tx.txId(), snapshot.readTs(), tx.isolationLevel()),
                 new KeyRange(startKeyInclusive, endKeyExclusive)
         );
         return overlayBufferedMutations(tx, shardId, startKeyInclusive, endKeyExclusive, result);
