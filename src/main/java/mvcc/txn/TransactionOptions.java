@@ -10,7 +10,8 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
                                  CrossShardCommitPolicy crossShardCommitPolicy,
                                  boolean bufferWrites,
                                  boolean lazyBeginMetadata,
-                                 boolean deferIntentCleanup) {
+                                 boolean deferIntentCleanup,
+                                 TransactionLimits limits) {
     /**
      * 构造 TransactionOptions 实例。
      */
@@ -18,6 +19,15 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
         Objects.requireNonNull(lockWaitPolicy, "lockWaitPolicy");
         Objects.requireNonNull(retryPolicy, "retryPolicy");
         Objects.requireNonNull(crossShardCommitPolicy, "crossShardCommitPolicy");
+        Objects.requireNonNull(limits, "limits");
+    }
+
+    /** 保留原有配置入口并应用有界资源默认值。 */
+    public TransactionOptions(LockWaitPolicy lockWaitPolicy, TransactionRetryPolicy retryPolicy,
+                              CrossShardCommitPolicy crossShardCommitPolicy, boolean bufferWrites,
+                              boolean lazyBeginMetadata, boolean deferIntentCleanup) {
+        this(lockWaitPolicy, retryPolicy, crossShardCommitPolicy, bufferWrites, lazyBeginMetadata,
+                deferIntentCleanup, TransactionLimits.defaults());
     }
 
     /**

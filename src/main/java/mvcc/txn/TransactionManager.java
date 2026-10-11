@@ -19,6 +19,7 @@ import mvcc.storage.Mutation;
 import mvcc.storage.ReadContext;
 import mvcc.storage.StorageAdapter;
 import mvcc.storage.VersionedValue;
+import mvcc.storage.ScanPage;
 import mvcc.tso.TimestampOracle;
 
 import java.util.List;
@@ -26,6 +27,17 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.NavigableMap;
+import java.util.TreeMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -50,6 +62,13 @@ public final class TransactionManager implements AutoCloseable {
     private final ExecutorService participantExecutor;
     private final ExecutorService asyncCommitExecutor;
     private final ExecutorService intentCleanupExecutor;
+    private final Map<String, Semaphore> shardPermits = new HashMap<>();
+    private final Semaphore transactionPermits;
+    private final Map<Long, Transaction> activeTransactions = new ConcurrentHashMap<>();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final LongAdder synchronousFallbacks = new LongAdder();
+    private final LongAdder backgroundFailures = new LongAdder();
+    private final Object transactionOwner = new Object();
 
     /**
      * 构造 TransactionManager 实例。
@@ -118,22 +137,24 @@ public final class TransactionManager implements AutoCloseable {
         this.transactionClassifier = new TransactionClassifier();
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.adapters = Map.copyOf(adapters);
+        this.transactionPermits = new Semaphore(options.limits().maxActiveTransactions());
+        this.adapters.forEach((shardId, adapter) -> {
+            if (shardId.isBlank() || shardId.contains(",") || !shardId.equals(adapter.shardId())) {
+                throw new IllegalArgumentException("shard id must match its adapter and cannot be blank or contain commas");
+            }
+            adapter.configureMetadataStore(metadataStore);
+            shardPermits.put(shardId, new Semaphore(options.limits().shardConcurrency(), true));
+        });
         this.participantExecutor = requiresParallelExecutor(options.crossShardCommitPolicy())
                 ? Executors.newThreadPerTaskExecutor(Thread.ofVirtual()
                         .name("mvcc-participant-", 0)
                         .factory())
                 : null;
         this.asyncCommitExecutor = options.crossShardCommitPolicy().asyncCommit()
-                ? Executors.newFixedThreadPool(
-                options.crossShardCommitPolicy().asyncCommitWorkers(),
-                namedFactory("mvcc-async-commit-")
-        )
+                ? boundedExecutor("mvcc-async-commit-")
                 : null;
         this.intentCleanupExecutor = options.crossShardCommitPolicy().asyncCommit() && options.deferIntentCleanup()
-                ? Executors.newFixedThreadPool(
-                options.crossShardCommitPolicy().asyncCommitWorkers(),
-                namedFactory("mvcc-intent-cleanup-")
-        )
+                ? boundedExecutor("mvcc-intent-cleanup-")
                 : null;
     }
 
@@ -141,35 +162,64 @@ public final class TransactionManager implements AutoCloseable {
      * 开启一个新事务。
      */
     public Transaction begin(IsolationLevel isolationLevel) {
-        long txId = nextTimestamp(TransactionStage.BEGIN_TSO);
-        long startTs = txId;
-        Transaction transaction = new Transaction(txId, startTs, isolationLevel);
-        if (!options.lazyBeginMetadata()) {
-            createBeginMetadata(txId, startTs, isolationLevel);
-            transaction.metadataPersisted(true);
+        Objects.requireNonNull(isolationLevel, "isolationLevel");
+        ensureOpen();
+        expireLocalTransactions();
+        if (!transactionPermits.tryAcquire()) {
+            throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED, "active transaction limit reached", true, null);
         }
-        return transaction;
+        Transaction registered = null;
+        try {
+            Transaction transaction = metadataStore.withPublicationLock(() -> {
+                ensureOpen();
+                metadataStore.assertNoPendingPublications();
+                long txId = nextTimestamp(TransactionStage.BEGIN_TSO);
+                Transaction created = new Transaction(txId, txId, isolationLevel,
+                        metadataStore.currentTimeMillis() + options.limits().timeoutMillis(), transactionOwner);
+                // 独立快照登记保护 lazy 只读事务，不能依赖是否写入事务元数据。
+                metadataStore.registerSnapshot(txId, txId, created.deadlineMillis());
+                if (!options.lazyBeginMetadata()) {
+                    createBeginMetadata(txId, txId, isolationLevel);
+                    created.metadataPersisted(true);
+                }
+                return created;
+            });
+            activeTransactions.put(transaction.txId(), transaction);
+            registered = transaction;
+            ensureOpen();
+            return transaction;
+        } catch (RuntimeException | Error ex) {
+            if (registered == null || activeTransactions.remove(registered.txId(), registered)) {
+                transactionPermits.release();
+            }
+            throw ex;
+        }
     }
 
     /**
      * 读取指定键或事务的当前可见数据。
      */
     public Optional<byte[]> get(Transaction tx, String shardId, String key) {
-        ensureActive(tx);
+        return get(tx, shardId, key, beginReadStatement(tx));
+    }
+
+    /** 在同一条 SQL 的固定快照下执行点读。 */
+    public Optional<byte[]> get(Transaction tx, String shardId, String key, StatementReadSnapshot snapshot) {
+        validateStatement(tx, snapshot);
         StorageAdapter adapter = adapter(shardId);
-        StatementReadSnapshot snapshot = beginReadStatement(tx);
         Optional<byte[]> bufferedValue = bufferedRead(tx, shardId, key);
         if (bufferedValue != null) {
             return bufferedValue;
         }
-        Optional<VersionedValue> result = adapter.get(
+        Optional<VersionedValue> result = withShardPermit(shardId, () -> adapter.get(
                 new ReadContext(tx.txId(), snapshot.readTs(), tx.isolationLevel()),
                 key
-        );
+        ));
+        ensureLeaseValid(tx);
         if (result.isEmpty() || result.get().deleted()) {
             return Optional.empty();
         }
-        return Optional.of(result.get().value());
+        return Optional.of(result.get().value().clone());
     }
 
     /**
@@ -184,9 +234,18 @@ public final class TransactionManager implements AutoCloseable {
      */
     public StatementReadSnapshot beginReadStatement(Transaction tx) {
         ensureActive(tx);
-        long readTs = readTs(tx);
-        ensureSnapshotVisible(readTs, tx.txId());
-        return new StatementReadSnapshot(tx.txId(), readTs);
+        return metadataStore.withPublicationLock(() -> {
+            ensureLeaseValid(tx);
+            metadataStore.assertNoPendingPublications();
+            long readTs = readTs(tx);
+            ensureSnapshotVisible(readTs, tx.txId());
+            return new StatementReadSnapshot(tx.txId(), readTs);
+        });
+    }
+
+    /** SQL 完成排序或聚合后验证原语句仍在租约内，不分配新的 RC 时间戳。 */
+    public void validateReadStatement(Transaction tx, StatementReadSnapshot snapshot) {
+        validateStatement(tx, snapshot);
     }
 
     /**
@@ -197,28 +256,93 @@ public final class TransactionManager implements AutoCloseable {
                                      String startKeyInclusive,
                                      String endKeyExclusive,
                                      StatementReadSnapshot snapshot) {
-        ensureActive(tx);
-        if (snapshot.txId() != tx.txId()) {
-            throw new MvccException(
-                    ErrorCode.ILLEGAL_STATE,
-                    "statement snapshot belongs to another transaction: " + snapshot.txId(),
-                    false,
-                    tx.txId()
-            );
+        List<VersionedValue> result = new ArrayList<>();
+        String after = null;
+        long bytes = 0;
+        do {
+            ScanPage page = scanPage(tx, shardId, startKeyInclusive, endKeyExclusive,
+                    snapshot, after, options.limits().scanPageSize());
+            for (VersionedValue value : page.values()) {
+                bytes += value.key().getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+                        + (value.value() == null ? 0 : value.value().length);
+                if (result.size() >= options.limits().maxMaterializedRows() || bytes > options.limits().maxMaterializedBytes()) {
+                    throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,
+                            "materialized scan budget exceeded; use scanPage", false, tx.txId());
+                }
+                result.add(value);
+            }
+            after = page.nextKey();
+        } while (after != null);
+        return List.copyOf(result);
+    }
+
+    /** 按二进制键序合并一页存储结果和自身缓冲变更，空页也可带继续位置。 */
+    public ScanPage scanPage(Transaction tx, String shardId, String startKeyInclusive, String endKeyExclusive,
+                             StatementReadSnapshot snapshot, String afterKeyExclusive, int limit) {
+        validateStatement(tx, snapshot);
+        if (limit < 1 || limit > 4096) {
+            throw new IllegalArgumentException("page limit must be between 1 and 4096");
         }
-        ensureSnapshotVisible(snapshot.readTs(), tx.txId());
+        if (startKeyInclusive != null && endKeyExclusive != null && compareKeys(startKeyInclusive, endKeyExclusive) > 0) {
+            throw new IllegalArgumentException("scan start must not exceed end");
+        }
         StorageAdapter adapter = adapter(shardId);
-        List<VersionedValue> result = adapter.scan(
+        ScanPage base = withShardPermit(shardId, () -> adapter.scanPage(
                 new ReadContext(tx.txId(), snapshot.readTs(), tx.isolationLevel()),
-                new KeyRange(startKeyInclusive, endKeyExclusive)
-        );
-        return overlayBufferedMutations(tx, shardId, startKeyInclusive, endKeyExclusive, result);
+                new KeyRange(startKeyInclusive, endKeyExclusive), afterKeyExclusive, limit));
+        if (base.nextKey() != null && afterKeyExclusive != null && compareKeys(base.nextKey(), afterKeyExclusive) <= 0) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "storage page cursor did not advance", false, tx.txId());
+        }
+        List<Mutation> buffered = options.bufferWrites()
+                ? tx.bufferedMutationsPage(shardId, startKeyInclusive, endKeyExclusive, afterKeyExclusive, limit + 1)
+                : List.of();
+        String pageEnd = base.nextKey();
+        if (buffered.size() > limit) {
+            String bufferedEnd = buffered.get(limit - 1).key();
+            if (pageEnd == null || compareKeys(bufferedEnd, pageEnd) < 0) {
+                pageEnd = bufferedEnd;
+            }
+        }
+        NavigableMap<String, VersionedValue> merged = new TreeMap<>(TransactionManager::compareKeys);
+        for (VersionedValue value : base.values()) {
+            if (pageEnd == null || compareKeys(value.key(), pageEnd) <= 0) {
+                merged.put(value.key(), value);
+            }
+        }
+        if (!buffered.isEmpty()) {
+            for (Mutation mutation : buffered) {
+                String key = mutation.key();
+                if ((startKeyInclusive != null && compareKeys(key, startKeyInclusive) < 0)
+                        || (endKeyExclusive != null && compareKeys(key, endKeyExclusive) >= 0)
+                        || (afterKeyExclusive != null && compareKeys(key, afterKeyExclusive) <= 0)
+                        || (pageEnd != null && compareKeys(key, pageEnd) > 0)) {
+                    continue;
+                }
+                if (mutation.type() == mvcc.common.MutationType.DELETE) {
+                    merged.remove(key);
+                } else {
+                    merged.put(key, new VersionedValue(key, mutation.value(), false, tx.startTs(), true));
+                }
+            }
+        }
+        List<VersionedValue> values = new ArrayList<>(Math.min(limit, merged.size()));
+        for (VersionedValue value : merged.values()) {
+            if (values.size() == limit) {
+                ensureLeaseValid(tx);
+                return new ScanPage(List.copyOf(values), values.getLast().key());
+            }
+            values.add(new VersionedValue(value.key(), value.value() == null ? null : value.value().clone(),
+                    value.deleted(), value.versionTs(), value.ownIntent()));
+        }
+        ensureLeaseValid(tx);
+        return new ScanPage(List.copyOf(values), pageEnd);
     }
 
     /**
      * 在事务中写入键值数据。
      */
     public void put(Transaction tx, String shardId, String key, byte[] value) {
+        Objects.requireNonNull(value, "value");
         write(tx, shardId, Mutation.put(key, value));
     }
 
@@ -242,6 +366,9 @@ public final class TransactionManager implements AutoCloseable {
                 return result;
             } catch (MvccException ex) {
                 safeRollback(tx);
+                if (tx.decisionStarted() || tx.status() == TxStatus.COMMITTED) {
+                    throw ex.errorCode() == ErrorCode.TRANSACTION_STATUS_UNKNOWN ? ex : unknownCommit(tx, ex);
+                }
                 if (!options.retryPolicy().shouldRetry(ex, attempt)) {
                     throw ex;
                 }
@@ -263,23 +390,25 @@ public final class TransactionManager implements AutoCloseable {
     public TransactionCommitResult commit(Transaction tx) {
         ensureActive(tx);
         TransactionClassification classification = transactionClassifier.classifyForCommit(tx, options);
-        switch (classification.protocolType()) {
-            case READ_ONLY_SNAPSHOT:
-                return commitReadOnly(tx);
-            case SINGLE_SHARD_1PC:
-                return commitSingleShard(tx, classification.participants().iterator().next());
-            case CROSS_SHARD_ASYNC_COMMIT:
-            case CROSS_SHARD_SYNC_2PC:
-                return commitCrossShard(tx);
-            case HOT_KEY_SERIALIZED:
-            case LARGE_WRITE_BATCH:
-            default:
-                throw new MvccException(
-                        ErrorCode.ILLEGAL_STATE,
-                        "unsupported transaction protocol: " + classification.protocolType(),
-                        false,
-                        tx.txId()
-                );
+        try {
+            return switch (classification.protocolType()) {
+                case READ_ONLY_SNAPSHOT -> commitReadOnly(tx);
+                case SINGLE_SHARD_1PC -> commitSingleShard(tx, classification.participants().iterator().next());
+                case CROSS_SHARD_ASYNC_COMMIT, CROSS_SHARD_SYNC_2PC -> commitCrossShard(tx);
+                default -> throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                        "unsupported transaction protocol: " + classification.protocolType(), false, tx.txId());
+            };
+        } catch (RuntimeException ex) {
+            if (tx.decisionStarted()) {
+                if (tx.status() == TxStatus.COMMITTED) {
+                    releaseTransaction(tx);
+                }
+                if (ex instanceof MvccException mvcc && mvcc.errorCode() == ErrorCode.TRANSACTION_STATUS_UNKNOWN) {
+                    throw mvcc;
+                }
+                throw unknownCommit(tx, ex);
+            }
+            throw ex;
         }
     }
 
@@ -287,19 +416,21 @@ public final class TransactionManager implements AutoCloseable {
      * 提交只读事务。
      */
     private TransactionCommitResult commitReadOnly(Transaction tx) {
-        if (options.lazyBeginMetadata() && !tx.metadataPersisted()) {
-            // lazy 只读事务没有外部状态需要提交，复用 startTs 避免额外访问 TSO。
-            tx.status(TxStatus.COMMITTED);
-            return new TransactionCommitResult(tx.txId(), tx.startTs(), TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
-        }
-        // 没有写入分片时只需要生成提交时间戳并更新事务状态。
-        long commitTs = nextTimestamp(TransactionStage.COMMIT_TSO);
-        if (tx.metadataPersisted()) {
-            metadataStore.markCommitted(tx.txId(), commitTs);
-        } else if (!options.lazyBeginMetadata()) {
-            metadataStore.markCommitted(tx.txId(), commitTs);
-        }
-        tx.status(TxStatus.COMMITTED);
+        long commitTs = metadataStore.withPublicationLock(() -> {
+            ensureLeaseValid(tx);
+            if (!tx.metadataPersisted()) {
+                return tx.startTs();
+            }
+            long timestamp = nextTimestamp(TransactionStage.COMMIT_TSO);
+            tx.decisionStarted(true);
+            try {
+                metadataStore.markCommitted(tx.txId(), timestamp);
+            } catch (RuntimeException ex) {
+                throw unknownCommit(tx, ex);
+            }
+            return timestamp;
+        });
+        completeTransaction(tx, true);
         return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
     }
 
@@ -307,24 +438,46 @@ public final class TransactionManager implements AutoCloseable {
      * 提交单分片事务。
      */
     private TransactionCommitResult commitSingleShard(Transaction tx, String participant) {
-        // 单分片事务走直接提交路径，避免完整两阶段提交的额外往返。
-        long commitTs = nextTimestamp(TransactionStage.COMMIT_TSO);
-        boolean skipMetadataFastPath = options.lazyBeginMetadata() && !tx.metadataPersisted();
-        if (!skipMetadataFastPath) {
-            markSingleShardCommittedStage(tx, participant, commitTs);
+        registerWriteParticipants(tx);
+        boolean atomicDirect = options.bufferWrites() && adapter(participant).supportsAtomicDirectCommit();
+        if (!atomicDirect && !adapter(participant).supportsCommittedIntentResolution()) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                    "intent-based single-shard commit requires committed intent resolution", false, tx.txId());
         }
-        try {
-            directCommitSingleShardParticipantStage(tx, participant, commitTs);
-        } catch (RuntimeException ex) {
-            throw new MvccException(
-                    ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                    "single-shard tx committed in metadata but not fully applied: " + tx.txId(),
-                    true,
-                    tx.txId(),
-                    ex
-            );
+        if (!atomicDirect && options.bufferWrites()) {
+            prewriteBufferedMutationsStage(tx);
         }
-        tx.status(TxStatus.COMMITTED);
+        long commitTs = metadataStore.withPublicationLock(() -> {
+            ensureLeaseValid(tx);
+            long timestamp = nextTimestamp(TransactionStage.COMMIT_TSO);
+            tx.decisionStarted(true);
+            try {
+                if (atomicDirect) {
+                    // 本地版本和事务记录先原子提交，中心决议丢失时由参与者记录恢复。
+                    metadataStore.markLocalCommitPending(tx.txId(), timestamp);
+                    directCommitSingleShardParticipantStage(tx, participant, timestamp);
+                }
+                markSingleShardCommittedStage(tx, participant, timestamp);
+                tx.status(TxStatus.COMMITTED);
+                if (!atomicDirect) {
+                    commitParticipantStage(TransactionStage.SINGLE_SHARD_PARTICIPANT_COMMIT,
+                            tx, participant, timestamp);
+                }
+                return timestamp;
+            } catch (MvccException ex) {
+                if (atomicDirect && !tx.status().equals(TxStatus.COMMITTED)
+                        && (ex.errorCode() == ErrorCode.WRITE_CONFLICT || ex.errorCode() == ErrorCode.LOCK_CONFLICT)) {
+                    tx.decisionStarted(false);
+                    metadataStore.markAborted(tx.txId());
+                    tx.status(TxStatus.ABORTED);
+                    throw ex;
+                }
+                throw unknownCommit(tx, ex);
+            } catch (RuntimeException ex) {
+                throw unknownCommit(tx, ex);
+            }
+        });
+        completeTransaction(tx, true);
         return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
     }
 
@@ -332,6 +485,14 @@ public final class TransactionManager implements AutoCloseable {
      * 提交跨分片事务。
      */
     private TransactionCommitResult commitCrossShard(Transaction tx) {
+        for (String participant : tx.participants()) {
+            if (!adapter(participant).supportsCommittedIntentResolution()) {
+                throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                        "cross-shard snapshot visibility requires committed intent resolution: " + participant,
+                        false, tx.txId());
+            }
+        }
+        registerWriteParticipants(tx);
         if (options.bufferWrites()) {
             prewriteBufferedMutationsStage(tx);
         } else {
@@ -345,13 +506,23 @@ public final class TransactionManager implements AutoCloseable {
             prepareParticipantsStage(tx);
         }
 
-        long commitTs = nextTimestamp(TransactionStage.COMMIT_TSO);
-        persistCommittedMetadataStage(tx, commitTs, explicitPrepareRequired);
+        long commitTs = metadataStore.withPublicationLock(() -> {
+            ensureLeaseValid(tx);
+            long timestamp = nextTimestamp(TransactionStage.COMMIT_TSO);
+            tx.decisionStarted(true);
+            try {
+                persistCommittedMetadataStage(tx, timestamp, explicitPrepareRequired);
+                tx.status(TxStatus.COMMITTED);
+                return timestamp;
+            } catch (RuntimeException ex) {
+                throw unknownCommit(tx, ex);
+            }
+        });
         String primaryParticipant = primaryParticipant(tx.participants());
         try {
             if (options.crossShardCommitPolicy().asyncCommit()) {
                 scheduleAsyncParticipantCommit(tx, commitTs, tx.participants());
-                tx.status(TxStatus.COMMITTED);
+                completeTransaction(tx, false);
                 return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.ASYNC_PRIMARY_COMMIT);
             }
             // 同步提交模式先提交主参与者，再提交其余参与者，保留状态未知异常边界。
@@ -368,16 +539,11 @@ public final class TransactionManager implements AutoCloseable {
                     options.crossShardCommitPolicy().parallelCommit()
             );
         } catch (RuntimeException ex) {
-            throw new MvccException(
-                    ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                    "tx committed in metadata but not fully applied: " + tx.txId(),
-                    true,
-                    tx.txId(),
-                    ex
-            );
+            completeTransaction(tx, false);
+            throw unknownCommit(tx, ex);
         }
 
-        tx.status(TxStatus.COMMITTED);
+        completeTransaction(tx, true);
         return new TransactionCommitResult(
                 tx.txId(),
                 commitTs,
@@ -392,10 +558,25 @@ public final class TransactionManager implements AutoCloseable {
      */
     @Override
     public void close() {
-        shutdownExecutor(asyncCommitExecutor);
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.limits().shutdownTimeoutMillis());
+        ExecutorService rollbackExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        for (Transaction tx : List.copyOf(activeTransactions.values())) {
+            rollbackExecutor.submit(() -> safeRollback(tx));
+        }
+        shutdownExecutor(rollbackExecutor, deadline);
+        shutdownExecutor(asyncCommitExecutor, deadline);
         // async commit 可能继续提交 intent cleanup 任务，必须先 drain async 再关闭 cleanup。
-        shutdownExecutor(intentCleanupExecutor);
-        shutdownExecutor(participantExecutor);
+        shutdownExecutor(intentCleanupExecutor, deadline);
+        shutdownExecutor(participantExecutor, deadline);
+        // 未完成的回滚保留持久化租约及恢复记录，仅释放关闭管理器的本地写缓冲。
+        activeTransactions.forEach((txId, tx) -> {
+            if (activeTransactions.remove(txId, tx)) {
+                transactionPermits.release();
+            }
+        });
     }
 
     /**
@@ -405,12 +586,19 @@ public final class TransactionManager implements AutoCloseable {
         if (participants.isEmpty()) {
             return;
         }
-        asyncCommitExecutor.submit(() -> {
-            for (String participant : participants) {
+        Set<String> stableParticipants = Set.copyOf(participants);
+        submitOrRun(asyncCommitExecutor, () -> {
+            boolean succeeded = true;
+            for (String participant : stableParticipants) {
                 try {
                     commitParticipantStage(TransactionStage.ASYNC_PARTICIPANT_COMMIT, tx, participant, commitTs);
-                } catch (RuntimeException ignored) {
+                } catch (RuntimeException ex) {
+                    backgroundFailures.increment();
+                    succeeded = false;
                 }
+            }
+            if (succeeded) {
+                markFinalizedQuietly(tx);
             }
         });
     }
@@ -470,11 +658,16 @@ public final class TransactionManager implements AutoCloseable {
      * 回滚事务。
      */
     public void rollback(Transaction tx) {
-        if (tx.status() == TxStatus.ABORTED || tx.status() == TxStatus.COMMITTED) {
+        ensureOwned(tx);
+        if (tx.status() == TxStatus.COMMITTED) {
+            releaseTransaction(tx);
             return;
         }
         rollbackStage(tx);
-        tx.status(TxStatus.ABORTED);
+        if (tx.status() != TxStatus.COMMITTED) {
+            tx.status(TxStatus.ABORTED);
+        }
+        releaseTransaction(tx);
     }
 
     /**
@@ -489,13 +682,25 @@ public final class TransactionManager implements AutoCloseable {
      */
     private void write(Transaction tx, String shardId, Mutation mutation) {
         ensureActive(tx);
+        ensureLeaseValid(tx);
+        adapter(shardId);
+        mvcc.storage.Utf8KeyOrder.encode(mutation.key());
+        tx.reserveWrite(shardId, mutation, options.limits().maxWriteKeys(), options.limits().maxWriteBytes());
+        // 复制值避免调用方修改数组影响已计费、已预写或后台提交的写集合。
+        mutation = new Mutation(mutation.key(), mutation.type(), mutation.value() == null ? null : mutation.value().clone());
         if (options.bufferWrites()) {
             tx.bufferMutation(shardId, mutation);
             return;
         }
         StorageAdapter adapter = adapter(shardId);
-        prewriteEagerMutationStage(tx, shardId, mutation, adapter);
         tx.addParticipant(shardId);
+        try {
+            registerWriteParticipants(tx);
+            prewriteEagerMutationStage(tx, shardId, mutation, adapter);
+        } catch (RuntimeException | Error ex) {
+            tx.markRollbackOnly();
+            throw ex;
+        }
     }
 
     /**
@@ -507,7 +712,11 @@ public final class TransactionManager implements AutoCloseable {
         int attempt = 0;
         while (true) {
             try {
-                adapter.prewrite(tx.txId(), tx.startTs(), java.util.List.of(mutation));
+                withShardPermit(shardId, () -> {
+                    ensureLeaseValid(tx);
+                    adapter.prewrite(tx.txId(), tx.startTs(), java.util.List.of(mutation));
+                    return null;
+                });
                 return;
             } catch (MvccException ex) {
                 if (!shouldWaitOnConflict(ex, lockWaitPolicy)) {
@@ -535,7 +744,12 @@ public final class TransactionManager implements AutoCloseable {
      * 确认事务仍处于可操作状态。
      */
     private void ensureActive(Transaction tx) {
-        if (tx.status() != TxStatus.ACTIVE) {
+        ensureOpen();
+        ensureOwned(tx);
+        if (activeTransactions.get(tx.txId()) != tx) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction belongs to another or closed manager", false, tx.txId());
+        }
+        if (tx.status() != TxStatus.ACTIVE || tx.rollbackOnly()) {
             throw new MvccException(ErrorCode.TRANSACTION_ABORTED, "transaction not active: " + tx.txId(), false, tx.txId());
         }
     }
@@ -700,8 +914,11 @@ public final class TransactionManager implements AutoCloseable {
         int attempt = 0;
         while (true) {
             try {
-                adapter(shardId).prewrite(tx.txId(), tx.startTs(), mutations);
-                tx.addParticipant(shardId);
+                withShardPermit(shardId, () -> {
+                    ensureLeaseValid(tx);
+                    adapter(shardId).prewrite(tx.txId(), tx.startTs(), mutations);
+                    return null;
+                });
                 return;
             } catch (MvccException ex) {
                 if (!shouldWaitOnConflict(ex, lockWaitPolicy)) {
@@ -736,38 +953,7 @@ public final class TransactionManager implements AutoCloseable {
         }
         return mutation.get().type() == mvcc.common.MutationType.DELETE
                 ? Optional.empty()
-                : Optional.of(mutation.get().value());
-    }
-
-    /**
-     * 将事务本地缓冲写覆盖到扫描结果上。
-     */
-    private List<VersionedValue> overlayBufferedMutations(Transaction tx,
-                                                         String shardId,
-                                                         String startKeyInclusive,
-                                                         String endKeyExclusive,
-                                                         List<VersionedValue> baseValues) {
-        if (!options.bufferWrites()) {
-            return baseValues;
-        }
-        java.util.NavigableMap<String, VersionedValue> visible = new java.util.TreeMap<>();
-        for (VersionedValue value : baseValues) {
-            visible.put(value.key(), value);
-        }
-        for (Mutation mutation : tx.bufferedMutationsInRange(shardId, startKeyInclusive, endKeyExclusive)) {
-            if (mutation.type() == mvcc.common.MutationType.DELETE) {
-                visible.remove(mutation.key());
-            } else {
-                visible.put(mutation.key(), new VersionedValue(
-                        mutation.key(),
-                        mutation.value(),
-                        false,
-                        tx.startTs(),
-                        true
-                ));
-            }
-        }
-        return List.copyOf(visible.values());
+                : Optional.of(mutation.get().value().clone());
     }
 
     /**
@@ -784,15 +970,19 @@ public final class TransactionManager implements AutoCloseable {
     /**
      * 关闭并行执行器。
      */
-    private void shutdownExecutor(ExecutorService executor) {
+    private void shutdownExecutor(ExecutorService executor, long deadlineNanos) {
         if (executor == null) {
             return;
         }
         executor.shutdown();
         try {
-            executor.awaitTermination(5, TimeUnit.SECONDS);
+            if (!executor.awaitTermination(Math.max(0L, deadlineNanos - System.nanoTime()), TimeUnit.NANOSECONDS)) {
+                // 未完成物化由持久化决议恢复，不能阻止关闭无限等待。
+                executor.shutdownNow();
+            }
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
+            executor.shutdownNow();
         }
     }
 
@@ -813,18 +1003,25 @@ public final class TransactionManager implements AutoCloseable {
         List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
         if (options.bufferWrites() && !bufferedMutations.isEmpty()) {
             boolean cleanupIntents = !options.deferIntentCleanup() || asyncCommitExecutor == null;
-            adapter(shardId).commit(tx.txId(), commitTs, bufferedMutations, cleanupIntents);
+            withShardPermit(shardId, () -> {
+                adapter(shardId).commit(tx.txId(), commitTs, bufferedMutations, cleanupIntents);
+                return null;
+            });
             if (!cleanupIntents) {
-                intentCleanupExecutor.submit(() -> {
+                submitOrRun(intentCleanupExecutor, () -> {
                     try {
                         cleanupIntentsStage(tx, shardId);
-                    } catch (RuntimeException ignored) {
+                    } catch (RuntimeException ex) {
+                        backgroundFailures.increment();
                     }
                 });
             }
             return;
         }
-        adapter(shardId).commit(tx.txId(), commitTs);
+        withShardPermit(shardId, () -> {
+            adapter(shardId).commit(tx.txId(), commitTs);
+            return null;
+        });
     }
 
     /**
@@ -833,15 +1030,203 @@ public final class TransactionManager implements AutoCloseable {
     private void directCommitSingleShardParticipant(Transaction tx, String shardId, long commitTs) {
         List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
         if (options.bufferWrites() && !bufferedMutations.isEmpty()) {
-            adapter(shardId).directCommit(tx.txId(), tx.startTs(), commitTs, bufferedMutations);
+            withShardPermit(shardId, () -> {
+                adapter(shardId).directCommit(tx.txId(), tx.startTs(), commitTs, bufferedMutations);
+                return null;
+            });
             return;
         }
         commitParticipant(tx, shardId, commitTs);
     }
 
-    /**
-     * 判断当前是否启用事务阶段指标。
-     */
+    /** 返回调用方可导出到监控系统的有界执行统计。 */
+    public TransactionRuntimeStats runtimeStats() {
+        return new TransactionRuntimeStats(activeTransactions.size(), queuedTasks(asyncCommitExecutor),
+                queuedTasks(intentCleanupExecutor), synchronousFallbacks.sum(), backgroundFailures.sum());
+    }
+
+    /** 创建具备固定线程数和有界等待队列的后台执行器。 */
+    private ThreadPoolExecutor boundedExecutor(String prefix) {
+        int workers = options.crossShardCommitPolicy().asyncCommitWorkers();
+        return new ThreadPoolExecutor(workers, workers, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(options.limits().asyncQueueCapacity()), namedFactory(prefix),
+                new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    /** 队列满或正在关闭时由当前线程完成已决议工作，不丢弃补提交。 */
+    private void submitOrRun(ExecutorService executor, Runnable action) {
+        try {
+            executor.execute(action);
+        } catch (RejectedExecutionException ex) {
+            synchronousFallbacks.increment();
+            action.run();
+        }
+    }
+
+    /** 返回后台执行器等待队列长度。 */
+    private int queuedTasks(ExecutorService executor) {
+        return executor instanceof ThreadPoolExecutor pool ? pool.getQueue().size() : 0;
+    }
+
+    /** 限制每个分片的在途操作，等待预算耗尽时明确失败。 */
+    private <T> T withShardPermit(String shardId, Supplier<T> action) {
+        Semaphore permits = shardPermits.get(shardId);
+        if (permits == null) {
+            adapter(shardId);
+            throw new IllegalStateException("missing shard budget");
+        }
+        boolean acquired = false;
+        try {
+            acquired = permits.tryAcquire(options.limits().timeoutMillis(), TimeUnit.MILLISECONDS);
+            if (!acquired) {
+                throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED, "shard concurrency budget exhausted: " + shardId,
+                        true, null);
+            }
+            return action.get();
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "interrupted while waiting for shard budget",
+                    false, null, ex);
+        } finally {
+            if (acquired) {
+                permits.release();
+            }
+        }
+    }
+
+    /** 在首个持久化写入之前登记完整参与者，保证进程崩溃后可以定位所有 intent。 */
+    private void registerWriteParticipants(Transaction tx) {
+        metadataStore.withPublicationLock(() -> {
+            ensureLeaseValid(tx);
+            if (!tx.metadataPersisted()) {
+                createBeginMetadata(tx.txId(), tx.startTs(), tx.isolationLevel());
+                tx.metadataPersisted(true);
+            }
+            TxRecord record = metadataStore.registerParticipants(tx.txId(), tx.participants());
+            if (record.status() != TxStatus.ACTIVE && record.status() != TxStatus.PREPARING) {
+                throw new MvccException(ErrorCode.TRANSACTION_ABORTED, "write registration rejected for terminal transaction",
+                        false, tx.txId());
+            }
+            return null;
+        });
+    }
+
+    /** 校验事务与语句归属，保持 RR 和跨分片 SQL 的固定快照。 */
+    private void validateStatement(Transaction tx, StatementReadSnapshot snapshot) {
+        ensureActive(tx);
+        ensureLeaseValid(tx);
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (snapshot.txId() != tx.txId()
+                || (tx.isolationLevel() == IsolationLevel.REPEATABLE_READ && snapshot.readTs() != tx.startTs())) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "statement snapshot does not belong to transaction",
+                    false, tx.txId());
+        }
+        ensureSnapshotVisible(snapshot.readTs(), tx.txId());
+    }
+
+    /** 拒绝租约过期的事务；查询完成后也必须检查，避免返回过期 GC 期间读取的结果。 */
+    private void ensureLeaseValid(Transaction tx) {
+        Optional<Long> registeredExpiry = metadataStore.snapshotExpiry(tx.txId());
+        if (registeredExpiry.isEmpty() || registeredExpiry.get() != tx.deadlineMillis()
+                || metadataStore.currentTimeMillis() >= tx.deadlineMillis()) {
+            throw new MvccException(ErrorCode.TRANSACTION_TIMEOUT, "transaction lease expired", false, tx.txId());
+        }
+    }
+
+    /** 管理器关闭后拒绝接收新事务及新业务操作。 */
+    private void ensureOpen() {
+        if (closed.get()) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction manager closed", false, null);
+        }
+    }
+
+    /** 包括回滚在内的事务操作都必须来自创建该事务的管理器。 */
+    private void ensureOwned(Transaction tx) {
+        Objects.requireNonNull(tx, "tx");
+        if (!tx.ownedBy(transactionOwner)) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction belongs to another manager", false, tx.txId());
+        }
+    }
+
+    /** 释放到期事务的本地名额，持久化租约及事务由恢复任务处理。 */
+    private void expireLocalTransactions() {
+        long now = metadataStore.currentTimeMillis();
+        activeTransactions.forEach((txId, tx) -> {
+            if (tx.deadlineMillis() <= now && activeTransactions.remove(txId, tx)) {
+                transactionPermits.release();
+            }
+        });
+    }
+
+    /** 将已决议事务标记为完成，并按物化结果记录恢复进度。 */
+    private void completeTransaction(Transaction tx, boolean finalized) {
+        tx.status(TxStatus.COMMITTED);
+        if (finalized) {
+            markFinalizedQuietly(tx);
+        }
+        releaseTransaction(tx);
+    }
+
+    /** 释放快照和本地资源；释放失败时租约到期仍可回收。 */
+    private void releaseTransaction(Transaction tx) {
+        try {
+            metadataStore.withPublicationLock(() -> {
+                metadataStore.releaseSnapshot(tx.txId());
+                return null;
+            });
+        } catch (RuntimeException ex) {
+            backgroundFailures.increment();
+        } finally {
+            if (activeTransactions.remove(tx.txId(), tx)) {
+                transactionPermits.release();
+            }
+        }
+    }
+
+    /** 记录已完成物化；失败时留给恢复重放，不能将成功提交改判为业务失败。 */
+    private void markFinalizedQuietly(Transaction tx) {
+        if (!tx.metadataPersisted() || (options.deferIntentCleanup() && tx.status() == TxStatus.COMMITTED)) {
+            return;
+        }
+        try {
+            metadataStore.markFinalized(tx.txId());
+        } catch (RuntimeException ex) {
+            backgroundFailures.increment();
+        }
+    }
+
+    /** 构造不可直接重跑业务的提交结果未知异常。 */
+    private MvccException unknownCommit(Transaction tx, RuntimeException cause) {
+        if (tx.status() != TxStatus.COMMITTED) {
+            tx.status(TxStatus.PREPARING);
+        }
+        return new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                "resolve transaction decision before retrying business: " + tx.txId(), false, tx.txId(), cause);
+    }
+
+    /** 按 MySQL VARBINARY 使用的 UTF-8 无符号字节顺序比较键。 */
+    private static int compareKeys(String left, String right) {
+        return mvcc.storage.Utf8KeyOrder.compare(left, right);
+    }
+
+    /** 在分片预算内执行已提交 intent 清理。 */
+    private void cleanupParticipantIntents(Transaction tx, String shardId) {
+        withShardPermit(shardId, () -> {
+            adapter(shardId).cleanupIntents(tx.txId());
+            return null;
+        });
+    }
+
+    /** 显式准备也使用同一分片并发预算，不能绕过前台流量限制。 */
+    private void prepareParticipant(Transaction tx, String shardId) {
+        withShardPermit(shardId, () -> {
+            ensureLeaseValid(tx);
+            adapter(shardId).prepare(tx.txId());
+            return null;
+        });
+    }
+
+    /** 判断当前是否启用事务阶段指标。 */
     private boolean metricsEnabled() {
         return metrics != NoOpTransactionMetrics.INSTANCE;
     }
@@ -910,7 +1295,7 @@ public final class TransactionManager implements AutoCloseable {
         if (!metricsEnabled()) {
             runAcrossParticipants(
                     tx.participants(),
-                    participant -> adapter(participant).prepare(tx.txId()),
+                    participant -> prepareParticipant(tx, participant),
                     options.crossShardCommitPolicy().parallelPrepare()
             );
             return;
@@ -919,7 +1304,7 @@ public final class TransactionManager implements AutoCloseable {
                 TransactionStage.PREPARE,
                 () -> runAcrossParticipants(
                         tx.participants(),
-                        participant -> adapter(participant).prepare(tx.txId()),
+                        participant -> prepareParticipant(tx, participant),
                         options.crossShardCommitPolicy().parallelPrepare()
                 )
         );
@@ -979,14 +1364,52 @@ public final class TransactionManager implements AutoCloseable {
      * 执行事务回滚的实际动作。
      */
     private void rollbackInternal(Transaction tx) {
-        if (tx.metadataPersisted()) {
-            metadataStore.markAborted(tx.txId());
+        TxStatus decision = metadataStore.withPublicationLock(() -> {
+            if (!tx.metadataPersisted()) {
+                return TxStatus.ABORTED;
+            }
+            TxRecord record = metadataStore.get(tx.txId()).orElseThrow(() ->
+                    unknownCommit(tx, new IllegalStateException("transaction metadata missing")));
+            if (record.status() == TxStatus.COMMITTED) {
+                return TxStatus.COMMITTED;
+            }
+            if (tx.decisionStarted() && tx.participants().size() == 1
+                    && adapter(tx.participants().iterator().next()).supportsAtomicDirectCommit()) {
+                String shardId = tx.participants().iterator().next();
+                // 先在参与者侧隔离可能迟到的本地提交，再根据实际本地终态更新中心。
+                var local = withShardPermit(shardId, () -> {
+                    adapter(shardId).abort(tx.txId());
+                    return adapter(shardId).participantRecord(tx.txId());
+                });
+                if (local.isEmpty() || local.get().txId() != tx.txId() || local.get().startTs() != tx.startTs()
+                        || (local.get().status() != TxStatus.COMMITTED && local.get().status() != TxStatus.ABORTED)) {
+                    throw unknownCommit(tx, new IllegalStateException("participant fencing did not establish a terminal decision"));
+                }
+                if (local.get().status() == TxStatus.COMMITTED) {
+                    if (local.get().commitTs() == null) {
+                        throw unknownCommit(tx, new IllegalStateException("participant commit timestamp missing"));
+                    }
+                    metadataStore.markSingleShardCommitted(tx.txId(), shardId, local.get().commitTs());
+                    return TxStatus.COMMITTED;
+                }
+            }
+            // markAborted 返回的终态才是权威，不能根据调用前读到的状态删除 intent。
+            return metadataStore.markAborted(tx.txId()).status();
+        });
+        tx.status(decision);
+        if (decision == TxStatus.COMMITTED) {
+            releaseTransaction(tx);
+            return;
         }
         runAcrossParticipants(
                 tx.participants(),
-                participant -> adapter(participant).abort(tx.txId()),
+                participant -> withShardPermit(participant, () -> {
+                    adapter(participant).abort(tx.txId());
+                    return null;
+                }),
                 options.crossShardCommitPolicy().parallelRollback()
         );
+        markFinalizedQuietly(tx);
     }
 
     /**
@@ -994,10 +1417,10 @@ public final class TransactionManager implements AutoCloseable {
      */
     private void cleanupIntentsStage(Transaction tx, String shardId) {
         if (!metricsEnabled()) {
-            adapter(shardId).cleanupIntents(tx.txId());
+            cleanupParticipantIntents(tx, shardId);
             return;
         }
-        recordMeasuredStage(TransactionStage.INTENT_CLEANUP, () -> adapter(shardId).cleanupIntents(tx.txId()));
+        recordMeasuredStage(TransactionStage.INTENT_CLEANUP, () -> cleanupParticipantIntents(tx, shardId));
     }
 
     /**

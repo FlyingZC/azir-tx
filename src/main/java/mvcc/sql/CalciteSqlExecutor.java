@@ -3,19 +3,11 @@ package mvcc.sql;
 import mvcc.api.Transaction;
 import mvcc.common.ErrorCode;
 import mvcc.common.MvccException;
-import mvcc.storage.VersionedValue;
 import mvcc.txn.StatementReadSnapshot;
 import mvcc.txn.TransactionManager;
-import org.apache.calcite.DataContext;
 import org.apache.calcite.config.Lex;
 import org.apache.calcite.jdbc.CalciteConnection;
-import org.apache.calcite.linq4j.Enumerable;
-import org.apache.calcite.linq4j.Linq4j;
-import org.apache.calcite.rel.type.RelDataType;
-import org.apache.calcite.rel.type.RelDataTypeFactory;
-import org.apache.calcite.schema.ScannableTable;
 import org.apache.calcite.schema.SchemaPlus;
-import org.apache.calcite.schema.impl.AbstractTable;
 import org.apache.calcite.sql.SqlCall;
 import org.apache.calcite.sql.SqlDelete;
 import org.apache.calcite.sql.SqlIdentifier;
@@ -26,8 +18,8 @@ import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlUpdate;
 import org.apache.calcite.sql.dialect.MysqlSqlDialect;
 import org.apache.calcite.sql.parser.SqlParser;
-import org.apache.calcite.sql.type.SqlTypeName;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -51,6 +43,7 @@ final class CalciteSqlExecutor {
     private final ShardResolver shardResolver;
     private final SqlValueCodec valueCodec;
     private final SqlStorageKeyCodec keyCodec;
+    private final SqlExecutionOptions options;
 
     /**
      * 构造 Calcite SQL 执行器。
@@ -58,29 +51,31 @@ final class CalciteSqlExecutor {
     CalciteSqlExecutor(TransactionManager transactionManager,
                        ShardResolver shardResolver,
                        SqlValueCodec valueCodec,
-                       SqlStorageKeyCodec keyCodec) {
+                       SqlStorageKeyCodec keyCodec,
+                       SqlExecutionOptions options) {
         this.transactionManager = transactionManager;
         this.shardResolver = shardResolver;
         this.valueCodec = valueCodec;
         this.keyCodec = keyCodec;
+        this.options = options;
     }
 
     /**
      * 在指定事务中执行 Calcite 查询或 DML 计划。
      */
-    SqlExecutionResult execute(Transaction tx, SqlPlan.CalcitePlan plan) {
+    SqlExecutionResult execute(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
         return switch (plan.statementType()) {
-            case SELECT -> SqlExecutionResult.rows(executeQuery(tx, plan.sql(), plan.tableNames()).sqlRows());
-            case INSERT -> executeInsert(tx, plan);
-            case UPDATE -> executeUpdate(tx, plan);
-            case DELETE -> executeDelete(tx, plan);
+            case SELECT -> SqlExecutionResult.rows(executeQuery(tx, plan.sql(), plan.tableNames(), snapshot).sqlRows());
+            case INSERT -> executeInsert(tx, plan, snapshot);
+            case UPDATE -> executeUpdate(tx, plan, snapshot);
+            case DELETE -> executeDelete(tx, plan, snapshot);
         };
     }
 
     /**
      * 执行 INSERT VALUES 或 INSERT SELECT，并按目标列顺序写入 MVCC。
      */
-    private SqlExecutionResult executeInsert(Transaction tx, SqlPlan.CalcitePlan plan) {
+    private SqlExecutionResult executeInsert(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
         SqlInsert insert = parse(plan.sql(), SqlInsert.class);
         String table = tableName(insert.getTargetTable());
         List<String> targetColumns = columnNames(insert.getTargetColumnList());
@@ -88,19 +83,24 @@ final class CalciteSqlExecutor {
             targetColumns = List.of("id", "value");
         }
         validateInsertColumns(targetColumns);
-        QueryData source = executeQuery(tx, insertSourceSql(insert.getSource()), plan.tableNames());
+        QueryData source = executeQuery(tx, insertSourceSql(insert.getSource()), plan.tableNames(), snapshot);
         int idIndex = targetColumns.indexOf("id");
         int valueIndex = targetColumns.indexOf("value");
+        Set<String> insertedIds = new HashSet<>();
+        // 整句验证完成后才写入，跨行重复键和 NULL 不会造成已执行前缀残留。
         for (List<String> row : source.values()) {
             if (row.size() != targetColumns.size()) {
                 throw illegal("INSERT source column count does not match target columns");
             }
+            String id = requiredValue(row.get(idIndex), "id");
+            requiredValue(row.get(valueIndex), "value");
+            if (!insertedIds.add(id)) {
+                throw illegal("duplicate key: " + id);
+            }
+            ensureKeyAbsent(tx, table, id, snapshot);
         }
         for (List<String> row : source.values()) {
-            String id = requiredValue(row.get(idIndex), "id");
-            String value = requiredValue(row.get(valueIndex), "value");
-            ensureKeyAbsent(tx, table, id);
-            put(tx, table, id, value);
+            put(tx, table, row.get(idIndex), row.get(valueIndex));
         }
         return SqlExecutionResult.updateCount(source.values().size());
     }
@@ -108,7 +108,7 @@ final class CalciteSqlExecutor {
     /**
      * 执行支持表达式和过滤条件的 UPDATE，并处理主键变化。
      */
-    private SqlExecutionResult executeUpdate(Transaction tx, SqlPlan.CalcitePlan plan) {
+    private SqlExecutionResult executeUpdate(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
         SqlUpdate update = parse(plan.sql(), SqlUpdate.class);
         String table = tableName(update.getTargetTable());
         List<String> targetColumns = columnNames(update.getTargetColumnList());
@@ -127,7 +127,7 @@ final class CalciteSqlExecutor {
         String condition = update.getCondition() == null ? "" : " WHERE " + toSql(update.getCondition());
         String selection = "SELECT id AS __old_id, " + newId + " AS __new_id, " + newValue
                 + " AS __new_value FROM " + toSql(update.getTargetTable()) + alias + condition;
-        QueryData rows = executeQuery(tx, selection, plan.tableNames());
+        QueryData rows = executeQuery(tx, selection, plan.tableNames(), snapshot);
         List<UpdatedRow> updates = rows.values().stream()
                 .map(row -> new UpdatedRow(
                         requiredValue(row.get(0), "old id"),
@@ -135,11 +135,14 @@ final class CalciteSqlExecutor {
                         requiredValue(row.get(2), "new value")
                 ))
                 .toList();
-        validateUpdatedKeys(tx, table, updates);
+        validateUpdatedKeys(tx, table, updates, snapshot);
+        // 先删除所有迁移的旧键，再写入新键，避免主键交换时删除刚写入的另一行。
         for (UpdatedRow updateRow : updates) {
             if (!updateRow.oldId().equals(updateRow.newId())) {
                 delete(tx, table, updateRow.oldId());
             }
+        }
+        for (UpdatedRow updateRow : updates) {
             put(tx, table, updateRow.newId(), updateRow.newValue());
         }
         return SqlExecutionResult.updateCount(updates.size());
@@ -148,7 +151,7 @@ final class CalciteSqlExecutor {
     /**
      * 执行带 Calcite 表达式过滤条件的 DELETE。
      */
-    private SqlExecutionResult executeDelete(Transaction tx, SqlPlan.CalcitePlan plan) {
+    private SqlExecutionResult executeDelete(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
         SqlDelete delete = parse(plan.sql(), SqlDelete.class);
         String table = tableName(delete.getTargetTable());
         String alias = delete.getAlias() == null ? "" : " AS " + toSql(delete.getAlias());
@@ -156,7 +159,8 @@ final class CalciteSqlExecutor {
         QueryData rows = executeQuery(
                 tx,
                 "SELECT id FROM " + toSql(delete.getTargetTable()) + alias + condition,
-                plan.tableNames()
+                plan.tableNames(),
+                snapshot
         );
         for (List<String> row : rows.values()) {
             delete(tx, table, requiredValue(row.getFirst(), "id"));
@@ -165,10 +169,10 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 以统一语句快照装载关系表，并交给 Calcite 完成复杂关系运算。
+     * 注册不预读数据的分页表，以调用方传入的语句快照执行关系运算。
      */
-    private QueryData executeQuery(Transaction tx, String sql, List<String> tableNames) {
-        StatementReadSnapshot snapshot = transactionManager.beginReadStatement(tx);
+    private QueryData executeQuery(Transaction tx, String sql, List<String> tableNames, StatementReadSnapshot snapshot) {
+        SqlScanBudget scanBudget = new SqlScanBudget(tx.txId(), options);
         Properties properties = new Properties();
         properties.setProperty("lex", Lex.MYSQL.name());
         properties.setProperty("caseSensitive", "false");
@@ -176,45 +180,27 @@ final class CalciteSqlExecutor {
             CalciteConnection calciteConnection = connection.unwrap(CalciteConnection.class);
             SchemaPlus rootSchema = calciteConnection.getRootSchema();
             for (String table : tableNames) {
-                rootSchema.add(table, new SnapshotTable(loadRows(tx, snapshot, table)));
+                rootSchema.add(table, new CalciteSnapshotTable(transactionManager, tx, snapshot, table,
+                        shardResolver, keyCodec, valueCodec, options.scanPageSize(), scanBudget));
             }
             try (Statement statement = connection.createStatement(); ResultSet resultSet = statement.executeQuery(sql)) {
-                return readResultSet(resultSet);
+                return readResultSet(resultSet, tx);
             }
         } catch (Exception ex) {
-            if (ex instanceof MvccException mvccException) {
-                throw mvccException;
+            // Calcite/JDBC 可能多层包装枚举器异常，保留快照失效等原始 MVCC 错误语义。
+            for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
+                if (cause instanceof MvccException mvccException) {
+                    throw mvccException;
+                }
             }
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "Calcite execution failed: " + sql, false, tx.txId(), ex);
         }
     }
 
     /**
-     * 从一个或多个物理分片装载指定逻辑表的当前可见行。
-     */
-    private List<Object[]> loadRows(Transaction tx, StatementReadSnapshot snapshot, String table) {
-        List<Object[]> rows = new ArrayList<>();
-        for (String shardId : shardResolver.resolveShards(table).stream().distinct().toList()) {
-            List<VersionedValue> values = transactionManager.scan(
-                    tx,
-                    shardId,
-                    keyCodec.rangeStart(table),
-                    keyCodec.rangeEnd(table),
-                    snapshot
-            );
-            for (VersionedValue value : values) {
-                if (!value.deleted()) {
-                    rows.add(new Object[]{keyCodec.decode(table, value.key()), valueCodec.decode(value.value())});
-                }
-            }
-        }
-        return rows;
-    }
-
-    /**
      * 把 JDBC 结果集转换为保序的 SQL 行和值矩阵。
      */
-    private QueryData readResultSet(ResultSet resultSet) throws Exception {
+    private QueryData readResultSet(ResultSet resultSet, Transaction tx) throws Exception {
         ResultSetMetaData metadata = resultSet.getMetaData();
         List<String> labels = new ArrayList<>();
         for (int index = 1; index <= metadata.getColumnCount(); index++) {
@@ -222,12 +208,24 @@ final class CalciteSqlExecutor {
         }
         List<SqlRow> sqlRows = new ArrayList<>();
         List<List<String>> values = new ArrayList<>();
+        long remainingBytes = options.maxResultBytes();
         while (resultSet.next()) {
+            if (sqlRows.size() >= options.maxResultRows()) {
+                throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,
+                        "SQL result row budget exceeded: " + options.maxResultRows(), false, tx.txId());
+            }
             Map<String, String> columns = new LinkedHashMap<>();
             List<String> rowValues = new ArrayList<>();
             for (int index = 1; index <= labels.size(); index++) {
                 Object value = resultSet.getObject(index);
                 String stringValue = value == null ? null : String.valueOf(value);
+                if (stringValue != null) {
+                    remainingBytes -= stringValue.getBytes(StandardCharsets.UTF_8).length;
+                    if (remainingBytes < 0) {
+                        throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,
+                                "SQL result byte budget exceeded: " + options.maxResultBytes(), false, tx.txId());
+                    }
+                }
                 columns.put(labels.get(index - 1), stringValue);
                 rowValues.add(stringValue);
             }
@@ -240,14 +238,14 @@ final class CalciteSqlExecutor {
     /**
      * 校验 UPDATE 后的新主键在结果集合内唯一，且不会覆盖集合外已有行。
      */
-    private void validateUpdatedKeys(Transaction tx, String table, List<UpdatedRow> updates) {
+    private void validateUpdatedKeys(Transaction tx, String table, List<UpdatedRow> updates, StatementReadSnapshot snapshot) {
         Set<String> oldIds = updates.stream().map(UpdatedRow::oldId).collect(java.util.stream.Collectors.toSet());
         Set<String> newIds = new HashSet<>();
         for (UpdatedRow row : updates) {
             if (!newIds.add(row.newId())) {
                 throw illegal("duplicate key after UPDATE: " + row.newId());
             }
-            if (!oldIds.contains(row.newId()) && exists(tx, table, row.newId())) {
+            if (!oldIds.contains(row.newId()) && exists(tx, table, row.newId(), snapshot)) {
                 throw illegal("duplicate key after UPDATE: " + row.newId());
             }
         }
@@ -256,8 +254,8 @@ final class CalciteSqlExecutor {
     /**
      * 校验 INSERT 目标主键当前不存在。
      */
-    private void ensureKeyAbsent(Transaction tx, String table, String id) {
-        if (exists(tx, table, id)) {
+    private void ensureKeyAbsent(Transaction tx, String table, String id, StatementReadSnapshot snapshot) {
+        if (exists(tx, table, id, snapshot)) {
             throw illegal("duplicate key: " + id);
         }
     }
@@ -265,9 +263,9 @@ final class CalciteSqlExecutor {
     /**
      * 判断逻辑表主键在当前事务视图中是否存在。
      */
-    private boolean exists(Transaction tx, String table, String id) {
+    private boolean exists(Transaction tx, String table, String id, StatementReadSnapshot snapshot) {
         String shardId = shardResolver.resolveShard(table, id);
-        return transactionManager.get(tx, shardId, keyCodec.encode(table, id)).isPresent();
+        return transactionManager.get(tx, shardId, keyCodec.encode(table, id), snapshot).isPresent();
     }
 
     /**
@@ -398,39 +396,6 @@ final class CalciteSqlExecutor {
      */
     private MvccException illegal(String message, Exception cause) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, null, cause);
-    }
-
-    /**
-     * Calcite 运行期读取的不可变内存快照表。
-     */
-    private static final class SnapshotTable extends AbstractTable implements ScannableTable {
-        private final List<Object[]> rows;
-
-        /**
-         * 构造不可变快照表。
-         */
-        private SnapshotTable(List<Object[]> rows) {
-            this.rows = List.copyOf(rows);
-        }
-
-        /**
-         * 返回固定 id/value 字符串行类型。
-         */
-        @Override
-        public RelDataType getRowType(RelDataTypeFactory typeFactory) {
-            return typeFactory.builder()
-                    .add("id", SqlTypeName.VARCHAR)
-                    .add("value", SqlTypeName.VARCHAR)
-                    .build();
-        }
-
-        /**
-         * 返回 Calcite 可枚举的快照行。
-         */
-        @Override
-        public Enumerable<Object[]> scan(DataContext root) {
-            return Linq4j.asEnumerable(rows);
-        }
     }
 
     /**

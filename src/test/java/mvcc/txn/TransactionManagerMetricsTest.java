@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -31,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  */
 class TransactionManagerMetricsTest {
     /**
-     * 验证单分片缓冲写直接提交会记录核心阶段。
+     * 验证不支持原子直接提交的单分片适配器记录预写和核心提交阶段。
      */
     @Test
     void singleShardBufferedCommitShouldRecordStages() {
@@ -51,6 +52,8 @@ class TransactionManagerMetricsTest {
 
         assertSuccess(metrics, TransactionStage.BEGIN_TSO, 1L);
         assertSuccess(metrics, TransactionStage.BEGIN_METADATA, 1L);
+        assertSuccess(metrics, TransactionStage.BUFFERED_PREWRITE, 1L);
+        assertEquals(1, shard.prewriteAttempts());
         assertSuccess(metrics, TransactionStage.COMMIT_TSO, 1L);
         assertSuccess(metrics, TransactionStage.SINGLE_SHARD_METADATA_COMMIT, 1L);
         assertSuccess(metrics, TransactionStage.SINGLE_SHARD_PARTICIPANT_COMMIT, 1L);
@@ -176,6 +179,8 @@ class TransactionManagerMetricsTest {
         manager.put(tx, "shard-1", "k1", new byte[]{1});
 
         MvccException ex = assertThrows(MvccException.class, () -> manager.commit(tx));
+        assertEquals(mvcc.common.ErrorCode.TRANSACTION_STATUS_UNKNOWN, ex.errorCode());
+        assertFalse(ex.retryable());
         MvccException cause = assertInstanceOf(MvccException.class, ex.getCause());
         assertEquals(mvcc.common.ErrorCode.STORAGE_UNAVAILABLE, cause.errorCode());
     }
@@ -356,6 +361,14 @@ class TransactionManagerMetricsTest {
         }
 
         /**
+         * 仅模拟跨分片可见性能力，测试范围为指标记录及异常传播。
+         */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return true;
+        }
+
+        /**
          * 设置提交是否失败。
          */
         private void failCommit(boolean failCommit) {
@@ -464,7 +477,7 @@ class TransactionManagerMetricsTest {
          */
         @Override
         public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
-            commit(txId, commitTs, mutations, true);
+            throw new AssertionError("metrics adapter does not implement atomic direct commit");
         }
 
         /**

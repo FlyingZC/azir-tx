@@ -62,9 +62,13 @@ public final class CrossShardWritePathPrototypeBenchmark {
             ((MysqlTransactionMetadataStore) metadataStore).initialize();
 
             if (config.resetTables()) {
-                reset(controlDataSource, "mvcc_txn", "mvcc_tso");
-                reset(shard1DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
-                reset(shard2DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
+                reset(controlDataSource, "mvcc_txn_finalized", "mvcc_snapshot_lease", "mvcc_txn", "mvcc_tso");
+                reset(shard1DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback",
+                        "mvcc_participant_txn", "mvcc_key_lock", "mvcc_local_safe_point");
+                shard1.initialize();
+                reset(shard2DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback",
+                        "mvcc_participant_txn", "mvcc_key_lock", "mvcc_local_safe_point");
+                shard2.initialize();
                 tso.initialize(100);
                 ((MysqlTransactionMetadataStore) metadataStore).initialize();
             }
@@ -266,6 +270,13 @@ public final class CrossShardWritePathPrototypeBenchmark {
             this.timestampOracle = timestampOracle;
             this.metadataStore = metadataStore;
             this.adapters = adapters;
+            // 原型协调器不经过 TransactionManager，必须自行传递同一中心权威。
+            for (StorageAdapter adapter : adapters.values()) {
+                adapter.configureMetadataStore(metadataStore);
+                if (!adapter.supportsCommittedIntentResolution()) {
+                    throw new IllegalArgumentException("cross-shard prototype requires committed intent resolution");
+                }
+            }
             this.parallelPrewrite = parallelPrewrite;
             this.parallelPrepare = parallelPrepare;
             this.parallelCommit = parallelCommit;
@@ -336,8 +347,9 @@ public final class CrossShardWritePathPrototypeBenchmark {
          * 执行原型事务预写。
          */
         private void prewrite(PrototypeTransaction tx, String shardId, List<Mutation> mutations) {
-            adapters.get(shardId).prewrite(tx.txId(), tx.startTs(), mutations);
             tx.markParticipant(shardId);
+            metadataStore.registerParticipants(tx.txId(), Set.of(shardId));
+            adapters.get(shardId).prewrite(tx.txId(), tx.startTs(), mutations);
         }
 
         /**

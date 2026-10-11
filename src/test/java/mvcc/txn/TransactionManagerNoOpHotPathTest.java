@@ -84,7 +84,9 @@ class TransactionManagerNoOpHotPathTest {
         manager.put(tx, "shard-1", "k1", new byte[]{1});
         manager.commit(tx);
 
-        assertEquals(1, shard.directCommitCount());
+        assertEquals(0, shard.directCommitCount());
+        assertEquals(1, shard.prewriteCount);
+        assertEquals(1, shard.commitCount());
     }
 
     /**
@@ -179,6 +181,7 @@ class TransactionManagerNoOpHotPathTest {
      */
     private static final class RecordingStorageAdapter implements StorageAdapter {
         private final String shardId;
+        private int prewriteCount;
         private int commitCount;
         private int directCommitCount;
         private int abortCount;
@@ -188,6 +191,14 @@ class TransactionManagerNoOpHotPathTest {
          */
         private RecordingStorageAdapter(String shardId) {
             this.shardId = shardId;
+        }
+
+        /**
+         * 仅模拟跨分片可见性能力，使计数测试能够进入参与者调用路径。
+         */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return true;
         }
 
         /**
@@ -247,6 +258,7 @@ class TransactionManagerNoOpHotPathTest {
          */
         @Override
         public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+            prewriteCount++;
         }
 
         /**
@@ -278,6 +290,7 @@ class TransactionManagerNoOpHotPathTest {
         @Override
         public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
             directCommitCount++;
+            throw new AssertionError("counting adapter does not implement atomic direct commit");
         }
 
         /**

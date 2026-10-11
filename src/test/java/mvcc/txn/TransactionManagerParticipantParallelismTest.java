@@ -136,6 +136,14 @@ class TransactionManagerParticipantParallelismTest {
         }
 
         /**
+         * 模拟跨分片可见性能力，仅验证并行预写调度。
+         */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return true;
+        }
+
+        /**
          * 返回当前分片编号。
          */
         @Override
@@ -249,6 +257,14 @@ class TransactionManagerParticipantParallelismTest {
         }
 
         /**
+         * 模拟跨分片可见性能力，使预写错误进入原始异常传播路径。
+         */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return true;
+        }
+
+        /**
          * 返回当前分片编号。
          */
         @Override
@@ -343,6 +359,14 @@ class TransactionManagerParticipantParallelismTest {
          */
         private RuntimeExceptionPrewriteStorageAdapter(String shardId) {
             this.shardId = shardId;
+        }
+
+        /**
+         * 模拟跨分片可见性能力，使预写异常进入原始异常传播路径。
+         */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return true;
         }
 
         /**

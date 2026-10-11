@@ -2,6 +2,8 @@ package mvcc.metadata;
 
 import mvcc.common.IsolationLevel;
 import mvcc.common.TxStatus;
+import mvcc.common.ErrorCode;
+import mvcc.common.MvccException;
 
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -26,6 +28,13 @@ public final class TxRecord {
                     Set<String> participants,
                     TxStatus status,
                     Long commitTs) {
+        if (status == null || isolationLevel == null) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction status and isolation level must not be null", false, txId);
+        }
+        TransactionMetadataValidation.validateParticipants(txId, participants);
+        if (status == TxStatus.COMMITTED || commitTs != null) {
+            TransactionMetadataValidation.validateCommitTs(txId, startTs, commitTs);
+        }
         this.txId = txId;
         this.startTs = startTs;
         this.isolationLevel = isolationLevel;

@@ -71,9 +71,13 @@ public final class MysqlTxnBenchmark {
             ((MysqlSafePointStore) safePointStore).initialize(0L);
 
             if (config.resetTables()) {
-                reset(controlDataSource, "mvcc_txn", "mvcc_tso", "mvcc_safe_point");
-                reset(shard1DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
-                reset(shard2DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
+                reset(controlDataSource, "mvcc_txn_finalized", "mvcc_snapshot_lease", "mvcc_txn", "mvcc_tso", "mvcc_safe_point");
+                reset(shard1DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback",
+                        "mvcc_participant_txn", "mvcc_key_lock", "mvcc_local_safe_point");
+                shard1.initialize();
+                reset(shard2DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback",
+                        "mvcc_participant_txn", "mvcc_key_lock", "mvcc_local_safe_point");
+                shard2.initialize();
                 mysqlTso.initialize(100);
                 segmentTso.initialize(100);
                 ((MysqlTransactionMetadataStore) metadataStore).initialize();

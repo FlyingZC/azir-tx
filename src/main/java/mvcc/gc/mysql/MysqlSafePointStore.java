@@ -3,6 +3,7 @@ package mvcc.gc.mysql;
 import mvcc.common.ErrorCode;
 import mvcc.common.MvccException;
 import mvcc.gc.SafePointStore;
+import mvcc.control.MysqlConnectionContext;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -29,7 +30,7 @@ public final class MysqlSafePointStore implements SafePointStore {
      * 初始化所需的数据库表结构或运行环境。
      */
     public void initialize(long initialSafePoint) {
-        try (Connection connection = dataSource.getConnection();
+        try (Connection connection = MysqlConnectionContext.connection(dataSource);
              PreparedStatement create = connection.prepareStatement("""
                      create table if not exists mvcc_safe_point (
                        store_id varchar(64) not null primary key,
@@ -55,7 +56,7 @@ public final class MysqlSafePointStore implements SafePointStore {
      */
     @Override
     public long currentSafePoint() {
-        try (Connection connection = dataSource.getConnection();
+        try (Connection connection = MysqlConnectionContext.connection(dataSource);
              PreparedStatement statement = connection.prepareStatement("""
                      select safe_point from mvcc_safe_point where store_id = ?
                      """)) {
@@ -76,34 +77,29 @@ public final class MysqlSafePointStore implements SafePointStore {
      */
     @Override
     public long advanceTo(long candidateSafePoint) {
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
-            try (PreparedStatement select = connection.prepareStatement("""
-                    select safe_point from mvcc_safe_point where store_id = ? for update
-                    """);
-                 PreparedStatement update = connection.prepareStatement("""
-                    update mvcc_safe_point set safe_point = ? where store_id = ?
-                    """)) {
-                select.setString(1, STORE_ID);
-                long current;
-                try (ResultSet resultSet = select.executeQuery()) {
-                    if (!resultSet.next()) {
-                        throw new MvccException(ErrorCode.ILLEGAL_STATE, "safe point row missing", false, null);
+        try {
+            return MysqlConnectionContext.inTransaction(dataSource, connection -> {
+                try (PreparedStatement select = connection.prepareStatement("""
+                        select safe_point from mvcc_safe_point where store_id = ? for update
+                        """);
+                     PreparedStatement update = connection.prepareStatement("""
+                        update mvcc_safe_point set safe_point = ? where store_id = ?
+                        """)) {
+                    select.setString(1, STORE_ID);
+                    long current;
+                    try (ResultSet resultSet = select.executeQuery()) {
+                        if (!resultSet.next()) {
+                            throw new MvccException(ErrorCode.ILLEGAL_STATE, "safe point row missing", false, null);
+                        }
+                        current = resultSet.getLong("safe_point");
                     }
-                    current = resultSet.getLong("safe_point");
+                    long next = Math.max(current, candidateSafePoint);
+                    update.setLong(1, next);
+                    update.setString(2, STORE_ID);
+                    update.executeUpdate();
+                    return next;
                 }
-                long next = Math.max(current, candidateSafePoint);
-                update.setLong(1, next);
-                update.setString(2, STORE_ID);
-                update.executeUpdate();
-                connection.commit();
-                return next;
-            } catch (SQLException | RuntimeException ex) {
-                connection.rollback();
-                throw ex;
-            } finally {
-                connection.setAutoCommit(true);
-            }
+            });
         } catch (SQLException ex) {
             throw storageError("advance safe point failed", ex);
         }

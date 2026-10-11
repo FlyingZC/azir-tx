@@ -11,7 +11,10 @@ import mvcc.metadata.mysql.MysqlTransactionMetadataStore;
 import mvcc.recovery.BackgroundRecoveryRunner;
 import mvcc.recovery.RecoveryManager;
 import mvcc.storage.KeyRange;
+import mvcc.storage.Mutation;
+import mvcc.storage.ParticipantRecord;
 import mvcc.storage.ReadContext;
+import mvcc.storage.ScanPage;
 import mvcc.storage.StorageAdapter;
 import mvcc.storage.VersionedValue;
 import mvcc.storage.mysql.MysqlDataSourceFactory;
@@ -62,9 +65,13 @@ public final class MysqlMvccE2E {
             safePointStore.initialize(0L);
 
             if (config.resetTables()) {
-                reset(controlDataSource, "mvcc_txn", "mvcc_tso", "mvcc_safe_point");
-                reset(shard1DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
-                reset(shard2DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback");
+                reset(controlDataSource, "mvcc_txn_finalized", "mvcc_snapshot_lease", "mvcc_txn", "mvcc_tso", "mvcc_safe_point");
+                reset(shard1DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback",
+                        "mvcc_participant_txn", "mvcc_key_lock", "mvcc_local_safe_point");
+                shard1.initialize();
+                reset(shard2DataSource, "mvcc_intent", "mvcc_data", "mvcc_rollback",
+                        "mvcc_participant_txn", "mvcc_key_lock", "mvcc_local_safe_point");
+                shard2.initialize();
                 tso.initialize(100);
                 metadataStore.initialize();
                 safePointStore.initialize(0L);
@@ -190,6 +197,11 @@ public final class MysqlMvccE2E {
             recoveryRunner.recoverOnce(100);
         }
 
+        ParticipantRecord localRecord = shard2.participantRecord(tx.txId()).orElseThrow();
+        requireEquals(mvcc.common.TxStatus.COMMITTED, localRecord.status(), "recovery local decision");
+        requireEquals(metadataStore.get(tx.txId()).orElseThrow().commitTs(), localRecord.commitTs(),
+                "recovery commit timestamp");
+
         Transaction reader = readerManager.begin(IsolationLevel.READ_COMMITTED);
         requireEquals("right", read(readerManager, reader, "shard-2", "e2e:recover:2"), "recovery should finish commit");
         readerManager.rollback(reader);
@@ -218,6 +230,13 @@ public final class MysqlMvccE2E {
         }
         if (countVersionsForKey(shard1DataSource, "e2e:gc:001") != 0) {
             throw new IllegalStateException("expected tombstone chain fully reclaimed");
+        }
+        Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
+        try {
+            requireEquals(null, read(transactionManager, reader, "shard-1", "e2e:gc:001"),
+                    "deleted value must remain invisible after GC");
+        } finally {
+            transactionManager.rollback(reader);
         }
         if (safePointStore.currentSafePoint() <= 0) {
             throw new IllegalStateException("expected safe point to advance");
@@ -338,6 +357,36 @@ public final class MysqlMvccE2E {
             this.delegate = delegate;
         }
 
+        /** 转发事务中心绑定，保留同一适配器禁止复绑不同权威的约束。 */
+        @Override
+        public void configureMetadataStore(TransactionMetadataStore store) {
+            delegate.configureMetadataStore(store);
+        }
+
+        /** 返回真实适配器的已提交意向解析能力。 */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return delegate.supportsCommittedIntentResolution();
+        }
+
+        /** 返回真实适配器的原子直接提交能力。 */
+        @Override
+        public boolean supportsAtomicDirectCommit() {
+            return delegate.supportsAtomicDirectCommit();
+        }
+
+        /** 查询真实参与者记录，保留本地提交结果未知时的恢复证据。 */
+        @Override
+        public Optional<ParticipantRecord> participantRecord(long txId) {
+            return delegate.participantRecord(txId);
+        }
+
+        /** 转发真实适配器的显式准备要求。 */
+        @Override
+        public boolean requiresExplicitPreparePhase() {
+            return delegate.requiresExplicitPreparePhase();
+        }
+
         /**
          * 返回当前存储适配器所属分片编号。
          */
@@ -370,6 +419,12 @@ public final class MysqlMvccE2E {
             return delegate.scan(context, keyRange);
         }
 
+        /** 转发真实分页扫描，保留游标和有界查询语义。 */
+        @Override
+        public ScanPage scanPage(ReadContext context, KeyRange keyRange, String afterKeyExclusive, int limit) {
+            return delegate.scanPage(context, keyRange, afterKeyExclusive, limit);
+        }
+
         /**
          * 执行原型事务预写。
          */
@@ -391,10 +446,48 @@ public final class MysqlMvccE2E {
          */
         @Override
         public void commit(long txId, long commitTs) {
+            failOnce();
+            delegate.commit(txId, commitTs);
+        }
+
+        /** 按写集合提交时同样注入故障，避免提交重载绕过演示场景。 */
+        @Override
+        public void commit(long txId, long commitTs, List<Mutation> mutations) {
+            failOnce();
+            delegate.commit(txId, commitTs, mutations);
+        }
+
+        /** 保留真实清理策略并注入一次提交故障。 */
+        @Override
+        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+            failOnce();
+            delegate.commit(txId, commitTs, mutations, cleanupIntents);
+        }
+
+        /** 直接提交调用真实原子实现，不以普通提交代替本地终态落盘。 */
+        @Override
+        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+            failOnce();
+            delegate.directCommit(txId, startTs, commitTs, mutations);
+        }
+
+        /** 按写集合转发意向清理。 */
+        @Override
+        public void cleanupIntents(long txId, List<Mutation> mutations) {
+            delegate.cleanupIntents(txId, mutations);
+        }
+
+        /** 按事务编号转发意向清理。 */
+        @Override
+        public void cleanupIntents(long txId) {
+            delegate.cleanupIntents(txId);
+        }
+
+        /** 所有提交重载共享一次性故障，且故障发生在真实存储调用前。 */
+        private void failOnce() {
             if (shouldFail.compareAndSet(true, false)) {
                 throw new IllegalStateException("simulated commit failure");
             }
-            delegate.commit(txId, commitTs);
         }
 
         /**

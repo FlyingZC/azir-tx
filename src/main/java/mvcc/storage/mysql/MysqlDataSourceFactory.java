@@ -23,14 +23,49 @@ public final class MysqlDataSourceFactory {
      * 创建组件实例或事务记录。
      */
     public static DataSource create(String jdbcUrl, String username, String password) {
+        return createPool(jdbcUrl, username, password,
+                envInt("AZIR_TX_JDBC_MAX_POOL_SIZE", DEFAULT_MAX_POOL_SIZE),
+                envInt("AZIR_TX_JDBC_MIN_IDLE", DEFAULT_MIN_IDLE),
+                envLong("AZIR_TX_JDBC_CONNECTION_TIMEOUT_MS", DEFAULT_CONNECTION_TIMEOUT_MS),
+                envInt("AZIR_TX_JDBC_CONNECT_TIMEOUT_MS", 3_000),
+                envInt("AZIR_TX_JDBC_SOCKET_TIMEOUT_MS", 10_000));
+    }
+
+    /**
+     * 创建恢复或 GC 专用的小连接池，与前台池使用独立的连接预算。
+     */
+    public static DataSource createBackground(String jdbcUrl, String username, String password) {
+        return createPool(jdbcUrl, username, password,
+                envInt("AZIR_TX_BACKGROUND_JDBC_MAX_POOL_SIZE", 4),
+                envInt("AZIR_TX_BACKGROUND_JDBC_MIN_IDLE", 0),
+                envLong("AZIR_TX_BACKGROUND_JDBC_CONNECTION_TIMEOUT_MS", DEFAULT_CONNECTION_TIMEOUT_MS),
+                envInt("AZIR_TX_BACKGROUND_JDBC_CONNECT_TIMEOUT_MS", 3_000),
+                envInt("AZIR_TX_BACKGROUND_JDBC_SOCKET_TIMEOUT_MS", 5_000));
+    }
+
+    /**
+     * 校验连接预算并配置前后台共用的 JDBC 批处理能力。
+     */
+    private static DataSource createPool(String jdbcUrl, String username, String password,
+                                         int maximumPoolSize, int minimumIdle, long connectionTimeout,
+                                         int connectTimeout, int socketTimeout) {
+        if (maximumPoolSize < 1 || minimumIdle < 0 || minimumIdle > maximumPoolSize) {
+            throw new IllegalArgumentException("pool size must be positive and minimumIdle within the pool budget");
+        }
+        if (connectTimeout < 1 || socketTimeout < 1) {
+            throw new IllegalArgumentException("JDBC connect and socket timeouts must be positive");
+        }
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(jdbcUrl);
         config.setUsername(username);
         config.setPassword(password);
-        config.setMaximumPoolSize(envInt("AZIR_TX_JDBC_MAX_POOL_SIZE", DEFAULT_MAX_POOL_SIZE));
-        config.setMinimumIdle(envInt("AZIR_TX_JDBC_MIN_IDLE", DEFAULT_MIN_IDLE));
-        config.setConnectionTimeout(envLong("AZIR_TX_JDBC_CONNECTION_TIMEOUT_MS", DEFAULT_CONNECTION_TIMEOUT_MS));
+        config.setMaximumPoolSize(maximumPoolSize);
+        config.setMinimumIdle(minimumIdle);
+        config.setConnectionTimeout(connectionTimeout);
         config.setAutoCommit(true);
+        // 后台时间预算只能在操作之间检查；驱动超时负责限制连接和网络读取阻塞。
+        config.addDataSourceProperty("connectTimeout", Integer.toString(connectTimeout));
+        config.addDataSourceProperty("socketTimeout", Integer.toString(socketTimeout));
         config.addDataSourceProperty("cachePrepStmts", "true");
         config.addDataSourceProperty("prepStmtCacheSize", "250");
         config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
