@@ -43,12 +43,28 @@ public final class MysqlDataSourceFactory {
                 envInt("AZIR_TX_BACKGROUND_JDBC_SOCKET_TIMEOUT_MS", 5_000));
     }
 
+    /** 组成员池延迟连接，单个离线成员不能阻止组发现器连接仍具备法定多数的主节点。 */
+    public static DataSource createGroupMember(String jdbcUrl, String username, String password) {
+        return createPool(jdbcUrl, username, password,
+                envInt("AZIR_TX_JDBC_MAX_POOL_SIZE", DEFAULT_MAX_POOL_SIZE), 0,
+                envLong("AZIR_TX_JDBC_CONNECTION_TIMEOUT_MS", DEFAULT_CONNECTION_TIMEOUT_MS),
+                envInt("AZIR_TX_JDBC_CONNECT_TIMEOUT_MS", 3_000),
+                envInt("AZIR_TX_JDBC_SOCKET_TIMEOUT_MS", 10_000), true);
+    }
+
     /**
      * 校验连接预算并配置前后台共用的 JDBC 批处理能力。
      */
     private static DataSource createPool(String jdbcUrl, String username, String password,
                                          int maximumPoolSize, int minimumIdle, long connectionTimeout,
                                          int connectTimeout, int socketTimeout) {
+        return createPool(jdbcUrl, username, password, maximumPoolSize, minimumIdle, connectionTimeout, connectTimeout, socketTimeout, false);
+    }
+
+    /** 只有显式组成员允许延迟首连，主节点和法定多数仍由组发现器严格验证。 */
+    private static DataSource createPool(String jdbcUrl, String username, String password,
+                                         int maximumPoolSize, int minimumIdle, long connectionTimeout,
+                                         int connectTimeout, int socketTimeout, boolean lazyInitialization) {
         if (maximumPoolSize < 1 || minimumIdle < 0 || minimumIdle > maximumPoolSize) {
             throw new IllegalArgumentException("pool size must be positive and minimumIdle within the pool budget");
         }
@@ -63,6 +79,7 @@ public final class MysqlDataSourceFactory {
         config.setMinimumIdle(minimumIdle);
         config.setConnectionTimeout(connectionTimeout);
         config.setAutoCommit(true);
+        if (lazyInitialization) { config.setInitializationFailTimeout(-1); }
         // 后台时间预算只能在操作之间检查；驱动超时负责限制连接和网络读取阻塞。
         config.addDataSourceProperty("connectTimeout", Integer.toString(connectTimeout));
         config.addDataSourceProperty("socketTimeout", Integer.toString(socketTimeout));

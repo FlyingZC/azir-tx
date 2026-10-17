@@ -14,7 +14,7 @@ import java.sql.SQLException;
 /**
  * 基于 MySQL 行锁递增的时间戳分配器。
  */
-public final class MysqlTimestampOracle implements TimestampOracle {
+public final class MysqlTimestampOracle implements TimestampOracle, MysqlTimestampAuthority {
     private static final String SEQUENCE_NAME = "global";
 
     private final DataSource dataSource;
@@ -26,6 +26,12 @@ public final class MysqlTimestampOracle implements TimestampOracle {
         this.dataSource = dataSource;
     }
 
+    /** 合并控制操作只接受同一个池实例，其他配置走原有逐次发号路径。 */
+    @Override
+    public boolean usesDataSource(DataSource candidate) {
+        return dataSource == candidate;
+    }
+
     /**
      * 初始化所需的数据库表结构或运行环境。
      */
@@ -35,7 +41,7 @@ public final class MysqlTimestampOracle implements TimestampOracle {
                      create table if not exists mvcc_tso (
                        sequence_name varchar(64) not null primary key,
                        current_value bigint not null
-                     )
+                     ) engine=InnoDB
                      """);
              PreparedStatement insert = connection.prepareStatement("""
                      insert into mvcc_tso(sequence_name, current_value)
@@ -56,37 +62,32 @@ public final class MysqlTimestampOracle implements TimestampOracle {
      */
     @Override
     public long nextTimestamp() {
-        try {
-            return MysqlConnectionContext.inTransaction(dataSource, connection -> {
-                try (PreparedStatement select = connection.prepareStatement("""
-                        select current_value
-                        from mvcc_tso
-                        where sequence_name = ?
-                        for update
-                        """);
-                     PreparedStatement update = connection.prepareStatement("""
-                        update mvcc_tso
-                        set current_value = ?
-                        where sequence_name = ?
-                        """)) {
-                    select.setString(1, SEQUENCE_NAME);
-                    long current;
-                    try (ResultSet resultSet = select.executeQuery()) {
-                        if (!resultSet.next()) {
-                            throw new MvccException(ErrorCode.ILLEGAL_STATE, "tso row not found", false, null);
-                        }
-                        current = resultSet.getLong("current_value");
-                    }
-                    if (current == Long.MAX_VALUE) {
-                        throw new MvccException(ErrorCode.ILLEGAL_STATE, "timestamp sequence exhausted", false, null);
-                    }
-                    long next = current + 1;
-                    update.setLong(1, next);
-                    update.setString(2, SEQUENCE_NAME);
-                    update.executeUpdate();
-                    return next;
+        try (Connection connection = MysqlConnectionContext.connection(dataSource)) {
+            if (!connection.getAutoCommit()) {
+                throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                        "tso allocation requires auto-commit connection", false, null);
+            }
+            // 单条自动提交 UPDATE 原子保留时间戳，LAST_INSERT_ID(expr) 将结果绑定到当前连接。
+            try (PreparedStatement update = connection.prepareStatement("""
+                    update mvcc_tso
+                    set current_value = last_insert_id(current_value + 1)
+                    where sequence_name = ? and current_value < ?
+                    """);
+                 PreparedStatement select = connection.prepareStatement("select last_insert_id()")) {
+                update.setString(1, SEQUENCE_NAME);
+                update.setLong(2, Long.MAX_VALUE);
+                if (update.executeUpdate() != 1) {
+                    throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                            "tso row missing or timestamp sequence exhausted", false, null);
                 }
-            });
+                try (ResultSet result = select.executeQuery()) {
+                    if (!result.next()) {
+                        throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                                "tso allocation returned no timestamp", false, null);
+                    }
+                    return result.getLong(1);
+                }
+            }
         } catch (SQLException ex) {
             throw storageError("allocate tso failed", ex, null);
         }

@@ -12,6 +12,21 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** 验证固定租约、终态单调性和有界元数据清理。 */
 class PublicationMetadataTest {
+    /** 默认租约合同拒绝缺失、截止不匹配、过期和已释放记录，不续期或缓存有效性。 */
+    @Test
+    void leaseValidationRequiresOriginalLiveLease() {
+        var store = new InMemoryTransactionMetadataStore();
+        assertFalse(store.isSnapshotLeaseValid(1, Long.MAX_VALUE));
+        store.registerSnapshot(1, 1, Long.MAX_VALUE);
+        assertTrue(store.isSnapshotLeaseValid(1, Long.MAX_VALUE));
+        assertFalse(store.isSnapshotLeaseValid(1, Long.MAX_VALUE - 1));
+        store.registerSnapshot(2, 2, 1);
+        assertFalse(store.isSnapshotLeaseValid(2, 1));
+        assertEquals(1L, store.snapshotExpiry(2).orElseThrow());
+        store.releaseSnapshot(1);
+        assertFalse(store.isSnapshotLeaseValid(1, Long.MAX_VALUE));
+    }
+
     /** 畸形持久记录不能构造成可供读侧静默忽略的元数据。 */
     @Test
     void recordRejectsMissingCommittedTimestampStatusAndIsolation() {

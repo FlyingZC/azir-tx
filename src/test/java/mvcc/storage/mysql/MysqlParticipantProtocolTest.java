@@ -131,11 +131,51 @@ class MysqlParticipantProtocolTest {
         assertEquals(30L, adapter.participantRecord(10).orElseThrow().commitTs().longValue());
     }
 
+    /** 未安装第二版例程的旧分片重启后仍使用第一版完成同一持久协议。 */
+    @Test
+    void oldSingleKeyCommitRoutineMustRemainAvailableAfterRestart() throws Exception {
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("drop procedure if exists mvcc_commit_one_v2");
+        }
+        var restarted = new MysqlStorageAdapter("s1", dataSource, metadata);
+        restarted.requireInitializedFastPath();
+        restarted.prewrite(10, 10, List.of(put("legacy:routine", "value")));
+        commitDecision(10, 20);
+        restarted.commit(10, 20, List.of(put("legacy:routine", "value")), true);
+        assertEquals(TxStatus.COMMITTED, restarted.participantRecord(10).orElseThrow().status());
+        assertArrayEquals(bytes("value"), restarted.get(read(99, 30), "legacy:routine").orElseThrow().value());
+    }
+
+    /** 单键墓碑提交可暂留意向，重放清理时必须核对原值和终态。 */
+    @Test
+    void singleKeyDeleteCommitMustSupportDeferredCleanupAndVerifiedReplay() throws Exception {
+        adapter.enableSingleKeyCommitV2();
+        List<Mutation> writes = List.of(Mutation.delete("key"));
+        adapter.prewrite(10, 10, writes);
+        commitDecision(10, 30);
+        adapter.commit(10, 30, writes, false);
+        assertEquals(TxStatus.COMMITTED, adapter.participantRecord(10).orElseThrow().status());
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
+             var rows = statement.executeQuery("select count(*) from mvcc_intent where tx_id = 10")) {
+            assertTrue(rows.next());
+            assertEquals(1, rows.getInt(1));
+        }
+        assertThrows(MvccException.class, () -> adapter.commit(10, 30, List.of(put("key", "changed")), true));
+        adapter.commit(10, 30, writes, true);
+        adapter.commit(10, 30, writes, true);
+        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
+             var rows = statement.executeQuery("select count(*) from mvcc_intent where tx_id = 10")) {
+            assertTrue(rows.next());
+            assertEquals(0, rows.getInt(1));
+        }
+    }
+
     /**
      * 验证内存写集合不能改变已落盘意向，也不能在缺失意向时制造版本。
      */
     @Test
     void knownMutationsMustMatchAllDurableIntents() throws Exception {
+        adapter.enableSingleKeyCommitV2();
         List<Mutation> writes = List.of(put("key", "original"));
         adapter.prewrite(10, 10, writes);
         commitDecision(10, 30);

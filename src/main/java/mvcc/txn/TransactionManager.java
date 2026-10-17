@@ -10,15 +10,28 @@ import mvcc.common.TxStatus;
 import mvcc.gc.NoOpSafePointStore;
 import mvcc.gc.SafePointStore;
 import mvcc.metadata.TransactionMetadataStore;
+import mvcc.metadata.mysql.MysqlTransactionMetadataStore;
+import mvcc.metadata.BeginReservation;
+import mvcc.metadata.FastTransactionBegin;
+import mvcc.metadata.FastTransactionCommit;
 import mvcc.metadata.TxRecord;
 import mvcc.metrics.NoOpTransactionMetrics;
 import mvcc.metrics.TransactionMetrics;
 import mvcc.metrics.TransactionStage;
+import mvcc.publication.mysql.MysqlPublicationLedger;
+import mvcc.publication.mysql.MysqlSegmentPublicationLedger;
+import mvcc.publication.mysql.MysqlSegmentPublicationLedger.CommittedProof;
+import mvcc.publication.SegmentPublicationMaintenanceScheduler;
+import mvcc.publication.PublicationEntry;
+import mvcc.publication.PublicationEntryStatus;
+import mvcc.publication.PublicationCommitResult;
 import mvcc.storage.KeyRange;
 import mvcc.storage.Mutation;
 import mvcc.storage.ReadContext;
 import mvcc.storage.StorageAdapter;
+import mvcc.storage.mysql.MysqlStorageAdapter;
 import mvcc.storage.VersionedValue;
+import mvcc.storage.ParticipantRecord;
 import mvcc.storage.ScanPage;
 import mvcc.tso.TimestampOracle;
 
@@ -26,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -59,6 +73,20 @@ public final class TransactionManager implements AutoCloseable {
     private final TransactionOptions options;
     private final TransactionClassifier transactionClassifier;
     private final TransactionMetrics metrics;
+    private final MysqlPublicationLedger publicationLedger;
+    private final MysqlSegmentPublicationLedger segmentLedger;
+    private final PublicationSegmentOwnerRegistry segmentOwner;
+    private final SegmentPublicationMaintenanceScheduler segmentScheduler;
+    private final PublicationSegmentCommitBatcher segmentCommitBatcher;
+    private final boolean segmentDirectSingleShard;
+    private final boolean segmentOverlapMaterialization;
+    private final boolean segmentFastMaterialization;
+    private final CoordinatorSnapshotRegistry coordinatorRegistry;
+    private final boolean ledgerDirectSingleShard;
+    private final PublicationCommitBatcher publicationCommitBatcher;
+    private final PublicationLocalReserveBatcher localReserveBatcher;
+    private final PublicationLocalCompletionBatcher localCompletionBatcher;
+    private final PublicationBeginBatcher beginBatcher;
     private final ExecutorService participantExecutor;
     private final ExecutorService asyncCommitExecutor;
     private final ExecutorService intentCleanupExecutor;
@@ -130,13 +158,261 @@ public final class TransactionManager implements AutoCloseable {
                               TransactionOptions options,
                               Map<String, StorageAdapter> adapters,
                               TransactionMetrics metrics) {
+        this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics, null);
+    }
+
+    /** 新账本模式仅在控制面权威一致且写入可解析已提交 intent 时构造。 */
+    TransactionManager(TimestampOracle timestampOracle,
+                       TransactionMetadataStore metadataStore,
+                       SafePointStore safePointStore,
+                       TransactionOptions options,
+                       Map<String, StorageAdapter> adapters,
+                       TransactionMetrics metrics,
+                       MysqlPublicationLedger publicationLedger) {
+        this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics, publicationLedger, false);
+    }
+
+    /** 压测和隔离验证可选择启用有界账本批量决议，默认路径待验收后再切换。 */
+    TransactionManager(TimestampOracle timestampOracle,
+                       TransactionMetadataStore metadataStore,
+                       SafePointStore safePointStore,
+                       TransactionOptions options,
+                       Map<String, StorageAdapter> adapters,
+                       TransactionMetrics metrics,
+                       MysqlPublicationLedger publicationLedger,
+                       boolean batchLedgerCommits) {
+        this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
+                publicationLedger, batchLedgerCommits, 2);
+    }
+
+    /** 隔离压测可调整批量决议工作线程数，生产入口仍待长稳验收。 */
+    TransactionManager(TimestampOracle timestampOracle,
+                       TransactionMetadataStore metadataStore,
+                       SafePointStore safePointStore,
+                       TransactionOptions options,
+                       Map<String, StorageAdapter> adapters,
+                       TransactionMetrics metrics,
+                       MysqlPublicationLedger publicationLedger,
+                       boolean batchLedgerCommits,
+                       int batchWorkers) {
+        this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
+                publicationLedger, batchLedgerCommits, batchWorkers, false);
+    }
+
+    /** 仅显式启用已验证的单分片本地直接提交，默认保持吞吐较高的 intent 路径。 */
+    TransactionManager(TimestampOracle timestampOracle,
+                       TransactionMetadataStore metadataStore,
+                       SafePointStore safePointStore,
+                       TransactionOptions options,
+                       Map<String, StorageAdapter> adapters,
+                       TransactionMetrics metrics,
+                       MysqlPublicationLedger publicationLedger,
+                       boolean batchLedgerCommits,
+                       int batchWorkers,
+                       boolean ledgerDirectSingleShard) {
+        this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
+                publicationLedger, batchLedgerCommits, batchWorkers, ledgerDirectSingleShard, false, 1);
+    }
+
+    /** 批量快照开始仅由显式实验选项启用，默认保持已验证的单笔 begin。 */
+    TransactionManager(TimestampOracle timestampOracle,
+                       TransactionMetadataStore metadataStore,
+                       SafePointStore safePointStore,
+                       TransactionOptions options,
+                       Map<String, StorageAdapter> adapters,
+                       TransactionMetrics metrics,
+                       MysqlPublicationLedger publicationLedger,
+                       boolean batchLedgerCommits,
+                       int batchWorkers,
+                       boolean ledgerDirectSingleShard,
+                       boolean batchLedgerBegins,
+                       int beginWorkers) {
+        this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
+                publicationLedger, batchLedgerCommits, batchWorkers, ledgerDirectSingleShard,
+                batchLedgerBegins, beginWorkers, null);
+    }
+
+    /** 协调者快照租约仅由显式运行时装配，不能与批量开始同时启用。 */
+    TransactionManager(TimestampOracle timestampOracle,
+                       TransactionMetadataStore metadataStore,
+                       SafePointStore safePointStore,
+                       TransactionOptions options,
+                       Map<String, StorageAdapter> adapters,
+                       TransactionMetrics metrics,
+                       MysqlPublicationLedger publicationLedger,
+                       boolean batchLedgerCommits,
+                       int batchWorkers,
+                       boolean ledgerDirectSingleShard,
+                       boolean batchLedgerBegins,
+                       int beginWorkers,
+                       CoordinatorSnapshotRegistry coordinatorRegistry) {
+        this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
+                publicationLedger, batchLedgerCommits, batchWorkers, ledgerDirectSingleShard,
+                batchLedgerBegins, beginWorkers, coordinatorRegistry, null, null, null, null,
+                false, false, false);
+    }
+
+    /** 显式分段模式仅与已激活的新时间线和同库元数据权威装配。 */
+    static TransactionManager forSegment(TimestampOracle timestampOracle,
+                                         TransactionMetadataStore metadataStore,
+                                         TransactionOptions options,
+                                         Map<String, StorageAdapter> adapters,
+                                         TransactionMetrics metrics,
+                                         MysqlSegmentPublicationLedger segmentLedger,
+                                         PublicationSegmentOwnerRegistry segmentOwner,
+                                         SegmentPublicationMaintenanceScheduler segmentScheduler) {
+        return forSegment(timestampOracle, metadataStore, options, adapters, metrics,
+                segmentLedger, segmentOwner, segmentScheduler, null);
+    }
+
+    /** 允许显式实验运行时提供有界同分段批量决议队列。 */
+    static TransactionManager forSegment(TimestampOracle timestampOracle,
+                                         TransactionMetadataStore metadataStore,
+                                         TransactionOptions options,
+                                         Map<String, StorageAdapter> adapters,
+                                         TransactionMetrics metrics,
+                                         MysqlSegmentPublicationLedger segmentLedger,
+                                         PublicationSegmentOwnerRegistry segmentOwner,
+                                         SegmentPublicationMaintenanceScheduler segmentScheduler,
+                                         PublicationSegmentCommitBatcher segmentCommitBatcher) {
+        return forSegment(timestampOracle, metadataStore, options, adapters, metrics,
+                segmentLedger, segmentOwner, segmentScheduler, segmentCommitBatcher, false);
+    }
+
+    /** 分段单分片物理 1PC 仅由已具备本地终态恢复的显式运行时启用。 */
+    static TransactionManager forSegment(TimestampOracle timestampOracle,
+                                         TransactionMetadataStore metadataStore,
+                                         TransactionOptions options,
+                                         Map<String, StorageAdapter> adapters,
+                                         TransactionMetrics metrics,
+                                         MysqlSegmentPublicationLedger segmentLedger,
+                                         PublicationSegmentOwnerRegistry segmentOwner,
+                                         SegmentPublicationMaintenanceScheduler segmentScheduler,
+                                         PublicationSegmentCommitBatcher segmentCommitBatcher,
+                                         boolean segmentDirectSingleShard) {
+        return forSegment(timestampOracle, metadataStore, options, adapters, metrics,
+                segmentLedger, segmentOwner, segmentScheduler, segmentCommitBatcher,
+                segmentDirectSingleShard, false);
+    }
+
+    /** 分片物化与全局发布等待仅在并行提交策略下显式重叠。 */
+    static TransactionManager forSegment(TimestampOracle timestampOracle,
+                                         TransactionMetadataStore metadataStore,
+                                         TransactionOptions options,
+                                         Map<String, StorageAdapter> adapters,
+                                         TransactionMetrics metrics,
+                                         MysqlSegmentPublicationLedger segmentLedger,
+                                         PublicationSegmentOwnerRegistry segmentOwner,
+                                         SegmentPublicationMaintenanceScheduler segmentScheduler,
+                                         PublicationSegmentCommitBatcher segmentCommitBatcher,
+                                         boolean segmentDirectSingleShard,
+                                         boolean segmentOverlapMaterialization) {
+        return forSegment(timestampOracle, metadataStore, options, adapters, metrics,
+                segmentLedger, segmentOwner, segmentScheduler, segmentCommitBatcher,
+                segmentDirectSingleShard, segmentOverlapMaterialization, false);
+    }
+
+    /** 分段中心决议凭据只向同步、非批量的 MySQL 参与者开放。 */
+    static TransactionManager forSegment(TimestampOracle timestampOracle,
+                                         TransactionMetadataStore metadataStore,
+                                         TransactionOptions options,
+                                         Map<String, StorageAdapter> adapters,
+                                         TransactionMetrics metrics,
+                                         MysqlSegmentPublicationLedger segmentLedger,
+                                         PublicationSegmentOwnerRegistry segmentOwner,
+                                         SegmentPublicationMaintenanceScheduler segmentScheduler,
+                                         PublicationSegmentCommitBatcher segmentCommitBatcher,
+                                         boolean segmentDirectSingleShard,
+                                         boolean segmentOverlapMaterialization,
+                                         boolean segmentFastMaterialization) {
+        return new TransactionManager(timestampOracle, metadataStore, NoOpSafePointStore.INSTANCE,
+                options, adapters, metrics, null, false, 1, false, false, 1,
+                null, segmentLedger, segmentOwner, segmentScheduler, segmentCommitBatcher,
+                segmentDirectSingleShard, segmentOverlapMaterialization, segmentFastMaterialization);
+    }
+
+    /** 旧账本与分段账本只允许其中一个承担全局读写时间线。 */
+    private TransactionManager(TimestampOracle timestampOracle,
+                               TransactionMetadataStore metadataStore,
+                               SafePointStore safePointStore,
+                               TransactionOptions options,
+                               Map<String, StorageAdapter> adapters,
+                               TransactionMetrics metrics,
+                               MysqlPublicationLedger publicationLedger,
+                               boolean batchLedgerCommits,
+                               int batchWorkers,
+                               boolean ledgerDirectSingleShard,
+                               boolean batchLedgerBegins,
+                               int beginWorkers,
+                               CoordinatorSnapshotRegistry coordinatorRegistry,
+                               MysqlSegmentPublicationLedger segmentLedger,
+                               PublicationSegmentOwnerRegistry segmentOwner,
+                               SegmentPublicationMaintenanceScheduler segmentScheduler,
+                               PublicationSegmentCommitBatcher segmentCommitBatcher,
+                               boolean segmentDirectSingleShard,
+                               boolean segmentOverlapMaterialization,
+                               boolean segmentFastMaterialization) {
+        if (coordinatorRegistry != null && (publicationLedger == null || batchLedgerBegins)) {
+            throw new IllegalArgumentException("coordinator snapshots require ledger mode without batch begin");
+        }
+        if (segmentLedger != null && (publicationLedger != null || segmentOwner == null
+                || segmentScheduler == null || !options.lazyBeginMetadata() || !options.bufferWrites()
+                || !segmentLedger.sharesMetadataAuthority(metadataStore))
+                || segmentLedger == null && (segmentOwner != null || segmentScheduler != null
+                || segmentCommitBatcher != null || segmentDirectSingleShard
+                || segmentOverlapMaterialization || segmentFastMaterialization)
+                || segmentOverlapMaterialization && !options.crossShardCommitPolicy().parallelCommit()) {
+            throw new IllegalArgumentException("segmented mode requires one buffered MySQL control authority");
+        }
+        if (segmentFastMaterialization && (segmentCommitBatcher != null || segmentOverlapMaterialization
+                || options.crossShardCommitPolicy().asyncCommit()
+                || adapters.values().stream().anyMatch(adapter -> !(adapter instanceof MysqlStorageAdapter)))) {
+            throw new IllegalArgumentException("fast materialization requires synchronous MySQL segment decisions");
+        }
         this.timestampOracle = timestampOracle;
         this.metadataStore = metadataStore;
         this.safePointStore = safePointStore;
         this.options = options;
         this.transactionClassifier = new TransactionClassifier();
         this.metrics = Objects.requireNonNull(metrics, "metrics");
+        this.publicationLedger = publicationLedger;
+        this.segmentLedger = segmentLedger;
+        this.segmentOwner = segmentOwner;
+        this.segmentScheduler = segmentScheduler;
+        this.segmentCommitBatcher = segmentCommitBatcher;
+        this.segmentDirectSingleShard = segmentDirectSingleShard;
+        this.segmentOverlapMaterialization = segmentOverlapMaterialization;
+        this.segmentFastMaterialization = segmentFastMaterialization;
+        this.coordinatorRegistry = coordinatorRegistry;
+        this.ledgerDirectSingleShard = ledgerDirectSingleShard;
         this.adapters = Map.copyOf(adapters);
+        if (publicationLedger != null) {
+            if (!options.lazyBeginMetadata() || !options.bufferWrites()
+                    || !publicationLedger.sharesMetadataAuthority(metadataStore)
+                    || !publicationLedger.sharesTimestampAuthority(timestampOracle)) {
+                throw new IllegalArgumentException("ledger mode requires buffered lazy transactions and one MySQL authority");
+            }
+            publicationLedger.assertActivated();
+            publicationLedger.currentPublished();
+            this.adapters.forEach((shardId, adapter) -> {
+                if (!adapter.supportsCommittedIntentResolution()) {
+                    throw new IllegalArgumentException("ledger participant cannot resolve committed intents: " + shardId);
+                }
+            });
+        }
+        if (segmentLedger != null) {
+            segmentLedger.assertActivated();
+            this.adapters.forEach((shardId, adapter) -> {
+                if (!adapter.supportsCommittedIntentResolution()) {
+                    throw new IllegalArgumentException("segment participant cannot resolve committed intents: " + shardId);
+                }
+            });
+        }
+        if (publicationLedger == null && segmentLedger == null
+                && metadataStore instanceof MysqlTransactionMetadataStore mysqlMetadata) {
+            // 旧管理器在构造期拒绝已切换的持久模式，避免每笔 begin 才碰到租约外键栅栏。
+            mysqlMetadata.assertLegacyProtocolActive();
+        }
         this.transactionPermits = new Semaphore(options.limits().maxActiveTransactions());
         this.adapters.forEach((shardId, adapter) -> {
             if (shardId.isBlank() || shardId.contains(",") || !shardId.equals(adapter.shardId())) {
@@ -156,6 +432,22 @@ public final class TransactionManager implements AutoCloseable {
         this.intentCleanupExecutor = options.crossShardCommitPolicy().asyncCommit() && options.deferIntentCleanup()
                 ? boundedExecutor("mvcc-intent-cleanup-")
                 : null;
+        this.publicationCommitBatcher = publicationLedger != null && batchLedgerCommits
+                ? new PublicationCommitBatcher(publicationLedger, options.limits().maxActiveTransactions(),
+                        32, batchWorkers)
+                : null;
+        this.localReserveBatcher = publicationLedger != null && ledgerDirectSingleShard && batchLedgerCommits
+                ? new PublicationLocalReserveBatcher(publicationLedger, options.limits().maxActiveTransactions(),
+                        32, batchWorkers)
+                : null;
+        this.localCompletionBatcher = publicationLedger != null && ledgerDirectSingleShard && batchLedgerCommits
+                ? new PublicationLocalCompletionBatcher(publicationLedger, options.limits().maxActiveTransactions(),
+                        32, batchWorkers)
+                : null;
+        this.beginBatcher = publicationLedger != null && batchLedgerBegins
+                ? new PublicationBeginBatcher(publicationLedger, options.limits().timeoutMillis(),
+                        options.limits().maxActiveTransactions(), 32, beginWorkers)
+                : null;
     }
 
     /**
@@ -170,20 +462,10 @@ public final class TransactionManager implements AutoCloseable {
         }
         Transaction registered = null;
         try {
-            Transaction transaction = metadataStore.withPublicationLock(() -> {
-                ensureOpen();
-                metadataStore.assertNoPendingPublications();
-                long txId = nextTimestamp(TransactionStage.BEGIN_TSO);
-                Transaction created = new Transaction(txId, txId, isolationLevel,
-                        metadataStore.currentTimeMillis() + options.limits().timeoutMillis(), transactionOwner);
-                // 独立快照登记保护 lazy 只读事务，不能依赖是否写入事务元数据。
-                metadataStore.registerSnapshot(txId, txId, created.deadlineMillis());
-                if (!options.lazyBeginMetadata()) {
-                    createBeginMetadata(txId, txId, isolationLevel);
-                    created.metadataPersisted(true);
-                }
-                return created;
-            });
+            Transaction transaction = segmentLedger != null ? beginFromSegment(isolationLevel)
+                    : publicationLedger == null
+                    ? acceleratedBegin(isolationLevel).orElseGet(() -> legacyBegin(isolationLevel))
+                    : beginFromLedger(isolationLevel);
             activeTransactions.put(transaction.txId(), transaction);
             registered = transaction;
             ensureOpen();
@@ -192,8 +474,59 @@ public final class TransactionManager implements AutoCloseable {
             if (registered == null || activeTransactions.remove(registered.txId(), registered)) {
                 transactionPermits.release();
             }
+            if (registered != null && coordinatorRegistry != null && registered.txId() < 0) {
+                coordinatorRegistry.release(registered.txId());
+            }
             throw ex;
         }
+    }
+
+    /** 共享水位快照和新租约必须在同一控制事务中持久化后才创建事务对象。 */
+    private Transaction beginFromLedger(IsolationLevel isolationLevel) {
+        BeginReservation reservation = ledgerBeginStage(isolationLevel);
+        return new Transaction(reservation.txId(), reservation.startTs(), isolationLevel,
+                reservation.deadlineMillis(), transactionOwner);
+    }
+
+    /** 分段模式的开始快照与逐事务租约同事务持久化后才暴露事务对象。 */
+    private Transaction beginFromSegment(IsolationLevel isolationLevel) {
+        BeginReservation reservation = segmentBeginStage(isolationLevel);
+        return new Transaction(reservation.txId(), reservation.startTs(), isolationLevel,
+                reservation.deadlineMillis(), transactionOwner);
+    }
+
+    /** 仅在时间戳和元数据确定共享一个控制面权威时启用合并发布。 */
+    private Optional<Transaction> acceleratedBegin(IsolationLevel isolationLevel) {
+        if (!(metadataStore instanceof FastTransactionBegin fastBegin)) {
+            return Optional.empty();
+        }
+        var action = (Supplier<Optional<BeginReservation>>) () -> fastBegin.tryBegin(timestampOracle,
+                isolationLevel, options.limits().timeoutMillis(), !options.lazyBeginMetadata(), this::ensureOpen);
+        Optional<BeginReservation> reservation = acceleratedBeginStage(action);
+        return reservation.map(value -> {
+            Transaction transaction = new Transaction(value.txId(), value.startTs(), isolationLevel,
+                    value.deadlineMillis(), transactionOwner);
+            transaction.metadataPersisted(value.metadataPersisted());
+            return transaction;
+        });
+    }
+
+    /** 非 MySQL 或不同控制面权威继续使用原有发布协议。 */
+    private Transaction legacyBegin(IsolationLevel isolationLevel) {
+        return metadataStore.withPublicationLock(() -> {
+            ensureOpen();
+            metadataStore.assertNoPendingPublications();
+            long txId = nextTimestamp(TransactionStage.BEGIN_TSO);
+            Transaction created = new Transaction(txId, txId, isolationLevel,
+                    metadataStore.currentTimeMillis() + options.limits().timeoutMillis(), transactionOwner);
+            // 独立快照登记保护 lazy 只读事务，不能依赖是否写入事务元数据。
+            metadataStore.registerSnapshot(txId, txId, created.deadlineMillis());
+            if (!options.lazyBeginMetadata()) {
+                createBeginMetadata(txId, txId, isolationLevel);
+                created.metadataPersisted(true);
+            }
+            return created;
+        });
     }
 
     /**
@@ -234,6 +567,12 @@ public final class TransactionManager implements AutoCloseable {
      */
     public StatementReadSnapshot beginReadStatement(Transaction tx) {
         ensureActive(tx);
+        if (publicationLedger != null || segmentLedger != null) {
+            ensureLeaseValid(tx);
+            long readTs = readTs(tx);
+            ensureSnapshotVisible(readTs, tx.txId());
+            return new StatementReadSnapshot(tx.txId(), readTs);
+        }
         return metadataStore.withPublicationLock(() -> {
             ensureLeaseValid(tx);
             metadataStore.assertNoPendingPublications();
@@ -391,6 +730,34 @@ public final class TransactionManager implements AutoCloseable {
         ensureActive(tx);
         TransactionClassification classification = transactionClassifier.classifyForCommit(tx, options);
         try {
+            if (segmentLedger != null) {
+                return switch (classification.protocolType()) {
+                    case READ_ONLY_SNAPSHOT -> commitReadOnly(tx);
+                    case SINGLE_SHARD_1PC -> segmentDirectSingleShard
+                            && adapter(classification.participants().iterator().next())
+                            .supportsAtomicDirectCommit()
+                            ? commitSegmentSingleShardDirect(tx, classification.participants().iterator().next())
+                            : commitSegmentWrite(tx);
+                    case CROSS_SHARD_ASYNC_COMMIT, CROSS_SHARD_SYNC_2PC -> commitSegmentWrite(tx);
+                    default -> throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                            "unsupported segmented transaction protocol: " + classification.protocolType(),
+                            false, tx.txId());
+                };
+            }
+            if (publicationLedger != null) {
+                return switch (classification.protocolType()) {
+                    case READ_ONLY_SNAPSHOT -> commitReadOnly(tx);
+                    case SINGLE_SHARD_1PC -> ledgerDirectSingleShard
+                            && adapter(classification.participants().iterator().next())
+                            .supportsAtomicDirectCommit()
+                            ? commitLedgerSingleShardDirect(tx, classification.participants().iterator().next())
+                            : commitLedgerWrite(tx);
+                    case CROSS_SHARD_ASYNC_COMMIT, CROSS_SHARD_SYNC_2PC -> commitLedgerWrite(tx);
+                    default -> throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                            "unsupported ledger transaction protocol: " + classification.protocolType(),
+                            false, tx.txId());
+                };
+            }
             return switch (classification.protocolType()) {
                 case READ_ONLY_SNAPSHOT -> commitReadOnly(tx);
                 case SINGLE_SHARD_1PC -> commitSingleShard(tx, classification.participants().iterator().next());
@@ -416,6 +783,12 @@ public final class TransactionManager implements AutoCloseable {
      * 提交只读事务。
      */
     private TransactionCommitResult commitReadOnly(Transaction tx) {
+        if (publicationLedger != null || segmentLedger != null) {
+            ensureLeaseValid(tx);
+            tx.status(TxStatus.COMMITTED);
+            releaseTransaction(tx);
+            return new TransactionCommitResult(tx.txId(), tx.startTs(), TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
+        }
         long commitTs = metadataStore.withPublicationLock(() -> {
             ensureLeaseValid(tx);
             if (!tx.metadataPersisted()) {
@@ -430,6 +803,282 @@ public final class TransactionManager implements AutoCloseable {
             }
             return timestamp;
         });
+        completeTransaction(tx, true);
+        return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
+    }
+
+    /** 全部写事务先落参与者意向，再用持久分段槽提交中心决议并等待发布。 */
+    private TransactionCommitResult commitSegmentWrite(Transaction tx) {
+        registerWriteParticipants(tx);
+        prewriteBufferedMutationsStage(tx);
+        boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
+        if (explicitPrepareRequired) {
+            persistPreparingMetadata(tx);
+            prepareParticipantsStage(tx);
+        }
+        ensureLeaseValid(tx);
+        PublicationSegmentOwnerRegistry.Assignment slot = segmentReserveStage(tx);
+        tx.decisionStarted(true);
+        CommittedProof proof = segmentFastMaterialization ? segmentDecisionProofStage(tx, slot) : null;
+        long commitTs = proof == null ? segmentDecisionStage(tx, slot) : proof.commitTs();
+        tx.status(TxStatus.COMMITTED);
+        if (segmentOverlapMaterialization && !options.crossShardCommitPolicy().asyncCommit()) {
+            return commitSegmentOverlapped(tx, commitTs);
+        }
+        segmentAwaitStage(tx, commitTs);
+        try {
+            if (options.crossShardCommitPolicy().asyncCommit()) {
+                scheduleAsyncParticipantCommit(tx, commitTs, tx.participants());
+                releaseLocalTransaction(tx);
+                return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.ASYNC_PRIMARY_COMMIT);
+            }
+            runAcrossParticipants(tx.participants(), participant -> {
+                if (proof == null) {
+                    commitParticipantStage(TransactionStage.PRIMARY_PARTICIPANT_COMMIT,
+                            tx, participant, commitTs);
+                } else {
+                    commitDecidedParticipantStage(tx, participant, proof);
+                }
+            },
+                    options.crossShardCommitPolicy().parallelCommit());
+        } catch (RuntimeException ex) {
+            completeTransaction(tx, false);
+            throw unknownCommit(tx, ex);
+        }
+        completeTransaction(tx, true);
+        return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.TWO_PHASE_COMMIT);
+    }
+
+    /** 中心决议已持久化后并行物化分片与发布前缀，返回前仍等待两者成功。 */
+    private TransactionCommitResult commitSegmentOverlapped(Transaction tx, long commitTs) {
+        CompletableFuture<Void> participants;
+        try {
+            // 发布前版本仍受 commitTs 水位约束；发布后未物化分片由读路径解析已提交意向。
+            participants = CompletableFuture.runAsync(() -> runAcrossParticipants(tx.participants(),
+                    participant -> commitParticipantStage(TransactionStage.PRIMARY_PARTICIPANT_COMMIT,
+                            tx, participant, commitTs), true), participantExecutor);
+        } catch (RuntimeException ex) {
+            throw unknownCommit(tx, ex);
+        }
+        RuntimeException publicationFailure = null;
+        try {
+            segmentAwaitStage(tx, commitTs);
+        } catch (RuntimeException ex) {
+            publicationFailure = ex;
+        }
+        Throwable participantFailure = null;
+        try {
+            participants.join();
+        } catch (CompletionException ex) {
+            participantFailure = ex.getCause();
+        }
+        if (publicationFailure != null) {
+            if (participantFailure != null) {
+                publicationFailure.addSuppressed(participantFailure);
+            }
+            throw publicationFailure;
+        }
+        if (participantFailure != null) {
+            completeTransaction(tx, false);
+            if (participantFailure instanceof Error error) {
+                throw error;
+            }
+            throw unknownCommit(tx, participantFailure instanceof RuntimeException runtime
+                    ? runtime : new CompletionException(participantFailure));
+        }
+        completeTransaction(tx, true);
+        return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.TWO_PHASE_COMMIT);
+    }
+
+    /** 单分片先持久化候选槽，再由本地一次事务直接落版本与参与者终态。 */
+    private TransactionCommitResult commitSegmentSingleShardDirect(Transaction tx, String participant) {
+        registerWriteParticipants(tx);
+        ensureLeaseValid(tx);
+        PublicationSegmentOwnerRegistry.Assignment slot = segmentReserveStage(tx);
+        tx.decisionStarted(true);
+        segmentClaimLocalStage(tx, slot, participant);
+        try {
+            directCommitSingleShardParticipantStage(tx, participant, slot.commitTs());
+        } catch (RuntimeException ex) {
+            return resolveSegmentDirectOutcome(tx, participant, slot, ex);
+        }
+        // directCommit 正常返回意味着本地事务已提交；仅响应未知时再读持久证明。
+        return finishSegmentDirectCommit(tx, participant, slot,
+                new ParticipantRecord(tx.txId(), tx.startTs(), TxStatus.COMMITTED, slot.commitTs()));
+    }
+
+    /** 本地响应未知时先 fencing 分片，再按持久终态补中心提交或中止。 */
+    private TransactionCommitResult resolveSegmentDirectOutcome(Transaction tx, String participant,
+                                                                PublicationSegmentOwnerRegistry.Assignment slot,
+                                                                RuntimeException original) {
+        ParticipantRecord local;
+        try {
+            withShardPermit(participant, () -> {
+                adapter(participant).abort(tx.txId());
+                return null;
+            });
+            local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() ->
+                    new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                            "segmented direct participant lacks durable terminal proof", false, tx.txId()));
+        } catch (RuntimeException ex) {
+            throw unknownCommit(tx, ex);
+        }
+        if (local.status() == TxStatus.COMMITTED) {
+            return finishSegmentDirectCommit(tx, participant, slot, local);
+        }
+        if (local.status() != TxStatus.ABORTED || local.startTs() != tx.startTs()) {
+            throw unknownCommit(tx, new IllegalStateException(
+                    "segmented direct participant terminal proof differs from transaction"));
+        }
+        try {
+            segmentCompleteLocalStage(slot, local, participant, false);
+        } catch (RuntimeException ex) {
+            throw unknownCommit(tx, ex);
+        }
+        tx.status(TxStatus.ABORTED);
+        tx.decisionStarted(false);
+        throw original;
+    }
+
+    /** 真实本地 COMMITTED 证明补齐中心决议并等待全局已发布水位。 */
+    private TransactionCommitResult finishSegmentDirectCommit(Transaction tx, String participant,
+                                                              PublicationSegmentOwnerRegistry.Assignment slot,
+                                                              ParticipantRecord local) {
+        if (local.status() != TxStatus.COMMITTED || local.startTs() != tx.startTs()
+                || local.commitTs() == null || local.commitTs() != slot.commitTs()) {
+            throw unknownCommit(tx, new IllegalStateException(
+                    "segmented direct proof differs from reserved time slot"));
+        }
+        segmentCompleteLocalStage(slot, local, participant, true);
+        tx.status(TxStatus.COMMITTED);
+        segmentAwaitStage(tx, slot.commitTs());
+        completeTransaction(tx, true);
+        return new TransactionCommitResult(tx.txId(), slot.commitTs(),
+                TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
+    }
+
+    /** 只把已由独立后台发布器持久推进的水位作为提交确认边界。 */
+    private void awaitSegmentPublication(Transaction tx, long commitTs) {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.limits().timeoutMillis());
+        if (segmentScheduler.publishedWatermark() < commitTs) {
+            segmentScheduler.requestPublication();
+        }
+        while (segmentScheduler.publishedWatermark() < commitTs) {
+            if (System.nanoTime() >= deadline) {
+                throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                        "segmented decision persisted but publication confirmation timed out", false, tx.txId());
+            }
+            if (Thread.currentThread().isInterrupted()) {
+                throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                        "interrupted while awaiting segmented publication", false, tx.txId());
+            }
+            java.util.concurrent.locks.LockSupport.parkNanos(100_000);
+        }
+    }
+
+    /** 新协议所有写事务先持久化参与者，再发布中心决议与连续水位。 */
+    private TransactionCommitResult commitLedgerWrite(Transaction tx) {
+        registerWriteParticipants(tx);
+        prewriteBufferedMutationsStage(tx);
+        boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
+        if (explicitPrepareRequired) {
+            persistPreparingMetadata(tx);
+            prepareParticipantsStage(tx);
+        }
+        ensureLeaseValid(tx);
+        tx.decisionStarted(true);
+        PublicationCommitResult publication = ledgerAtomicCommitStage(tx);
+        long commitTs = publication.commitTs();
+        tx.status(TxStatus.COMMITTED);
+        if (!publication.publishedImmediately()) {
+            ledgerPublishStage();
+        }
+        ledgerAwaitStage(tx, commitTs);
+        try {
+            if (options.crossShardCommitPolicy().asyncCommit()) {
+                scheduleAsyncParticipantCommit(tx, commitTs, tx.participants());
+                releaseLocalTransaction(tx);
+                return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.ASYNC_PRIMARY_COMMIT);
+            }
+            runAcrossParticipants(tx.participants(), participant -> commitParticipantStage(
+                    TransactionStage.PRIMARY_PARTICIPANT_COMMIT, tx, participant, commitTs),
+                    options.crossShardCommitPolicy().parallelCommit());
+        } catch (RuntimeException ex) {
+            completeTransaction(tx, false);
+            throw unknownCommit(tx, ex);
+        }
+        completeTransaction(tx, true);
+        return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.TWO_PHASE_COMMIT);
+    }
+
+    /** 单分片先留下可恢复的 PENDING 候选，再一次本地事务直接落版本与终态。 */
+    private TransactionCommitResult commitLedgerSingleShardDirect(Transaction tx, String participant) {
+        registerWriteParticipants(tx);
+        ensureLeaseValid(tx);
+        tx.decisionStarted(true);
+        long commitTs = ledgerLocalReserveStage(tx, participant);
+        try {
+            directCommitSingleShardParticipantStage(tx, participant, commitTs);
+        } catch (RuntimeException ex) {
+            return resolveLedgerDirectOutcome(tx, participant, commitTs, ex);
+        }
+        return finishLedgerDirectCommit(tx, participant, commitTs);
+    }
+
+    /** 本地响应丢失时先 fencing，再按真实终态补中心决议或安全回滚。 */
+    private TransactionCommitResult resolveLedgerDirectOutcome(Transaction tx, String participant,
+                                                               long commitTs, RuntimeException original) {
+        ParticipantRecord local;
+        try {
+            withShardPermit(participant, () -> {
+                adapter(participant).abort(tx.txId());
+                return null;
+            });
+            local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() ->
+                    new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                            "direct participant has no durable terminal record", false, tx.txId()));
+        } catch (RuntimeException ex) {
+            throw unknownCommit(tx, ex);
+        }
+        if (local.status() == TxStatus.COMMITTED) {
+            return finishLedgerDirectCommit(tx, participant, commitTs);
+        }
+        if (local.status() != TxStatus.ABORTED || local.startTs() != tx.startTs()) {
+            throw unknownCommit(tx, new IllegalStateException("direct participant terminal proof differs from transaction"));
+        }
+        try {
+            if (metadataStore.markAborted(tx.txId()).status() != TxStatus.ABORTED) {
+                throw new IllegalStateException("local abort raced a central commit decision");
+            }
+            publicationLedger.decideAbortedAfterFencing(tx.txId(), commitTs);
+            try {
+                ledgerPublishStage();
+            } catch (RuntimeException publicationFailure) {
+                backgroundFailures.increment();
+            }
+        } catch (RuntimeException ex) {
+            throw unknownCommit(tx, ex);
+        }
+        tx.status(TxStatus.ABORTED);
+        tx.decisionStarted(false);
+        throw original;
+    }
+
+    /** 核对本地提交证明后补齐中心和账本决议，再等待全局发布。 */
+    private TransactionCommitResult finishLedgerDirectCommit(Transaction tx, String participant, long commitTs) {
+        ParticipantRecord local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() ->
+                new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                        "direct participant committed without durable local proof", false, tx.txId()));
+        if (local.status() != TxStatus.COMMITTED || local.startTs() != tx.startTs()
+                || local.commitTs() == null || local.commitTs() != commitTs) {
+            throw unknownCommit(tx, new IllegalStateException("direct participant proof differs from reserved commit"));
+        }
+        boolean publishedImmediately = ledgerLocalDecisionStage(local, commitTs, participant);
+        tx.status(TxStatus.COMMITTED);
+        if (!publishedImmediately && localCompletionBatcher == null) {
+            ledgerPublishStage();
+        }
+        ledgerAwaitStage(tx, commitTs);
         completeTransaction(tx, true);
         return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
     }
@@ -506,23 +1155,13 @@ public final class TransactionManager implements AutoCloseable {
             prepareParticipantsStage(tx);
         }
 
-        long commitTs = metadataStore.withPublicationLock(() -> {
-            ensureLeaseValid(tx);
-            long timestamp = nextTimestamp(TransactionStage.COMMIT_TSO);
-            tx.decisionStarted(true);
-            try {
-                persistCommittedMetadataStage(tx, timestamp, explicitPrepareRequired);
-                tx.status(TxStatus.COMMITTED);
-                return timestamp;
-            } catch (RuntimeException ex) {
-                throw unknownCommit(tx, ex);
-            }
-        });
+        long commitTs = publishCrossShardDecision(tx, explicitPrepareRequired);
         String primaryParticipant = primaryParticipant(tx.participants());
         try {
             if (options.crossShardCommitPolicy().asyncCommit()) {
                 scheduleAsyncParticipantCommit(tx, commitTs, tx.participants());
-                completeTransaction(tx, false);
+                // 元数据决议已持久化；租约由异步物化线程在完成标记之后释放。
+                releaseLocalTransaction(tx);
                 return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.ASYNC_PRIMARY_COMMIT);
             }
             // 同步提交模式先提交主参与者，再提交其余参与者，保留状态未知异常边界。
@@ -553,6 +1192,33 @@ public final class TransactionManager implements AutoCloseable {
         );
     }
 
+    /** 优先在同一 MySQL 权威内合并发号和决议；其余实现保留原协议。 */
+    private long publishCrossShardDecision(Transaction tx, boolean explicitPrepareRequired) {
+        if (metadataStore instanceof FastTransactionCommit fastCommit) {
+            Supplier<OptionalLong> fastAction = () -> fastCommit.tryCommit(timestampOracle, tx.txId(),
+                    tx.participants(), () -> {
+                        ensureLeaseValid(tx);
+                        tx.decisionStarted(true);
+                    }, timestamp -> tx.status(TxStatus.COMMITTED));
+            OptionalLong accelerated = acceleratedCommitStage(fastAction);
+            if (accelerated.isPresent()) {
+                return accelerated.getAsLong();
+            }
+        }
+        return metadataStore.withPublicationLock(() -> {
+            ensureLeaseValid(tx);
+            long timestamp = nextTimestamp(TransactionStage.COMMIT_TSO);
+            tx.decisionStarted(true);
+            try {
+                persistCommittedMetadataStage(tx, timestamp, explicitPrepareRequired);
+                tx.status(TxStatus.COMMITTED);
+                return timestamp;
+            } catch (RuntimeException ex) {
+                throw unknownCommit(tx, ex);
+            }
+        });
+    }
+
     /**
      * 关闭资源或后台执行器。
      */
@@ -567,6 +1233,21 @@ public final class TransactionManager implements AutoCloseable {
             rollbackExecutor.submit(() -> safeRollback(tx));
         }
         shutdownExecutor(rollbackExecutor, deadline);
+        if (publicationCommitBatcher != null) {
+            publicationCommitBatcher.close(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+        }
+        if (localReserveBatcher != null) {
+            localReserveBatcher.close(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+        }
+        if (localCompletionBatcher != null) {
+            localCompletionBatcher.close(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+        }
+        if (beginBatcher != null) {
+            beginBatcher.close(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+        }
+        if (segmentCommitBatcher != null) {
+            segmentCommitBatcher.close(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
+        }
         shutdownExecutor(asyncCommitExecutor, deadline);
         // async commit 可能继续提交 intent cleanup 任务，必须先 drain async 再关闭 cleanup。
         shutdownExecutor(intentCleanupExecutor, deadline);
@@ -577,6 +1258,12 @@ public final class TransactionManager implements AutoCloseable {
                 transactionPermits.release();
             }
         });
+        if (coordinatorRegistry != null) {
+            coordinatorRegistry.close();
+        }
+        if (segmentOwner != null) {
+            segmentOwner.close();
+        }
     }
 
     /**
@@ -597,10 +1284,26 @@ public final class TransactionManager implements AutoCloseable {
                     succeeded = false;
                 }
             }
-            if (succeeded) {
-                markFinalizedQuietly(tx);
-            }
+            finishAsyncCommit(tx, succeeded);
         });
+    }
+
+    /** 异步物化结束后记录完成结果并释放快照；失败决议仍由恢复任务补齐。 */
+    private void finishAsyncCommit(Transaction tx, boolean finalized) {
+        try {
+            if (finalized && tx.metadataPersisted() && !options.deferIntentCleanup()) {
+                metadataStore.markFinalized(tx.txId());
+            }
+            if (segmentLedger != null) {
+                segmentLedger.releaseSnapshot(tx.txId());
+            } else if (publicationLedger == null) {
+                metadataStore.releaseSnapshot(tx.txId());
+            } else {
+                publicationLedger.releaseSnapshot(tx.txId());
+            }
+        } catch (RuntimeException ex) {
+            backgroundFailures.increment();
+        }
     }
 
     /**
@@ -659,6 +1362,14 @@ public final class TransactionManager implements AutoCloseable {
      */
     public void rollback(Transaction tx) {
         ensureOwned(tx);
+        if (segmentLedger != null) {
+            rollbackSegment(tx);
+            return;
+        }
+        if (publicationLedger != null) {
+            rollbackLedger(tx);
+            return;
+        }
         if (tx.status() == TxStatus.COMMITTED) {
             releaseTransaction(tx);
             return;
@@ -667,6 +1378,90 @@ public final class TransactionManager implements AutoCloseable {
         if (tx.status() != TxStatus.COMMITTED) {
             tx.status(TxStatus.ABORTED);
         }
+        releaseTransaction(tx);
+    }
+
+    /** 分段决议已开始但缺少终态槽时保持结果未知，避免盲目覆盖在途提交。 */
+    private void rollbackSegment(Transaction tx) {
+        PublicationEntry entry = segmentLedger.findByTxId(tx.txId()).orElse(null);
+        if (tx.status() == TxStatus.COMMITTED
+                || entry != null && entry.status() == PublicationEntryStatus.COMMITTED) {
+            tx.status(TxStatus.COMMITTED);
+            releaseTransaction(tx);
+            return;
+        }
+        if (tx.decisionStarted() && entry == null) {
+            throw unknownCommit(tx, new IllegalStateException("segmented decision has no durable terminal identity"));
+        }
+        if (entry != null && entry.status() == PublicationEntryStatus.PENDING) {
+            TxRecord current = metadataStore.get(tx.txId()).orElseThrow(() ->
+                    unknownCommit(tx, new IllegalStateException("claimed segment slot has no metadata")));
+            if (current.commitTs() != null) {
+                throw unknownCommit(tx, new IllegalStateException(
+                        "segmented local candidate requires durable participant proof"));
+            }
+        }
+        if (tx.metadataPersisted()) {
+            TxRecord decided = metadataStore.markAborted(tx.txId());
+            if (decided.status() == TxStatus.COMMITTED) {
+                PublicationEntry committed = segmentLedger.findByTxId(tx.txId()).orElseThrow(() ->
+                        unknownCommit(tx, new IllegalStateException("committed metadata lost segmented slot")));
+                if (committed.status() != PublicationEntryStatus.COMMITTED) {
+                    throw unknownCommit(tx, new IllegalStateException("segmented rollback raced different terminal slot"));
+                }
+                tx.status(TxStatus.COMMITTED);
+                releaseTransaction(tx);
+                return;
+            }
+            runAcrossParticipants(tx.participants(), participant -> withShardPermit(participant, () -> {
+                adapter(participant).abort(tx.txId());
+                return null;
+            }), options.crossShardCommitPolicy().parallelRollback());
+        }
+        tx.status(TxStatus.ABORTED);
+        markFinalizedQuietly(tx);
+        releaseTransaction(tx);
+    }
+
+    /** 新协议先确认中心终态，再幂等 fencing 参与者并解除账本水位阻塞。 */
+    private void rollbackLedger(Transaction tx) {
+        PublicationEntry entry = publicationLedger.findByTxId(tx.txId()).orElse(null);
+        if (tx.status() == TxStatus.COMMITTED || entry != null && entry.status() == PublicationEntryStatus.COMMITTED) {
+            tx.status(TxStatus.COMMITTED);
+            releaseTransaction(tx);
+            return;
+        }
+        if (entry != null && entry.status() == PublicationEntryStatus.PENDING) {
+            TxRecord current = metadataStore.get(tx.txId()).orElseThrow(() ->
+                    unknownCommit(tx, new IllegalStateException("pending publication has no metadata")));
+            if (current.commitTs() != null) {
+                throw unknownCommit(tx, new IllegalStateException("local pending publication needs participant proof"));
+            }
+        }
+        if (tx.metadataPersisted()) {
+            TxRecord decided = metadataStore.markAborted(tx.txId());
+            if (decided.status() == TxStatus.COMMITTED) {
+                tx.status(TxStatus.COMMITTED);
+                releaseTransaction(tx);
+                return;
+            }
+        }
+        if (tx.metadataPersisted()) {
+            runAcrossParticipants(tx.participants(), participant -> withShardPermit(participant, () -> {
+                adapter(participant).abort(tx.txId());
+                return null;
+            }), options.crossShardCommitPolicy().parallelRollback());
+        }
+        // 预留提交的响应可能丢失；中心 ABORTED 行锁会等待在途预留后，再读取真实账本。
+        PublicationEntry afterFence = publicationLedger.findByTxId(tx.txId()).orElse(null);
+        if (afterFence != null && afterFence.status() == PublicationEntryStatus.PENDING) {
+            publicationLedger.decideAbortedAfterFencing(tx.txId(), afterFence.commitTs());
+            publicationLedger.advancePublished(256);
+        } else if (afterFence != null && afterFence.status() == PublicationEntryStatus.COMMITTED) {
+            throw unknownCommit(tx, new IllegalStateException("commit decision appeared after rollback fencing"));
+        }
+        tx.status(TxStatus.ABORTED);
+        markFinalizedQuietly(tx);
         releaseTransaction(tx);
     }
 
@@ -760,14 +1555,18 @@ public final class TransactionManager implements AutoCloseable {
     private long readTs(Transaction tx) {
         return tx.isolationLevel() == IsolationLevel.REPEATABLE_READ
                 ? tx.startTs()
-                : nextTimestamp(TransactionStage.READ_TSO);
+                : segmentLedger != null ? segmentLedger.currentPublished()
+                : publicationLedger == null ? nextTimestamp(TransactionStage.READ_TSO)
+                        : publicationLedger.currentPublished();
     }
 
     /**
      * 校验读取快照尚未被安全点回收。
      */
     private void ensureSnapshotVisible(long readTs, long txId) {
-        long safePoint = safePointStore.currentSafePoint();
+        long safePoint = segmentLedger != null ? segmentLedger.currentSafePoint()
+                : publicationLedger == null
+                ? safePointStore.currentSafePoint() : publicationLedger.currentSafePoint();
         if (readTs < safePoint) {
             throw new MvccException(
                     ErrorCode.SNAPSHOT_TOO_OLD,
@@ -1096,19 +1895,27 @@ public final class TransactionManager implements AutoCloseable {
 
     /** 在首个持久化写入之前登记完整参与者，保证进程崩溃后可以定位所有 intent。 */
     private void registerWriteParticipants(Transaction tx) {
-        metadataStore.withPublicationLock(() -> {
-            ensureLeaseValid(tx);
-            if (!tx.metadataPersisted()) {
-                createBeginMetadata(tx.txId(), tx.startTs(), tx.isolationLevel());
-                tx.metadataPersisted(true);
+        ensureLeaseValid(tx);
+        TxRecord record;
+        if (!tx.metadataPersisted()) {
+            // 租约先于此记录持久化；预写仍在登记完成后执行。
+            if (coordinatorRegistry != null && tx.txId() < 0) {
+                record = coordinatorRegistry.promoteAndRegister(tx, tx.participants());
+            } else {
+                record = metadataStore.createWithParticipants(tx.txId(), tx.startTs(),
+                        tx.isolationLevel(), tx.participants());
             }
-            TxRecord record = metadataStore.registerParticipants(tx.txId(), tx.participants());
-            if (record.status() != TxStatus.ACTIVE && record.status() != TxStatus.PREPARING) {
-                throw new MvccException(ErrorCode.TRANSACTION_ABORTED, "write registration rejected for terminal transaction",
-                        false, tx.txId());
+            tx.metadataPersisted(true);
+            if (coordinatorRegistry != null && tx.txId() < 0) {
+                coordinatorRegistry.promotionPersisted(tx.txId());
             }
-            return null;
-        });
+        } else {
+            record = metadataStore.registerParticipants(tx.txId(), tx.participants());
+        }
+        if (record.status() != TxStatus.ACTIVE && record.status() != TxStatus.PREPARING) {
+            throw new MvccException(ErrorCode.TRANSACTION_ABORTED, "write registration rejected for terminal transaction",
+                    false, tx.txId());
+        }
     }
 
     /** 校验事务与语句归属，保持 RR 和跨分片 SQL 的固定快照。 */
@@ -1126,8 +1933,27 @@ public final class TransactionManager implements AutoCloseable {
 
     /** 拒绝租约过期的事务；查询完成后也必须检查，避免返回过期 GC 期间读取的结果。 */
     private void ensureLeaseValid(Transaction tx) {
-        Optional<Long> registeredExpiry = metadataStore.snapshotExpiry(tx.txId());
-        if (registeredExpiry.isEmpty() || registeredExpiry.get() != tx.deadlineMillis()
+        if (segmentLedger != null) {
+            OptionalLong expiry = segmentLedger.snapshotExpiry(tx.txId());
+            if (expiry.isEmpty() || expiry.getAsLong() != tx.deadlineMillis()
+                    || metadataStore.currentTimeMillis() >= tx.deadlineMillis()) {
+                throw new MvccException(ErrorCode.TRANSACTION_TIMEOUT,
+                        "segmented transaction lease expired", false, tx.txId());
+            }
+            return;
+        }
+        if (coordinatorRegistry != null && tx.txId() < 0 && coordinatorRegistry.protects(tx.txId())) {
+            coordinatorRegistry.assertProtected(tx);
+            return;
+        }
+        if (publicationLedger == null) {
+            if (!metadataStore.isSnapshotLeaseValid(tx.txId(), tx.deadlineMillis())) {
+                throw new MvccException(ErrorCode.TRANSACTION_TIMEOUT, "transaction lease expired", false, tx.txId());
+            }
+            return;
+        }
+        OptionalLong ledgerExpiry = publicationLedger.snapshotExpiry(tx.txId());
+        if (ledgerExpiry.isEmpty() || ledgerExpiry.getAsLong() != tx.deadlineMillis()
                 || metadataStore.currentTimeMillis() >= tx.deadlineMillis()) {
             throw new MvccException(ErrorCode.TRANSACTION_TIMEOUT, "transaction lease expired", false, tx.txId());
         }
@@ -1153,6 +1979,9 @@ public final class TransactionManager implements AutoCloseable {
         long now = metadataStore.currentTimeMillis();
         activeTransactions.forEach((txId, tx) -> {
             if (tx.deadlineMillis() <= now && activeTransactions.remove(txId, tx)) {
+                if (coordinatorRegistry != null && txId < 0) {
+                    coordinatorRegistry.release(txId);
+                }
                 transactionPermits.release();
             }
         });
@@ -1170,16 +1999,25 @@ public final class TransactionManager implements AutoCloseable {
     /** 释放快照和本地资源；释放失败时租约到期仍可回收。 */
     private void releaseTransaction(Transaction tx) {
         try {
-            metadataStore.withPublicationLock(() -> {
+            if (segmentLedger != null) {
+                segmentLedger.releaseSnapshot(tx.txId());
+            } else if (publicationLedger == null) {
                 metadataStore.releaseSnapshot(tx.txId());
-                return null;
-            });
+            } else if (coordinatorRegistry == null || tx.txId() >= 0
+                    || !coordinatorRegistry.release(tx.txId())) {
+                publicationLedger.releaseSnapshot(tx.txId());
+            }
         } catch (RuntimeException ex) {
             backgroundFailures.increment();
         } finally {
-            if (activeTransactions.remove(tx.txId(), tx)) {
-                transactionPermits.release();
-            }
+            releaseLocalTransaction(tx);
+        }
+    }
+
+    /** 只释放本实例的事务名额，不修改持久化租约或决议。 */
+    private void releaseLocalTransaction(Transaction tx) {
+        if (activeTransactions.remove(tx.txId(), tx)) {
+            transactionPermits.release();
         }
     }
 
@@ -1231,6 +2069,220 @@ public final class TransactionManager implements AutoCloseable {
         return metrics != NoOpTransactionMetrics.INSTANCE;
     }
 
+    /** 默认指标关闭时直接取得分段快照，避免业务入口分配计量包装。 */
+    private BeginReservation segmentBeginStage(IsolationLevel isolationLevel) {
+        if (!metricsEnabled()) {
+            return segmentLedger.begin(isolationLevel, options.limits().timeoutMillis(), false);
+        }
+        return recordMeasuredStage(TransactionStage.SEGMENT_BEGIN,
+                () -> segmentLedger.begin(isolationLevel, options.limits().timeoutMillis(), false));
+    }
+
+    /** 默认指标关闭时直接从本地持久分段取得提交槽。 */
+    private PublicationSegmentOwnerRegistry.Assignment segmentReserveStage(Transaction tx) {
+        if (!metricsEnabled()) {
+            return segmentOwner.allocate(tx.startTs());
+        }
+        return recordMeasuredStage(TransactionStage.SEGMENT_RESERVE,
+                () -> segmentOwner.allocate(tx.startTs()));
+    }
+
+    /** 分别计量单分片物理提交的中心候选认领与终态补齐。 */
+    private void segmentClaimLocalStage(Transaction tx, PublicationSegmentOwnerRegistry.Assignment slot,
+                                        String participant) {
+        if (!metricsEnabled()) {
+            segmentOwner.claimLocal(slot, tx.txId(), tx.deadlineMillis(), participant);
+            return;
+        }
+        recordMeasuredStage(TransactionStage.SEGMENT_LOCAL_CLAIM, () -> {
+            segmentOwner.claimLocal(slot, tx.txId(), tx.deadlineMillis(), participant);
+            return null;
+        });
+    }
+
+    /** 成功及异常恢复都记录本地终态证明对应的中心事务耗时。 */
+    private void segmentCompleteLocalStage(PublicationSegmentOwnerRegistry.Assignment slot,
+                                           ParticipantRecord local, String participant, boolean committed) {
+        if (!metricsEnabled()) {
+            if (committed) {
+                segmentOwner.completeLocalCommit(slot, local, participant);
+            } else {
+                segmentOwner.completeLocalAbort(slot, local, participant);
+            }
+            return;
+        }
+        recordMeasuredStage(TransactionStage.SEGMENT_LOCAL_COMPLETE, () -> {
+            if (committed) {
+                segmentOwner.completeLocalCommit(slot, local, participant);
+            } else {
+                segmentOwner.completeLocalAbort(slot, local, participant);
+            }
+            return null;
+        });
+    }
+
+    /** 默认指标关闭时直接把中心与分段槽决议原子落盘。 */
+    private long segmentDecisionStage(Transaction tx, PublicationSegmentOwnerRegistry.Assignment slot) {
+        Supplier<Long> action = segmentCommitBatcher == null
+                ? () -> segmentOwner.decide(slot, tx.txId(), tx.deadlineMillis(), tx.participants())
+                : () -> segmentCommitBatcher.commit(slot, tx.txId(), tx.deadlineMillis(), tx.participants());
+        if (!metricsEnabled()) {
+            return action.get();
+        }
+        return recordMeasuredStage(TransactionStage.SEGMENT_DECISION, action);
+    }
+
+    /** 单槽中心决议成功后把不可伪造的已提交凭据传给同步物化阶段。 */
+    private CommittedProof segmentDecisionProofStage(Transaction tx,
+                                                     PublicationSegmentOwnerRegistry.Assignment slot) {
+        Supplier<CommittedProof> action = () -> segmentOwner.decideWithProof(slot, tx.txId(),
+                tx.startTs(), tx.deadlineMillis(), tx.participants());
+        if (!metricsEnabled()) {
+            return action.get();
+        }
+        return recordMeasuredStage(TransactionStage.SEGMENT_DECISION, action);
+    }
+
+    /** 返回可选分段批量决议的累计分组形态。 */
+    PublicationSegmentCommitBatcher.Stats segmentBatchStats() {
+        return segmentCommitBatcher == null ? null : segmentCommitBatcher.stats();
+    }
+
+    /** 默认指标关闭时直接等待已持久发布水位覆盖本事务时间戳。 */
+    private void segmentAwaitStage(Transaction tx, long commitTs) {
+        if (!metricsEnabled()) {
+            awaitSegmentPublication(tx, commitTs);
+            return;
+        }
+        recordMeasuredStage(TransactionStage.SEGMENT_AWAIT,
+                () -> awaitSegmentPublication(tx, commitTs));
+    }
+
+    /** no-op 指标下直接获取新协议的持久化开始快照。 */
+    private BeginReservation ledgerBeginStage(IsolationLevel isolationLevel) {
+        Supplier<BeginReservation> action = coordinatorRegistry != null
+                ? () -> coordinatorRegistry.begin(isolationLevel)
+                : beginBatcher == null
+                ? () -> publicationLedger.begin(isolationLevel, options.limits().timeoutMillis(), false)
+                : () -> beginBatcher.begin(isolationLevel);
+        if (!metricsEnabled()) {
+            return action.get();
+        }
+        return recordMeasuredStage(TransactionStage.LEDGER_BEGIN, action);
+    }
+
+    /** 返回实验性批量开始的累计批次规模。 */
+    PublicationBeginBatcher.Stats ledgerBeginBatchStats() {
+        return beginBatcher == null ? null : beginBatcher.stats();
+    }
+
+    /** no-op 指标下直接预留持久化提交时间戳。 */
+    private long ledgerReserveStage(Transaction tx) {
+        if (!metricsEnabled()) {
+            return publicationLedger.reserveCommit(tx.txId(), tx.deadlineMillis());
+        }
+        return recordMeasuredStage(TransactionStage.LEDGER_RESERVE,
+                () -> publicationLedger.reserveCommit(tx.txId(), tx.deadlineMillis()));
+    }
+
+    /** 单分片候选时间与中心 PREPARING 状态同账本槽原子预留。 */
+    private long ledgerLocalReserveStage(Transaction tx, String participant) {
+        Supplier<Long> action = localReserveBatcher == null
+                ? () -> publicationLedger.reserveLocalCommit(tx.txId(), tx.deadlineMillis(), participant)
+                : () -> localReserveBatcher.reserve(tx.txId(), tx.deadlineMillis(), participant);
+        if (!metricsEnabled()) {
+            return action.get();
+        }
+        return recordMeasuredStage(TransactionStage.LEDGER_RESERVE, action);
+    }
+
+    /** 返回实验性本地预留批次的累计聚合形态。 */
+    PublicationLocalReserveBatcher.Stats ledgerLocalReserveStats() {
+        return localReserveBatcher == null ? null : localReserveBatcher.stats();
+    }
+
+    /** 返回实验性本地补决议批次的累计聚合形态。 */
+    PublicationLocalCompletionBatcher.Stats ledgerLocalCompletionStats() {
+        return localCompletionBatcher == null ? null : localCompletionBatcher.stats();
+    }
+
+    /** 本地已提交证明满足候选时间后补齐中心与账本的相同决议。 */
+    private boolean ledgerLocalDecisionStage(ParticipantRecord local, long commitTs, String participant) {
+        Supplier<Boolean> action = localCompletionBatcher == null
+                ? () -> publicationLedger.completeLocalCommitAfterFencing(local, commitTs, participant)
+                : () -> localCompletionBatcher.complete(local, commitTs, participant);
+        if (!metricsEnabled()) {
+            return action.get();
+        }
+        return recordMeasuredStage(TransactionStage.LEDGER_DECISION, action);
+    }
+
+    /** no-op 指标下直接持久化中心与账本的原子决议。 */
+    private void ledgerDecisionStage(Transaction tx, long commitTs) {
+        if (!metricsEnabled()) {
+            publicationLedger.decideCommitted(tx.txId(), commitTs, tx.participants());
+            return;
+        }
+        recordMeasuredStage(TransactionStage.LEDGER_DECISION,
+                () -> publicationLedger.decideCommitted(tx.txId(), commitTs, tx.participants()));
+    }
+
+    /** intent 写集合已持久化时在一个控制事务中分配时间戳并提交决议。 */
+    private PublicationCommitResult ledgerAtomicCommitStage(Transaction tx) {
+        Supplier<PublicationCommitResult> action = publicationCommitBatcher == null
+                ? () -> publicationLedger.commitPreparedIntents(tx.txId(), tx.deadlineMillis(), tx.participants())
+                : () -> publicationCommitBatcher.commit(tx.txId(), tx.deadlineMillis(), tx.participants());
+        if (!metricsEnabled()) {
+            return action.get();
+        }
+        return recordMeasuredStage(TransactionStage.LEDGER_ATOMIC_COMMIT, action);
+    }
+
+    /** 返回可选账本批量决议的累计形态，非批量模式没有统计。 */
+    PublicationCommitBatcher.Stats ledgerBatchStats() {
+        return publicationCommitBatcher == null ? null : publicationCommitBatcher.stats();
+    }
+
+    /** 返回当前事务管理器所用账本实例的批量控制事务阶段耗时。 */
+    MysqlPublicationLedger.BatchTiming ledgerBatchTiming() {
+        return publicationLedger == null ? null : publicationLedger.batchTiming();
+    }
+
+    /** no-op 指标下直接推进已决议账本的连续水位。 */
+    private long ledgerPublishStage() {
+        if (!metricsEnabled()) {
+            return publicationLedger.advancePublished(256);
+        }
+        return recordMeasuredStage(TransactionStage.LEDGER_PUBLISH,
+                () -> publicationLedger.advancePublished(256));
+    }
+
+    /** no-op 指标下直接等待自身提交被全局水位覆盖。 */
+    private void ledgerAwaitStage(Transaction tx, long commitTs) {
+        if (!metricsEnabled()) {
+            publicationLedger.awaitPublished(tx.txId(), commitTs, options.limits().timeoutMillis());
+            return;
+        }
+        recordMeasuredStage(TransactionStage.LEDGER_AWAIT,
+                () -> publicationLedger.awaitPublished(tx.txId(), commitTs, options.limits().timeoutMillis()));
+    }
+
+    /** no-op 指标下直接执行服务器端 begin，避免计量包装分配。 */
+    private Optional<BeginReservation> acceleratedBeginStage(Supplier<Optional<BeginReservation>> action) {
+        if (!metricsEnabled()) {
+            return action.get();
+        }
+        return recordMeasuredStage(TransactionStage.BEGIN_PUBLICATION, action);
+    }
+
+    /** no-op 指标下直接执行服务器端提交决议。 */
+    private OptionalLong acceleratedCommitStage(Supplier<OptionalLong> action) {
+        if (!metricsEnabled()) {
+            return action.get();
+        }
+        return recordMeasuredStage(TransactionStage.COMMIT_PUBLICATION, action);
+    }
+
     /**
      * 按需记录时间戳分配阶段。
      */
@@ -1257,12 +2309,12 @@ public final class TransactionManager implements AutoCloseable {
      */
     private void markSingleShardCommittedStage(Transaction tx, String participant, long commitTs) {
         if (!metricsEnabled()) {
-            metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs);
+            metadataStore.persistSingleShardCommitted(tx.txId(), participant, commitTs);
             return;
         }
         recordMeasuredStage(
                 TransactionStage.SINGLE_SHARD_METADATA_COMMIT,
-                () -> metadataStore.markSingleShardCommitted(tx.txId(), participant, commitTs)
+                () -> metadataStore.persistSingleShardCommitted(tx.txId(), participant, commitTs)
         );
     }
 
@@ -1333,6 +2385,20 @@ public final class TransactionManager implements AutoCloseable {
             return;
         }
         recordMeasuredStage(stage, () -> commitParticipant(tx, shardId, commitTs));
+    }
+
+    /** 中心已确认后传递持久决议凭据，分片仍自行校验完整意向和本地终态。 */
+    private void commitDecidedParticipantStage(Transaction tx, String shardId, CommittedProof proof) {
+        Runnable action = () -> withShardPermit(shardId, () -> {
+            ((MysqlStorageAdapter) adapter(shardId)).commitDecided(proof,
+                    tx.bufferedMutations(shardId), true);
+            return null;
+        });
+        if (!metricsEnabled()) {
+            action.run();
+            return;
+        }
+        recordMeasuredStage(TransactionStage.PRIMARY_PARTICIPANT_COMMIT, action);
     }
 
     /**

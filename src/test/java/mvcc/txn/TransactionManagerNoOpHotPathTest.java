@@ -55,6 +55,14 @@ class TransactionManagerNoOpHotPathTest {
         String source = readTransactionManagerSource();
 
         assertMeasuredStageGuard(source, "nextTimestamp(TransactionStage stage)");
+        assertMeasuredStageGuard(source, "acceleratedBeginStage(Supplier<Optional<BeginReservation>> action)");
+        assertMeasuredStageGuard(source, "acceleratedCommitStage(Supplier<OptionalLong> action)");
+        assertMeasuredStageGuard(source, "ledgerBeginStage(IsolationLevel isolationLevel)");
+        assertMeasuredStageGuard(source, "ledgerReserveStage(Transaction tx)");
+        assertMeasuredStageGuard(source, "ledgerDecisionStage(Transaction tx, long commitTs)");
+        assertMeasuredStageGuard(source, "ledgerAtomicCommitStage(Transaction tx)");
+        assertMeasuredStageGuard(source, "private long ledgerPublishStage()");
+        assertMeasuredStageGuard(source, "ledgerAwaitStage(Transaction tx, long commitTs)");
         assertMeasuredStageGuard(source, "createBeginMetadata(long txId, long startTs, IsolationLevel isolationLevel)");
         assertMeasuredStageGuard(source, "markSingleShardCommittedStage(Transaction tx, String participant, long commitTs)");
         assertMeasuredStageGuard(source, "prewriteBufferedMutationsStage(Transaction tx)");

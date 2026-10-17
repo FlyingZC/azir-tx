@@ -2,6 +2,7 @@ package mvcc.control;
 
 import com.zaxxer.hikari.HikariDataSource;
 import com.zaxxer.hikari.pool.ProxyConnection;
+import com.mysql.cj.jdbc.JdbcConnection;
 import mvcc.common.ErrorCode;
 import mvcc.common.MvccException;
 
@@ -138,6 +139,70 @@ public final class MysqlConnectionContext {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "publication lock failed", true, null, ex);
         } finally {
             localLock.unlock();
+        }
+    }
+
+    /** 让服务器端例程在同一连接内获取和释放命名锁，进程内仍只允许一条连接等待。 */
+    public static <T> T withPublicationProcedure(DataSource dataSource, int timeoutSeconds,
+                                                 SqlAction<T> action) throws SQLException {
+        if (timeoutSeconds < 0) {
+            throw new IllegalArgumentException("publication lock timeout must be >= 0");
+        }
+        Scope current = CURRENT.get();
+        if (current != null) {
+            throw new MvccException(ErrorCode.ILLEGAL_STATE,
+                    "server-side publication procedure cannot nest inside another publication scope", false, null);
+        }
+        Domain domain = domain(dataSource);
+        ReentrantLock localLock = LOCAL_LOCKS.computeIfAbsent(domain, ignored -> new ReentrantLock(true));
+        try {
+            if (!localLock.tryLock(timeoutSeconds, TimeUnit.SECONDS)) {
+                throw new MvccException(ErrorCode.LOCK_WAIT_TIMEOUT, "local publication lock timed out", true, null);
+            }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "publication lock wait interrupted", true, null, ex);
+        }
+        try (ConnectionGuard guard = new ConnectionGuard(dataSource, connection(dataSource), domain)) {
+            Connection connection = guard.connection;
+            try {
+                if (!connection.getAutoCommit() || !domain.equals(DOMAINS.get(dataSource))) {
+                    throw new SQLException("publication procedure connection changed domain or transaction mode");
+                }
+                T result = action.execute(connection);
+                ensureProcedureReleasedLock(connection, lockName(domain.database()));
+                return result;
+            } catch (SQLException | RuntimeException | Error ex) {
+                // 例程可能已经取得锁或提交决议，不能把结果未知的连接归还普通请求。
+                guard.discard(ex);
+                throw ex;
+            }
+        } finally {
+            localLock.unlock();
+        }
+    }
+
+    /** 当前线程已持同库发布屏障时，调用方须选用不重复获取命名锁的旧版例程。 */
+    public static boolean hasPublicationScope(DataSource dataSource) {
+        Scope current = CURRENT.get();
+        return current != null && current.domain.equals(DOMAINS.get(dataSource));
+    }
+
+    /** 返回前确认例程未把本连接取得的命名锁遗留在池中。 */
+    private static void ensureProcedureReleasedLock(Connection connection, String lockName) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "select is_used_lock(?) = connection_id()")) {
+            statement.setString(1, lockName);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next() || result.getObject(1) != null && result.getInt(1) == 1) {
+                    throw new SQLException("publication procedure retained its named lock");
+                }
+            }
+        }
+        // MySQL 响应包状态由驱动维护；这里不额外执行会改变控制面成本的探测 SQL。
+        JdbcConnection mysql = connection.unwrap(JdbcConnection.class);
+        if (mysql.getSession().getServerSession().inTransactionOnServer()) {
+            throw new SQLException("publication procedure retained a database transaction");
         }
     }
 

@@ -48,6 +48,13 @@ public interface TransactionMetadataStore {
         throw new MvccException(ErrorCode.ILLEGAL_STATE, "snapshot leases are required", false, txId);
     }
 
+    /** 校验持久租约仍使用原截止时间且未到期；存储实现可合并截止时间与权威时钟读取。 */
+    default boolean isSnapshotLeaseValid(long txId, long expectedExpiresAtMillis) {
+        Optional<Long> expiry = snapshotExpiry(txId);
+        return expiry.isPresent() && expiry.get() == expectedExpiresAtMillis
+                && currentTimeMillis() < expectedExpiresAtMillis;
+    }
+
     /** 释放事务快照保护，重复释放无副作用。 */
     default void releaseSnapshot(long txId) {
         throw new MvccException(ErrorCode.ILLEGAL_STATE, "snapshot leases are required", false, txId);
@@ -81,6 +88,13 @@ public interface TransactionMetadataStore {
      * 创建组件实例或事务记录。
      */
     TxRecord create(long txId, long startTs, IsolationLevel isolationLevel);
+
+    /** 首次持久化事务时一并登记完整参与者，必须在参与者预写前完成。 */
+    default TxRecord createWithParticipants(long txId, long startTs, IsolationLevel isolationLevel,
+                                            Set<String> participants) {
+        create(txId, startTs, isolationLevel);
+        return registerParticipants(txId, participants);
+    }
 
     /**
      * 创建 PREPARING 状态的事务元数据记录。
@@ -137,6 +151,11 @@ public interface TransactionMetadataStore {
      * 将单分片事务标记为已提交。
      */
     TxRecord markSingleShardCommitted(long txId, String participant, long commitTs);
+
+    /** 持久化单分片决议；不需要返回记录时允许存储实现使用等价的原子条件更新。 */
+    default void persistSingleShardCommitted(long txId, String participant, long commitTs) {
+        markSingleShardCommitted(txId, participant, commitTs);
+    }
 
     /**
      * 将事务标记为 ABORTED 状态。
