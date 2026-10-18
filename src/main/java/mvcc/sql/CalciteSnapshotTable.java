@@ -3,9 +3,8 @@ package mvcc.sql;
 import mvcc.api.Transaction;
 import mvcc.common.ErrorCode;
 import mvcc.common.MvccException;
-import mvcc.storage.ScanPage;
+import mvcc.storage.KeyRange;
 import mvcc.storage.Utf8KeyOrder;
-import mvcc.storage.VersionedValue;
 import mvcc.txn.StatementReadSnapshot;
 import mvcc.txn.TransactionManager;
 import org.apache.calcite.DataContext;
@@ -32,15 +31,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 将同一语句快照暴露为可下推主键条件的分页表，仅在枚举器前进时读取存储。
  */
 final class CalciteSnapshotTable extends AbstractTable implements ProjectableFilterableTable {
-    private final TransactionManager transactionManager;
-    private final Transaction tx;
-    private final StatementReadSnapshot snapshot;
+    private final SqlReadPort reads;
     private final String table;
     private final ShardResolver shardResolver;
     private final SqlStorageKeyCodec keyCodec;
     private final SqlValueCodec valueCodec;
     private final int pageSize;
     private final SqlScanBudget scanBudget;
+    private final int rowLimit;
 
     /**
      * 绑定语句快照和编解码器，构造阶段不访问分片。
@@ -48,15 +46,30 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
     CalciteSnapshotTable(TransactionManager transactionManager, Transaction tx, StatementReadSnapshot snapshot,
                          String table, ShardResolver shardResolver, SqlStorageKeyCodec keyCodec,
                          SqlValueCodec valueCodec, int pageSize, SqlScanBudget scanBudget) {
-        this.transactionManager = transactionManager;
-        this.tx = tx;
-        this.snapshot = snapshot;
+        this(transactionManager, tx, snapshot, table, shardResolver, keyCodec, valueCodec,
+                pageSize, scanBudget, Integer.MAX_VALUE);
+    }
+
+    /** 为无需排序或过滤的单表 LIMIT 查询设置安全的扫描行数上限。 */
+    CalciteSnapshotTable(TransactionManager transactionManager, Transaction tx, StatementReadSnapshot snapshot,
+                         String table, ShardResolver shardResolver, SqlStorageKeyCodec keyCodec,
+                         SqlValueCodec valueCodec, int pageSize, SqlScanBudget scanBudget, int rowLimit) {
+        this(new MysqlSqlReadPort(transactionManager, tx, snapshot), table,
+                shardResolver, keyCodec, valueCodec, pageSize, scanBudget, rowLimit);
+    }
+
+    /** 原生事务可直接提供已固定的语句读端口，Calcite 无须解析后端提交时间。 */
+    CalciteSnapshotTable(SqlReadPort reads, String table, ShardResolver shardResolver,
+                         SqlStorageKeyCodec keyCodec, SqlValueCodec valueCodec,
+                         int pageSize, SqlScanBudget scanBudget, int rowLimit) {
+        this.reads = java.util.Objects.requireNonNull(reads, "reads");
         this.table = table;
         this.shardResolver = shardResolver;
         this.keyCodec = keyCodec;
         this.valueCodec = valueCodec;
         this.pageSize = pageSize;
         this.scanBudget = scanBudget;
+        this.rowLimit = rowLimit;
     }
 
     /**
@@ -72,6 +85,7 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
      */
     @Override
     public Enumerable<Object[]> scan(DataContext root, List<RexNode> filters, int[] projects) {
+        int scanRowLimit = filters.isEmpty() ? rowLimit : Integer.MAX_VALUE;
         KeyRestriction restriction = selectRestriction(filters);
         int[] projection = projects == null ? new int[]{0, 1} : projects.clone();
         AtomicBoolean cancelled = DataContext.Variable.CANCEL_FLAG.get(root);
@@ -81,7 +95,7 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
              */
             @Override
             public Enumerator<Object[]> enumerator() {
-                return new PageEnumerator(restriction, projection, cancelled);
+                return new PageEnumerator(restriction, projection, cancelled, scanRowLimit);
             }
         };
     }
@@ -116,6 +130,12 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
             return null;
         }
         SqlKind kind = call.getKind();
+        if (kind != SqlKind.EQUALS && kind != SqlKind.GREATER_THAN
+                && kind != SqlKind.GREATER_THAN_OR_EQUAL && kind != SqlKind.LESS_THAN
+                && kind != SqlKind.LESS_THAN_OR_EQUAL) {
+            // IN 等条件也可能使用 RexLiteral 包装 SARG，不能按字符串字面量解码。
+            return null;
+        }
         RexNode left = call.getOperands().get(0);
         RexNode right = call.getOperands().get(1);
         if (left instanceof RexLiteral && right instanceof RexInputRef) {
@@ -173,22 +193,25 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
         private final KeyRestriction restriction;
         private final int[] projects;
         private final AtomicBoolean cancelled;
+        private final int scanRowLimit;
         private final List<String> shards;
-        private List<VersionedValue> page = List.of();
+        private List<SqlReadPort.KeyValue> page = List.of();
         private int pageIndex;
         private int shardIndex;
         private String afterKey;
         private Object[] current;
         private boolean pointRead;
         private boolean closed;
+        private int emittedRows;
 
         /**
          * 建立枚举状态；点查只解析唯一分片，范围扫描覆盖路由器声明的全部分片。
          */
-        private PageEnumerator(KeyRestriction restriction, int[] projects, AtomicBoolean cancelled) {
+        private PageEnumerator(KeyRestriction restriction, int[] projects, AtomicBoolean cancelled, int scanRowLimit) {
             this.restriction = restriction;
             this.projects = projects;
             this.cancelled = cancelled;
+            this.scanRowLimit = scanRowLimit;
             this.shards = restriction.pointKey() == null
                     ? shardResolver.resolveShards(table).stream().distinct().toList()
                     : List.of(shardResolver.resolveShard(table, restriction.pointKey()));
@@ -214,20 +237,24 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
             if (closed) {
                 return false;
             }
+            if (emittedRows >= scanRowLimit) {
+                return false;
+            }
             try {
                 scanBudget.ensureAvailable();
                 if (cancelled != null && cancelled.get()) {
-                    throw new MvccException(ErrorCode.ILLEGAL_STATE, "SQL query cancelled", false, tx.txId());
+                    throw new MvccException(ErrorCode.ILLEGAL_STATE, "SQL query cancelled", false,
+                            reads.diagnosticTransactionId());
                 }
                 if (restriction.pointKey() != null) {
                     if (!pointRead) {
                         pointRead = true;
                         String physicalKey = keyCodec.encode(table, restriction.pointKey());
-                        var value = transactionManager.get(tx, shards.getFirst(),
-                                physicalKey, snapshot);
+                        var value = reads.get(shards.getFirst(), physicalKey);
                         if (value.isPresent()) {
                             scanBudget.chargeRow(physicalKey, value.get());
                             current = project(restriction.pointKey(), value.get());
+                            emittedRows++;
                             return true;
                         }
                     }
@@ -235,12 +262,14 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
                 }
                 while (true) {
                     if (cancelled != null && cancelled.get()) {
-                        throw new MvccException(ErrorCode.ILLEGAL_STATE, "SQL query cancelled", false, tx.txId());
+                        throw new MvccException(ErrorCode.ILLEGAL_STATE, "SQL query cancelled", false,
+                                reads.diagnosticTransactionId());
                     }
                     if (pageIndex < page.size()) {
-                        VersionedValue value = page.get(pageIndex++);
+                        SqlReadPort.KeyValue value = page.get(pageIndex++);
                         if (!value.deleted()) {
                             current = project(keyCodec.decode(table, value.key()), value.value());
+                            emittedRows++;
                             return true;
                         }
                     } else if (shardIndex < shards.size()) {
@@ -262,14 +291,15 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
         private void fetchPage() {
             page = List.of();
             pageIndex = 0;
-            ScanPage fetched = transactionManager.scanPage(tx, shards.get(shardIndex), restriction.startKey(),
-                    restriction.endKey(), snapshot, afterKey, pageSize);
+            SqlReadPort.Page fetched = reads.scanPage(shards.get(shardIndex),
+                    new KeyRange(restriction.startKey(), restriction.endKey()), afterKey, pageSize);
             String next = fetched.nextKey();
             if (next != null && afterKey != null && Utf8KeyOrder.compare(next, afterKey) <= 0) {
-                throw new MvccException(ErrorCode.ILLEGAL_STATE, "SQL scan cursor did not advance", false, tx.txId());
+                throw new MvccException(ErrorCode.ILLEGAL_STATE, "SQL scan cursor did not advance", false,
+                        reads.diagnosticTransactionId());
             }
             // 整页在交给 Calcite 前计费，LIMIT 未消费的预取行和残余过滤丢弃的行也占用输入预算。
-            for (VersionedValue value : fetched.values()) {
+            for (SqlReadPort.KeyValue value : fetched.values()) {
                 scanBudget.chargeRow(value.key(), value.value());
             }
             page = fetched.values();
@@ -314,6 +344,7 @@ final class CalciteSnapshotTable extends AbstractTable implements ProjectableFil
             afterKey = null;
             current = null;
             pointRead = false;
+            emittedRows = 0;
         }
 
         /**

@@ -13,6 +13,8 @@ import org.apache.calcite.schema.impl.AbstractTable;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.fun.SqlLibrary;
+import org.apache.calcite.sql.fun.SqlLibraryOperatorTableFactory;
 import org.apache.calcite.sql.parser.SqlParser;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.util.SqlShuttle;
@@ -66,6 +68,8 @@ public final class CalciteSqlPlanner implements SqlPlanner {
             FrameworkConfig frameworkConfig = Frameworks.newConfigBuilder()
                     .defaultSchema(rootSchema)
                     .parserConfig(parserConfig())
+                    .operatorTable(SqlLibraryOperatorTableFactory.INSTANCE.getOperatorTable(
+                            SqlLibrary.STANDARD, SqlLibrary.MYSQL))
                     .build();
             Planner planner = Frameworks.getPlanner(frameworkConfig);
             SqlNode parsed = planner.parse(calciteSql);

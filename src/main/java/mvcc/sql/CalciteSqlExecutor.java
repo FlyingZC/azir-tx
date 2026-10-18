@@ -13,8 +13,11 @@ import org.apache.calcite.sql.SqlDelete;
 import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlInsert;
 import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
+import org.apache.calcite.sql.SqlOrderBy;
+import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.SqlUpdate;
 import org.apache.calcite.sql.dialect.MysqlSqlDialect;
 import org.apache.calcite.sql.parser.SqlParser;
@@ -60,22 +63,36 @@ final class CalciteSqlExecutor {
         this.options = options;
     }
 
+    /** 原生后端复用 Calcite 关系计划，不绑定旧控制面事务管理器。 */
+    CalciteSqlExecutor(ShardResolver shardResolver, SqlValueCodec valueCodec,
+                       SqlStorageKeyCodec keyCodec, SqlExecutionOptions options) {
+        this(null, shardResolver, valueCodec, keyCodec, options);
+    }
+
     /**
      * 在指定事务中执行 Calcite 查询或 DML 计划。
      */
     SqlExecutionResult execute(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
+        if (transactionManager == null) {
+            throw illegal("MySQL Calcite execution requires its transaction manager");
+        }
+        return execute(new MysqlSqlReadPort(transactionManager, tx, snapshot), plan);
+    }
+
+    /** SQL 计划只依赖当前语句端口的固定读切面和同事务写入能力。 */
+    SqlExecutionResult execute(SqlTransactionPort port, SqlPlan.CalcitePlan plan) {
         return switch (plan.statementType()) {
-            case SELECT -> SqlExecutionResult.rows(executeQuery(tx, plan.sql(), plan.tableNames(), snapshot).sqlRows());
-            case INSERT -> executeInsert(tx, plan, snapshot);
-            case UPDATE -> executeUpdate(tx, plan, snapshot);
-            case DELETE -> executeDelete(tx, plan, snapshot);
+            case SELECT -> SqlExecutionResult.rows(executeQuery(port, plan.sql(), plan.tableNames()).sqlRows());
+            case INSERT -> executeInsert(port, plan);
+            case UPDATE -> executeUpdate(port, plan);
+            case DELETE -> executeDelete(port, plan);
         };
     }
 
     /**
      * 执行 INSERT VALUES 或 INSERT SELECT，并按目标列顺序写入 MVCC。
      */
-    private SqlExecutionResult executeInsert(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
+    private SqlExecutionResult executeInsert(SqlTransactionPort port, SqlPlan.CalcitePlan plan) {
         SqlInsert insert = parse(plan.sql(), SqlInsert.class);
         String table = tableName(insert.getTargetTable());
         List<String> targetColumns = columnNames(insert.getTargetColumnList());
@@ -83,7 +100,7 @@ final class CalciteSqlExecutor {
             targetColumns = List.of("id", "value");
         }
         validateInsertColumns(targetColumns);
-        QueryData source = executeQuery(tx, insertSourceSql(insert.getSource()), plan.tableNames(), snapshot);
+        QueryData source = executeQuery(port, insertSourceSql(insert.getSource()), plan.tableNames());
         int idIndex = targetColumns.indexOf("id");
         int valueIndex = targetColumns.indexOf("value");
         Set<String> insertedIds = new HashSet<>();
@@ -97,10 +114,10 @@ final class CalciteSqlExecutor {
             if (!insertedIds.add(id)) {
                 throw illegal("duplicate key: " + id);
             }
-            ensureKeyAbsent(tx, table, id, snapshot);
+            ensureKeyAbsent(port, table, id);
         }
         for (List<String> row : source.values()) {
-            put(tx, table, row.get(idIndex), row.get(valueIndex));
+            put(port, table, row.get(idIndex), row.get(valueIndex));
         }
         return SqlExecutionResult.updateCount(source.values().size());
     }
@@ -108,13 +125,13 @@ final class CalciteSqlExecutor {
     /**
      * 执行支持表达式和过滤条件的 UPDATE，并处理主键变化。
      */
-    private SqlExecutionResult executeUpdate(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
+    private SqlExecutionResult executeUpdate(SqlTransactionPort port, SqlPlan.CalcitePlan plan) {
         SqlUpdate update = parse(plan.sql(), SqlUpdate.class);
         String table = tableName(update.getTargetTable());
         List<String> targetColumns = columnNames(update.getTargetColumnList());
         validateTargetColumns(targetColumns);
         String newId = "id";
-        String newValue = "value";
+        String newValue = "`value`";
         for (int index = 0; index < targetColumns.size(); index++) {
             String expression = toSql(update.getSourceExpressionList().get(index));
             if (targetColumns.get(index).equals("id")) {
@@ -127,7 +144,7 @@ final class CalciteSqlExecutor {
         String condition = update.getCondition() == null ? "" : " WHERE " + toSql(update.getCondition());
         String selection = "SELECT id AS __old_id, " + newId + " AS __new_id, " + newValue
                 + " AS __new_value FROM " + toSql(update.getTargetTable()) + alias + condition;
-        QueryData rows = executeQuery(tx, selection, plan.tableNames(), snapshot);
+        QueryData rows = executeQuery(port, selection, plan.tableNames());
         List<UpdatedRow> updates = rows.values().stream()
                 .map(row -> new UpdatedRow(
                         requiredValue(row.get(0), "old id"),
@@ -135,15 +152,15 @@ final class CalciteSqlExecutor {
                         requiredValue(row.get(2), "new value")
                 ))
                 .toList();
-        validateUpdatedKeys(tx, table, updates, snapshot);
+        validateUpdatedKeys(port, table, updates);
         // 先删除所有迁移的旧键，再写入新键，避免主键交换时删除刚写入的另一行。
         for (UpdatedRow updateRow : updates) {
             if (!updateRow.oldId().equals(updateRow.newId())) {
-                delete(tx, table, updateRow.oldId());
+                delete(port, table, updateRow.oldId());
             }
         }
         for (UpdatedRow updateRow : updates) {
-            put(tx, table, updateRow.newId(), updateRow.newValue());
+            put(port, table, updateRow.newId(), updateRow.newValue());
         }
         return SqlExecutionResult.updateCount(updates.size());
     }
@@ -151,19 +168,18 @@ final class CalciteSqlExecutor {
     /**
      * 执行带 Calcite 表达式过滤条件的 DELETE。
      */
-    private SqlExecutionResult executeDelete(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
+    private SqlExecutionResult executeDelete(SqlTransactionPort port, SqlPlan.CalcitePlan plan) {
         SqlDelete delete = parse(plan.sql(), SqlDelete.class);
         String table = tableName(delete.getTargetTable());
         String alias = delete.getAlias() == null ? "" : " AS " + toSql(delete.getAlias());
         String condition = delete.getCondition() == null ? "" : " WHERE " + toSql(delete.getCondition());
         QueryData rows = executeQuery(
-                tx,
+                port,
                 "SELECT id FROM " + toSql(delete.getTargetTable()) + alias + condition,
-                plan.tableNames(),
-                snapshot
+                plan.tableNames()
         );
         for (List<String> row : rows.values()) {
-            delete(tx, table, requiredValue(row.getFirst(), "id"));
+            delete(port, table, requiredValue(row.getFirst(), "id"));
         }
         return SqlExecutionResult.updateCount(rows.values().size());
     }
@@ -171,20 +187,22 @@ final class CalciteSqlExecutor {
     /**
      * 注册不预读数据的分页表，以调用方传入的语句快照执行关系运算。
      */
-    private QueryData executeQuery(Transaction tx, String sql, List<String> tableNames, StatementReadSnapshot snapshot) {
-        SqlScanBudget scanBudget = new SqlScanBudget(tx.txId(), options);
+    private QueryData executeQuery(SqlTransactionPort port, String sql, List<String> tableNames) {
+        SqlScanBudget scanBudget = new SqlScanBudget(port.diagnosticTransactionId(), options);
+        int simpleLimit = simpleScanLimit(sql, tableNames);
         Properties properties = new Properties();
         properties.setProperty("lex", Lex.MYSQL.name());
         properties.setProperty("caseSensitive", "false");
+        properties.setProperty("fun", "standard,mysql");
         try (Connection connection = DriverManager.getConnection("jdbc:calcite:", properties)) {
             CalciteConnection calciteConnection = connection.unwrap(CalciteConnection.class);
             SchemaPlus rootSchema = calciteConnection.getRootSchema();
             for (String table : tableNames) {
-                rootSchema.add(table, new CalciteSnapshotTable(transactionManager, tx, snapshot, table,
-                        shardResolver, keyCodec, valueCodec, options.scanPageSize(), scanBudget));
+                rootSchema.add(table, new CalciteSnapshotTable(port, table,
+                        shardResolver, keyCodec, valueCodec, options.scanPageSize(), scanBudget, simpleLimit));
             }
             try (Statement statement = connection.createStatement(); ResultSet resultSet = statement.executeQuery(sql)) {
-                return readResultSet(resultSet, tx);
+                return readResultSet(resultSet, port);
             }
         } catch (Exception ex) {
             // Calcite/JDBC 可能多层包装枚举器异常，保留快照失效等原始 MVCC 错误语义。
@@ -193,14 +211,57 @@ final class CalciteSqlExecutor {
                     throw mvccException;
                 }
             }
-            throw new MvccException(ErrorCode.ILLEGAL_STATE, "Calcite execution failed: " + sql, false, tx.txId(), ex);
+            throw new MvccException(ErrorCode.ILLEGAL_STATE, "Calcite execution failed: " + sql,
+                    false, port.diagnosticTransactionId(), ex);
+        }
+    }
+
+    /**
+     * 仅对单表、无过滤排序和聚合的简单投影下推 LIMIT，避免 JDBC 多取一行时打开后续分片。
+     */
+    private int simpleScanLimit(String sql, List<String> tableNames) {
+        if (tableNames.size() != 1 || !sql.toLowerCase(Locale.ROOT).contains("limit")) {
+            return Integer.MAX_VALUE;
+        }
+        try {
+            SqlNode parsed = SqlParser.create(sql, SqlParser.config().withLex(Lex.MYSQL)
+                    .withCaseSensitive(false)).parseStmt();
+            SqlNode fetch;
+            SqlSelect select;
+            if (parsed instanceof SqlOrderBy orderBy) {
+                if (orderBy.offset != null || orderBy.orderList != null && !orderBy.orderList.isEmpty()
+                        || !(orderBy.query instanceof SqlSelect inner)) {
+                    return Integer.MAX_VALUE;
+                }
+                fetch = orderBy.fetch;
+                select = inner;
+            } else if (parsed instanceof SqlSelect direct) {
+                fetch = direct.getFetch();
+                select = direct;
+            } else {
+                return Integer.MAX_VALUE;
+            }
+            if (!(fetch instanceof SqlLiteral literal) || select.isDistinct()
+                    || !(select.getFrom() instanceof SqlIdentifier from)
+                    || !from.names.getLast().equalsIgnoreCase(tableNames.getFirst())
+                    || select.getWhere() != null || select.getHaving() != null || select.getQualify() != null
+                    || select.getOffset() != null || select.hasOrderBy()
+                    || select.getGroup() != null && !select.getGroup().isEmpty()
+                    || select.getWindowList() != null && !select.getWindowList().isEmpty()
+                    || !select.getSelectList().stream().allMatch(column -> column instanceof SqlIdentifier)) {
+                return Integer.MAX_VALUE;
+            }
+            long limit = literal.longValue(true);
+            return limit >= 0 && limit <= Integer.MAX_VALUE ? (int) limit : Integer.MAX_VALUE;
+        } catch (RuntimeException | org.apache.calcite.sql.parser.SqlParseException ex) {
+            return Integer.MAX_VALUE;
         }
     }
 
     /**
      * 把 JDBC 结果集转换为保序的 SQL 行和值矩阵。
      */
-    private QueryData readResultSet(ResultSet resultSet, Transaction tx) throws Exception {
+    private QueryData readResultSet(ResultSet resultSet, SqlTransactionPort port) throws Exception {
         ResultSetMetaData metadata = resultSet.getMetaData();
         List<String> labels = new ArrayList<>();
         for (int index = 1; index <= metadata.getColumnCount(); index++) {
@@ -212,7 +273,8 @@ final class CalciteSqlExecutor {
         while (resultSet.next()) {
             if (sqlRows.size() >= options.maxResultRows()) {
                 throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,
-                        "SQL result row budget exceeded: " + options.maxResultRows(), false, tx.txId());
+                        "SQL result row budget exceeded: " + options.maxResultRows(), false,
+                        port.diagnosticTransactionId());
             }
             Map<String, String> columns = new LinkedHashMap<>();
             List<String> rowValues = new ArrayList<>();
@@ -223,7 +285,8 @@ final class CalciteSqlExecutor {
                     remainingBytes -= stringValue.getBytes(StandardCharsets.UTF_8).length;
                     if (remainingBytes < 0) {
                         throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,
-                                "SQL result byte budget exceeded: " + options.maxResultBytes(), false, tx.txId());
+                                "SQL result byte budget exceeded: " + options.maxResultBytes(), false,
+                                port.diagnosticTransactionId());
                     }
                 }
                 columns.put(labels.get(index - 1), stringValue);
@@ -238,14 +301,14 @@ final class CalciteSqlExecutor {
     /**
      * 校验 UPDATE 后的新主键在结果集合内唯一，且不会覆盖集合外已有行。
      */
-    private void validateUpdatedKeys(Transaction tx, String table, List<UpdatedRow> updates, StatementReadSnapshot snapshot) {
+    private void validateUpdatedKeys(SqlTransactionPort port, String table, List<UpdatedRow> updates) {
         Set<String> oldIds = updates.stream().map(UpdatedRow::oldId).collect(java.util.stream.Collectors.toSet());
         Set<String> newIds = new HashSet<>();
         for (UpdatedRow row : updates) {
             if (!newIds.add(row.newId())) {
                 throw illegal("duplicate key after UPDATE: " + row.newId());
             }
-            if (!oldIds.contains(row.newId()) && exists(tx, table, row.newId(), snapshot)) {
+            if (!oldIds.contains(row.newId()) && exists(port, table, row.newId())) {
                 throw illegal("duplicate key after UPDATE: " + row.newId());
             }
         }
@@ -254,8 +317,8 @@ final class CalciteSqlExecutor {
     /**
      * 校验 INSERT 目标主键当前不存在。
      */
-    private void ensureKeyAbsent(Transaction tx, String table, String id, StatementReadSnapshot snapshot) {
-        if (exists(tx, table, id, snapshot)) {
+    private void ensureKeyAbsent(SqlTransactionPort port, String table, String id) {
+        if (exists(port, table, id)) {
             throw illegal("duplicate key: " + id);
         }
     }
@@ -263,25 +326,25 @@ final class CalciteSqlExecutor {
     /**
      * 判断逻辑表主键在当前事务视图中是否存在。
      */
-    private boolean exists(Transaction tx, String table, String id, StatementReadSnapshot snapshot) {
+    private boolean exists(SqlTransactionPort port, String table, String id) {
         String shardId = shardResolver.resolveShard(table, id);
-        return transactionManager.get(tx, shardId, keyCodec.encode(table, id), snapshot).isPresent();
+        return port.get(shardId, keyCodec.encode(table, id)).isPresent();
     }
 
     /**
      * 写入逻辑表行。
      */
-    private void put(Transaction tx, String table, String id, String value) {
+    private void put(SqlTransactionPort port, String table, String id, String value) {
         String shardId = shardResolver.resolveShard(table, id);
-        transactionManager.put(tx, shardId, keyCodec.encode(table, id), valueCodec.encode(value));
+        port.put(shardId, keyCodec.encode(table, id), valueCodec.encode(value));
     }
 
     /**
      * 删除逻辑表行并保留 MVCC tombstone 语义。
      */
-    private void delete(Transaction tx, String table, String id) {
+    private void delete(SqlTransactionPort port, String table, String id) {
         String shardId = shardResolver.resolveShard(table, id);
-        transactionManager.delete(tx, shardId, keyCodec.encode(table, id));
+        port.delete(shardId, keyCodec.encode(table, id));
     }
 
     /**

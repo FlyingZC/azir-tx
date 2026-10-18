@@ -447,6 +447,7 @@ class MysqlMvccIntegrationTest {
         );
 
         ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        long[] committedTxId = new long[1];
         try {
             Future<TransactionCommitResult> future = executor.submit(() -> {
                 Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
@@ -456,8 +457,10 @@ class MysqlMvccIntegrationTest {
             });
 
             TransactionCommitResult result = future.get(1, TimeUnit.SECONDS);
+            committedTxId[0] = result.txId();
 
             assertEquals(TransactionCommitMode.ASYNC_PRIMARY_COMMIT, result.mode());
+            assertTrue(metadataStore.snapshotExpiry(result.txId()).isPresent());
             assertEquals(0, countRows(shard1DataSource, "mvcc_data"));
             assertEquals(0, countRows(shard2DataSource, "mvcc_data"));
             assertEquals(
@@ -479,6 +482,7 @@ class MysqlMvccIntegrationTest {
             executor.awaitTermination(1, TimeUnit.SECONDS);
             manager.close();
         }
+        assertTrue(metadataStore.snapshotExpiry(committedTxId[0]).isEmpty());
     }
 
     /** 验证显式准备能力会触发一次真实准备调用。 */

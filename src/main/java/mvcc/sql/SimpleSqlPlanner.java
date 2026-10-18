@@ -28,6 +28,11 @@ public final class SimpleSqlPlanner implements SqlPlanner {
             "^\\s*SELECT\\s+VALUE\\s+FROM\\s+" + IDENTIFIER + "\\s+WHERE\\s+ID\\s*=\\s*" + LITERAL + "\\s*;?\\s*$",
             Pattern.CASE_INSENSITIVE
     );
+    private static final Pattern SELECT_ID_VALUE = Pattern.compile(
+            "^\\s*SELECT\\s+ID\\s*,\\s*VALUE\\s+FROM\\s+" + IDENTIFIER
+                    + "\\s+WHERE\\s+ID\\s*=\\s*" + LITERAL + "\\s*;?\\s*$",
+            Pattern.CASE_INSENSITIVE
+    );
     private static final Pattern INSERT = Pattern.compile(
             "^\\s*INSERT\\s+INTO\\s+" + IDENTIFIER
                     + "\\s*\\(\\s*ID\\s*,\\s*VALUE\\s*\\)\\s*VALUES\\s*\\(\\s*"
@@ -67,6 +72,10 @@ public final class SimpleSqlPlanner implements SqlPlanner {
         Matcher select = SELECT.matcher(sql);
         if (select.matches()) {
             return new SqlPlan.SelectByKeyPlan(select.group(1), unescape(select.group(2)));
+        }
+        Matcher idAndValue = SELECT_ID_VALUE.matcher(sql);
+        if (idAndValue.matches()) {
+            return new SqlPlan.SelectByKeyPlan(idAndValue.group(1), unescape(idAndValue.group(2)));
         }
         Matcher insert = INSERT.matcher(sql);
         if (insert.matches()) {

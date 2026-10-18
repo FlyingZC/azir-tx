@@ -8,7 +8,7 @@ import java.util.Objects;
 /**
  * Azir SQL 引擎，负责创建绑定事务管理器和 SQL 组件的会话。
  */
-public final class AzirSqlEngine {
+public final class AzirSqlEngine implements SqlEngine {
     private final TransactionManager transactionManager;
     private final SqlPlanner planner;
     private final ShardResolver shardResolver;
@@ -77,6 +77,7 @@ public final class AzirSqlEngine {
     /**
      * 创建新的 SQL 会话。
      */
+    @Override
     public SqlSession openSession() {
         return new AzirSqlSession(
                 transactionManager,

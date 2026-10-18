@@ -4,10 +4,13 @@ import mvcc.api.Transaction;
 import mvcc.common.ErrorCode;
 import mvcc.common.IsolationLevel;
 import mvcc.common.MvccException;
+import mvcc.common.TxStatus;
 import mvcc.gc.SafePointStore;
 import mvcc.gc.mysql.MysqlSafePointStore;
 import mvcc.gc.GcManager;
 import mvcc.metadata.TransactionMetadataStore;
+import mvcc.metadata.FastTransactionBegin;
+import mvcc.metadata.FastTransactionCommit;
 import mvcc.metadata.mysql.MysqlTransactionMetadataStore;
 import mvcc.recovery.RecoveryScheduler;
 import mvcc.recovery.RecoveryManager;
@@ -30,6 +33,8 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.util.Map;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -143,6 +148,56 @@ class PersistentControlPlaneIntegrationTest {
 
         long nextTs = tso2.nextTimestamp();
         assertTrue(nextTs > tx.txId());
+    }
+
+    /** 提交例程已持久化决议但响应丢失时，独立协调器必须按原 commitTs 补物化。 */
+    @Test
+    void lostServerSideCommitResponseMustRecoverTheDurableDecision() {
+        var backing = new MysqlTransactionMetadataStore(controlDataSource);
+        backing.initialize();
+        var loseResponse = new AtomicBoolean(true);
+        TransactionMetadataStore intercepted = (TransactionMetadataStore) Proxy.newProxyInstance(
+                TransactionMetadataStore.class.getClassLoader(),
+                new Class<?>[]{TransactionMetadataStore.class, FastTransactionBegin.class, FastTransactionCommit.class},
+                (proxy, method, arguments) -> {
+                    try {
+                        Object result = method.invoke(backing, arguments);
+                        if (method.getName().equals("tryCommit") && loseResponse.getAndSet(false)) {
+                            throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
+                                    "simulated lost commit response", true, null);
+                        }
+                        return result;
+                    } catch (InvocationTargetException ex) {
+                        throw ex.getCause();
+                    }
+                });
+        var first = new MysqlStorageAdapter("shard-1", shard1DataSource, intercepted);
+        var second = new MysqlStorageAdapter("shard-2", shard2DataSource, intercepted);
+        var coordinator = new TransactionManager(new MysqlTimestampOracle(controlDataSource), intercepted,
+                Map.of(first.shardId(), first, second.shardId(), second));
+        Transaction tx = coordinator.begin(IsolationLevel.REPEATABLE_READ);
+        coordinator.put(tx, "shard-1", "lost:one", bytes("one"));
+        coordinator.put(tx, "shard-2", "lost:two", bytes("two"));
+        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                assertThrows(MvccException.class, () -> coordinator.commit(tx)).errorCode());
+        var persisted = backing.get(tx.txId()).orElseThrow();
+        assertEquals(TxStatus.COMMITTED, persisted.status());
+        long commitTs = persisted.commitTs();
+
+        var restartedStore = new MysqlTransactionMetadataStore(controlDataSource);
+        var recoveredFirst = new MysqlStorageAdapter("shard-1", shard1DataSource, restartedStore);
+        var recoveredSecond = new MysqlStorageAdapter("shard-2", shard2DataSource, restartedStore);
+        new RecoveryManager(restartedStore, Map.of(recoveredFirst.shardId(), recoveredFirst,
+                recoveredSecond.shardId(), recoveredSecond)).recover(tx.txId());
+        assertEquals(commitTs, restartedStore.get(tx.txId()).orElseThrow().commitTs().longValue());
+        try (var reader = new TransactionManager(new MysqlTimestampOracle(controlDataSource), restartedStore,
+                Map.of(recoveredFirst.shardId(), recoveredFirst, recoveredSecond.shardId(), recoveredSecond))) {
+            Transaction snapshot = reader.begin(IsolationLevel.READ_COMMITTED);
+            assertEquals("one", readString(reader, snapshot, "shard-1", "lost:one"));
+            assertEquals("two", readString(reader, snapshot, "shard-2", "lost:two"));
+            reader.commit(snapshot);
+        }
+        coordinator.close();
     }
 
     /** 验证省略显式准备的事务仍能在协调器重启后恢复。 */

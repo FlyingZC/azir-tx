@@ -23,6 +23,7 @@ import org.apache.calcite.linq4j.Enumerator;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -467,6 +468,24 @@ class AzirSqlSessionTest {
             assertEquals("b", session.execute("select id from account limit 1").singleRow().get("id"));
             assertEquals(1, shard0.pageRanges.size());
             assertTrue(shard1.pageRanges.isEmpty());
+        }
+    }
+
+    /**
+     * 验证存在残余过滤时，LIMIT 不能提前截断跨分片扫描。
+     */
+    @Test
+    void calciteFilteredLimitMustReachLaterShard() {
+        InMemoryTestStorageAdapter shard0 = new InMemoryTestStorageAdapter("s0");
+        InMemoryTestStorageAdapter shard1 = new InMemoryTestStorageAdapter("s1");
+        shard0.seed("account", "a", "skip", 1L);
+        shard1.seed("account", "b", "match", 1L);
+        try (TransactionManager manager = manager(shard0, shard1);
+             SqlSession session = pagedEngine(manager, ShardResolver.hashByKey(List.of("s0", "s1")), 1).openSession()) {
+            assertEquals("b", session.execute("select id from account where value = 'match' limit 1")
+                    .singleRow().get("id"));
+            assertEquals(1, shard0.pageRanges.size());
+            assertEquals(1, shard1.pageRanges.size());
         }
     }
 
@@ -1102,6 +1121,11 @@ class AzirSqlSessionTest {
                 new Class<?>[]{TransactionMetadataStore.class}, (proxy, method, args) -> {
                     if (method.getName().equals("currentTimeMillis")) {
                         return now.get();
+                    }
+                    // 未被内存实现覆盖的默认方法以代理为接收者，内部时钟调用仍经过测试替身。
+                    if (method.isDefault() && delegate.getClass()
+                            .getMethod(method.getName(), method.getParameterTypes()).getDeclaringClass().isInterface()) {
+                        return InvocationHandler.invokeDefault(proxy, method, args);
                     }
                     try {
                         return method.invoke(delegate, args);
