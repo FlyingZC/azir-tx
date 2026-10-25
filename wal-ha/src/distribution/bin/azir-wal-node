@@ -1,0 +1,27 @@
+#!/bin/sh
+# 独立前台进程入口：不拼接 JAVA_OPTS，不解释配置，不后台派生或自动杀进程。
+set -eu
+umask 077
+script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)
+if [ -n "${JAVA_HOME:-}" ]; then
+    java_bin="$JAVA_HOME/bin/java"
+else
+    java_bin=java
+fi
+heap=${AZIR_WAL_HEAP:-512m}
+case "$heap" in
+    256m|512m|1g|2g|4g|8g) ;;
+    *) echo 'AZIR_WAL_HEAP must be one of: 256m 512m 1g 2g 4g 8g' >&2; exit 2 ;;
+esac
+# HTTP 上限必须在 JDK 服务器初始化前设置；监听地址只能由严格配置指定为回环。
+exec "$java_bin" "-Xmx$heap" -XX:MaxDirectMemorySize=128m -XX:+ExitOnOutOfMemoryError \
+    --add-modules jdk.httpserver \
+    -Djdk.httpserver.maxConnections=32 \
+    -Dsun.net.httpserver.maxIdleConnections=8 \
+    -Dsun.net.httpserver.maxReqHeaders=32 \
+    -Dsun.net.httpserver.maxReqTime=5 \
+    -Dsun.net.httpserver.maxRspTime=5 \
+    -Dsun.net.httpserver.idleInterval=5 \
+    -Dsun.net.httpserver.drainAmount=0 \
+    -Dorg.slf4j.simpleLogger.defaultLogLevel=warn \
+    -cp "$script_dir/../lib/*" mvcc.wal.ha.RatisNodeMain "$@"

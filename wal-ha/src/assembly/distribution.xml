@@ -1,0 +1,26 @@
+<assembly xmlns="http://maven.apache.org/ASSEMBLY/2.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/ASSEMBLY/2.2.0 https://maven.apache.org/xsd/assembly-2.2.0.xsd">
+    <id>node</id>
+    <formats><format>tar.gz</format></formats>
+    <includeBaseDirectory>true</includeBaseDirectory>
+    <dependencySets>
+        <dependencySet>
+            <outputDirectory>lib</outputDirectory><scope>runtime</scope>
+            <useProjectArtifact>true</useProjectArtifact><unpack>false</unpack>
+        </dependencySet>
+    </dependencySets>
+    <fileSets>
+        <fileSet>
+            <directory>src/distribution/bin</directory><outputDirectory>bin</outputDirectory>
+            <fileMode>0755</fileMode><directoryMode>0755</directoryMode>
+        </fileSet>
+        <fileSet>
+            <directory>src/distribution/conf</directory><outputDirectory>conf</outputDirectory>
+            <fileMode>0640</fileMode><directoryMode>0750</directoryMode><filtered>false</filtered>
+        </fileSet>
+    </fileSets>
+    <files>
+        <file><source>../doc/2026-10-28-wal-node-distribution.md</source><outputDirectory>/</outputDirectory><destName>README.md</destName><fileMode>0644</fileMode></file>
+    </files>
+</assembly>
