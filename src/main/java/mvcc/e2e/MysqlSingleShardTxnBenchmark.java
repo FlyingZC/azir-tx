@@ -25,6 +25,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -98,6 +99,11 @@ public final class MysqlSingleShardTxnBenchmark {
 
             BenchmarkResult result = runBenchmark(transactionManager, config);
             System.out.println(result.toLine(config));
+            // 失败计数不能只写入日志后仍以零退出码作为有效容量结果。
+            if (result.failures() != 0 || result.committed() == 0) {
+                throw new IllegalStateException("Azir single-shard benchmark is invalid: "
+                        + (result.firstFailure() == null ? "no committed transaction" : result.firstFailure()));
+            }
         } finally {
             close(controlDataSource);
             close(shard1DataSource);
@@ -113,6 +119,7 @@ public final class MysqlSingleShardTxnBenchmark {
         LongAdder conflicts = new LongAdder();
         LongAdder failures = new LongAdder();
         AtomicLong keySequence = new AtomicLong();
+        AtomicReference<String> firstFailure = new AtomicReference<>();
 
         var executor = Executors.newFixedThreadPool(config.concurrency());
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -144,9 +151,11 @@ public final class MysqlSingleShardTxnBenchmark {
                                 conflicts.increment();
                             } else {
                                 failures.increment();
+                                firstFailure.compareAndSet(null, describeFailure(ex));
                             }
                         } catch (RuntimeException ex) {
                             failures.increment();
+                            firstFailure.compareAndSet(null, describeFailure(ex));
                         }
                     }
                 } catch (InterruptedException ex) {
@@ -163,7 +172,24 @@ public final class MysqlSingleShardTxnBenchmark {
         executor.awaitTermination(5, TimeUnit.SECONDS);
 
         double elapsedSeconds = (System.nanoTime() - startedAt) / 1_000_000_000.0;
-        return new BenchmarkResult(elapsedSeconds, attempts.sum(), committed.sum(), conflicts.sum(), failures.sum());
+        return new BenchmarkResult(elapsedSeconds, attempts.sum(), committed.sum(),
+                conflicts.sum(), failures.sum(), firstFailure.get());
+    }
+
+    /** 保留首个非冲突异常链，避免基准失败时只剩失败计数。 */
+    private static String describeFailure(Throwable failure) {
+        StringBuilder result = new StringBuilder();
+        for (Throwable cause = failure; cause != null && result.length() < 600; cause = cause.getCause()) {
+            if (!result.isEmpty()) {
+                result.append(" <- ");
+            }
+            result.append(cause.getClass().getSimpleName()).append(':').append(cause.getMessage());
+            if (cause instanceof java.sql.SQLException sql) {
+                result.append("[state=").append(sql.getSQLState())
+                        .append(",code=").append(sql.getErrorCode()).append(']');
+            }
+        }
+        return result.toString();
     }
 
     /**
@@ -258,7 +284,8 @@ public final class MysqlSingleShardTxnBenchmark {
                                    long attempts,
                                    long committed,
                                    long conflicts,
-                                   long failures) {
+                                   long failures,
+                                   String firstFailure) {
         /**
          * 将基准测试结果格式化为一行文本。
          */
@@ -280,6 +307,7 @@ public final class MysqlSingleShardTxnBenchmark {
                     + " committed=" + committed
                     + " conflicts=" + conflicts
                     + " failures=" + failures
+                    + " first_failure=" + (firstFailure == null ? "-" : firstFailure)
                     + " attempt_tps=" + String.format("%.2f", attemptTps)
                     + " commit_tps=" + String.format("%.2f", commitTps)
                     + " conflict_tps=" + String.format("%.2f", conflictTps);

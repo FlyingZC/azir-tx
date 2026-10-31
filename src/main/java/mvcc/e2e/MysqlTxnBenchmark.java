@@ -55,9 +55,11 @@ public final class MysqlTxnBenchmark {
         try {
             MysqlTimestampOracle mysqlTso = new MysqlTimestampOracle(controlDataSource);
             MysqlSegmentTimestampOracle segmentTso = new MysqlSegmentTimestampOracle(controlDataSource, config.tsoBatchSize());
-            TimestampOracle tso = config.segmentTso()
+            TimestampOracle selectedTso = config.segmentTso()
                     ? segmentTso
                     : mysqlTso;
+            // 对照模式只遮蔽合并发布能力，仍使用同一个持久化 TSO 权威。
+            TimestampOracle tso = config.legacyControl() ? selectedTso::nextTimestamp : selectedTso;
             TransactionMetadataStore metadataStore = new MysqlTransactionMetadataStore(controlDataSource);
             SafePointStore safePointStore = new MysqlSafePointStore(controlDataSource);
             MysqlStorageAdapter shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource, metadataStore);
@@ -128,6 +130,11 @@ public final class MysqlTxnBenchmark {
             System.out.println(result.toLine(config));
             if (metrics != null) {
                 TransactionMetricsFormatter.formatNonEmpty(metrics).forEach(System.out::println);
+            }
+            // 基准过程出现非冲突失败或完全没有提交时，退出码必须明确标记证据无效。
+            if (result.failures() != 0 || result.committed() == 0) {
+                throw new IllegalStateException("Azir cross-shard benchmark is invalid: "
+                        + (result.firstFailure() == null ? "no committed transaction" : result.firstFailure()));
             }
         } finally {
             close(controlDataSource);
@@ -294,7 +301,8 @@ public final class MysqlTxnBenchmark {
                           boolean parallelRollback,
                           boolean asyncCommit,
                           int asyncCommitWorkers,
-                          boolean stageMetrics) {
+                          boolean stageMetrics,
+                          boolean legacyControl) {
         /**
          * 从环境变量读取配置对象。
          */
@@ -331,7 +339,8 @@ public final class MysqlTxnBenchmark {
                     Boolean.parseBoolean(env("AZIR_TX_PARALLEL_ROLLBACK", "true")),
                     Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "true")),
                     Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "16")),
-                    Boolean.parseBoolean(env("AZIR_TX_STAGE_METRICS", "false"))
+                    Boolean.parseBoolean(env("AZIR_TX_STAGE_METRICS", "false")),
+                    Boolean.parseBoolean(env("AZIR_TX_LEGACY_CONTROL", "false"))
             );
         }
     }
@@ -360,6 +369,7 @@ public final class MysqlTxnBenchmark {
                     + " retry_max_attempts=" + config.maxAttempts()
                     + " segment_tso=" + config.segmentTso()
                     + " tso_batch_size=" + config.tsoBatchSize()
+                    + " legacy_control=" + config.legacyControl()
                     + " buffer_writes=" + config.bufferWrites()
                     + " lazy_begin_metadata=" + config.lazyBeginMetadata()
                     + " defer_intent_cleanup=" + config.deferIntentCleanup()
