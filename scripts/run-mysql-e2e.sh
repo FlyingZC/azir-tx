@@ -21,4 +21,4 @@ echo "AZIR_TX_CONTROL_JDBC=$AZIR_TX_CONTROL_JDBC"
 echo "AZIR_TX_SHARD1_JDBC=$AZIR_TX_SHARD1_JDBC"
 echo "AZIR_TX_SHARD2_JDBC=$AZIR_TX_SHARD2_JDBC"
 
-mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.MysqlMvccE2E
+mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlMvccE2E

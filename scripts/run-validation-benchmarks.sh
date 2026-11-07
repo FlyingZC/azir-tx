@@ -44,17 +44,17 @@ done
 export AZIR_TX_RESET=true
 export AZIR_TX_TSO_MODE=DIRECT
 export AZIR_TX_TSO_BATCH_SIZE=1
-mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.TimestampOracleBenchmark
+mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_TSO_MODE=LEGACY_BATCH
 export AZIR_TX_TSO_BATCH_SIZE=256
-mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.TimestampOracleBenchmark
+mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_TSO_MODE=SEGMENT
 export AZIR_TX_TSO_BATCH_SIZE=256
-mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.TimestampOracleBenchmark
+mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_BUFFERED_MODE=false
@@ -62,7 +62,7 @@ export AZIR_TX_PARALLEL_PREWRITE=false
 export AZIR_TX_PARALLEL_PREPARE=false
 export AZIR_TX_PARALLEL_COMMIT=false
 export AZIR_TX_PARALLEL_ROLLBACK=false
-mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.CrossShardWritePathPrototypeBenchmark
+mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.CrossShardWritePathPrototypeBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_BUFFERED_MODE=true
@@ -70,14 +70,14 @@ export AZIR_TX_PARALLEL_PREWRITE=true
 export AZIR_TX_PARALLEL_PREPARE=true
 export AZIR_TX_PARALLEL_COMMIT=true
 export AZIR_TX_PARALLEL_ROLLBACK=true
-mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.CrossShardWritePathPrototypeBenchmark
+mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.CrossShardWritePathPrototypeBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_ASYNC_COMMIT=false
 export AZIR_TX_SECONDARY_FINALIZE_WORKERS=8
-mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.AsyncCommitPrototypeBenchmark
+mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.AsyncCommitPrototypeBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_ASYNC_COMMIT=true
 export AZIR_TX_SECONDARY_FINALIZE_WORKERS=8
-mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.AsyncCommitPrototypeBenchmark
+mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.AsyncCommitPrototypeBenchmark

@@ -24,4 +24,4 @@ exec "$java_bin" "-Xmx$heap" -XX:MaxDirectMemorySize=128m -XX:+ExitOnOutOfMemory
     -Dsun.net.httpserver.idleInterval=5 \
     -Dsun.net.httpserver.drainAmount=0 \
     -Dorg.slf4j.simpleLogger.defaultLogLevel=warn \
-    -cp "$script_dir/../lib/*" mvcc.wal.ha.RatisNodeMain "$@"
+    -cp "$script_dir/../lib/*" com.flyingzc.azir.wal.ha.RatisNodeMain "$@"

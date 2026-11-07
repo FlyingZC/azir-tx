@@ -48,7 +48,7 @@ def inspect(base):
             command = Path(f'/proc/{pid}/cmdline').read_bytes()
         except (FileNotFoundError, ProcessLookupError):
             continue
-        if any(name in command for name in (b'mvcc.wal.ha.RatisMysqlProcessProbe', b'mvcc.wal.ha.RatisWalProcessProbe', b'mvcc.wal.ha.RatisNetworkProcessProbe', b'mvcc.wal.ha.RatisCombinationProcessProbe')):
+        if any(name in command for name in (b'com.flyingzc.azir.wal.ha.RatisMysqlProcessProbe', b'com.flyingzc.azir.wal.ha.RatisWalProcessProbe', b'com.flyingzc.azir.wal.ha.RatisNetworkProcessProbe', b'com.flyingzc.azir.wal.ha.RatisCombinationProcessProbe')):
             live.append(pid)
     credentials = [str(path.relative_to(base)) for path in base.rglob('*') if path.is_file() and (path.suffix in ('.key', '.p12', '.pfx', '.jks') or path.name == 'identity.pem')]
     return {'owned_containers_checked': len(containers), 'owned_networks_checked': len(networks), 'owned_resources_still_present': present,

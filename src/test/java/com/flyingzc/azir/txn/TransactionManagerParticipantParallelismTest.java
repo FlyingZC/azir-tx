@@ -1,0 +1,455 @@
+package com.flyingzc.azir.txn;
+
+import com.flyingzc.azir.api.Transaction;
+import com.flyingzc.azir.common.IsolationLevel;
+import com.flyingzc.azir.metadata.InMemoryTransactionMetadataStore;
+import com.flyingzc.azir.storage.KeyRange;
+import com.flyingzc.azir.storage.Mutation;
+import com.flyingzc.azir.storage.ReadContext;
+import com.flyingzc.azir.storage.StorageAdapter;
+import com.flyingzc.azir.storage.VersionedValue;
+import com.flyingzc.azir.tso.AtomicTimestampOracle;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+/**
+ * 事务管理器参与者阶段并行执行测试。
+ */
+class TransactionManagerParticipantParallelismTest {
+    /**
+     * 验证开启并行预写时，两个参与分片也会并发执行。
+     */
+    @Test
+    void twoParticipantPrewriteShouldRunConcurrentlyWhenParallelPrewriteEnabled() {
+        CountDownLatch enteredPrewrite = new CountDownLatch(2);
+        BlockingPrewriteStorageAdapter shard1 = new BlockingPrewriteStorageAdapter("shard-1", enteredPrewrite);
+        BlockingPrewriteStorageAdapter shard2 = new BlockingPrewriteStorageAdapter("shard-2", enteredPrewrite);
+        TransactionOptions options = new TransactionOptions(
+                LockWaitPolicy.failFast(),
+                TransactionRetryPolicy.noRetry(),
+                CrossShardCommitPolicy.asyncParallel(2),
+                true,
+                true,
+                false
+        );
+        TransactionManager manager = new TransactionManager(
+                new AtomicTimestampOracle(100L),
+                new InMemoryTransactionMetadataStore(),
+                options,
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
+        manager.put(tx, "shard-1", "parallel:1", new byte[]{1});
+        manager.put(tx, "shard-2", "parallel:2", new byte[]{2});
+
+        assertDoesNotThrow(() -> manager.commit(tx));
+        assertEquals(1, shard1.prewriteCalls());
+        assertEquals(1, shard2.prewriteCalls());
+    }
+
+    /**
+     * 验证并行参与者抛出的 Error 不会被吞掉。
+     */
+    @Test
+    void parallelParticipantErrorShouldPropagateToCaller() {
+        ErrorPrewriteStorageAdapter shard1 = new ErrorPrewriteStorageAdapter("shard-1");
+        BlockingPrewriteStorageAdapter shard2 = new BlockingPrewriteStorageAdapter("shard-2", new CountDownLatch(1));
+        TransactionOptions options = new TransactionOptions(
+                LockWaitPolicy.failFast(),
+                TransactionRetryPolicy.noRetry(),
+                CrossShardCommitPolicy.asyncParallel(2),
+                true,
+                true,
+                false
+        );
+        TransactionManager manager = new TransactionManager(
+                new AtomicTimestampOracle(100L),
+                new InMemoryTransactionMetadataStore(),
+                options,
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
+        manager.put(tx, "shard-1", "parallel:error:1", new byte[]{1});
+        manager.put(tx, "shard-2", "parallel:error:2", new byte[]{2});
+
+        AssertionError actual = assertThrows(AssertionError.class, () -> manager.commit(tx));
+        assertEquals("participant error", actual.getMessage());
+    }
+
+    /**
+     * 验证并行参与者抛出的 RuntimeException 不会被 CompletableFuture 包装后吞掉。
+     */
+    @Test
+    void parallelParticipantRuntimeExceptionShouldPropagateToCaller() {
+        RuntimeExceptionPrewriteStorageAdapter shard1 = new RuntimeExceptionPrewriteStorageAdapter("shard-1");
+        BlockingPrewriteStorageAdapter shard2 = new BlockingPrewriteStorageAdapter("shard-2", new CountDownLatch(1));
+        TransactionOptions options = new TransactionOptions(
+                LockWaitPolicy.failFast(),
+                TransactionRetryPolicy.noRetry(),
+                CrossShardCommitPolicy.asyncParallel(2),
+                true,
+                true,
+                false
+        );
+        TransactionManager manager = new TransactionManager(
+                new AtomicTimestampOracle(100L),
+                new InMemoryTransactionMetadataStore(),
+                options,
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
+        );
+
+        Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
+        manager.put(tx, "shard-1", "parallel:runtime:1", new byte[]{1});
+        manager.put(tx, "shard-2", "parallel:runtime:2", new byte[]{2});
+
+        IllegalStateException actual = assertThrows(IllegalStateException.class, () -> manager.commit(tx));
+        assertEquals("participant runtime failure", actual.getMessage());
+    }
+
+    /**
+     * 会在预写阶段等待另一个分片同时进入的存储适配器。
+     */
+    private static final class BlockingPrewriteStorageAdapter implements StorageAdapter {
+        private final String shardId;
+        private final CountDownLatch enteredPrewrite;
+        private final AtomicInteger prewriteCalls = new AtomicInteger();
+
+        /**
+         * 构造阻塞预写适配器。
+         */
+        private BlockingPrewriteStorageAdapter(String shardId, CountDownLatch enteredPrewrite) {
+            this.shardId = shardId;
+            this.enteredPrewrite = enteredPrewrite;
+        }
+
+        /**
+         * 模拟跨分片可见性能力，仅验证并行预写调度。
+         */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return true;
+        }
+
+        /**
+         * 返回当前分片编号。
+         */
+        @Override
+        public String shardId() {
+            return shardId;
+        }
+
+        /**
+         * 初始化测试适配器。
+         */
+        @Override
+        public void initialize() {
+        }
+
+        /**
+         * 读取指定键。
+         */
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return Optional.empty();
+        }
+
+        /**
+         * 扫描指定范围。
+         */
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return List.of();
+        }
+
+        /**
+         * 预写并等待另一个分片同时进入。
+         */
+        @Override
+        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+            prewriteCalls.incrementAndGet();
+            enteredPrewrite.countDown();
+            try {
+                if (!enteredPrewrite.await(300, TimeUnit.MILLISECONDS)) {
+                    throw new AssertionError("prewrite did not run concurrently");
+                }
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted while waiting for concurrent prewrite", ex);
+            }
+        }
+
+        /**
+         * 准备测试事务。
+         */
+        @Override
+        public void prepare(long txId) {
+        }
+
+        /**
+         * 提交测试事务。
+         */
+        @Override
+        public void commit(long txId, long commitTs) {
+        }
+
+        /**
+         * 提交已知测试写集合。
+         */
+        @Override
+        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        }
+
+        /**
+         * 回滚测试事务。
+         */
+        @Override
+        public void abort(long txId) {
+        }
+
+        /**
+         * 查找待恢复事务编号。
+         */
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return Set.of();
+        }
+
+        /**
+         * 清理历史版本。
+         */
+        @Override
+        public int gc(long safePoint, int limit) {
+            return 0;
+        }
+
+        /**
+         * 返回预写调用次数。
+         */
+        private int prewriteCalls() {
+            return prewriteCalls.get();
+        }
+    }
+
+    /**
+     * 会在预写阶段抛出 Error 的存储适配器。
+     */
+    private static final class ErrorPrewriteStorageAdapter implements StorageAdapter {
+        private final String shardId;
+
+        /**
+         * 构造错误预写适配器。
+         */
+        private ErrorPrewriteStorageAdapter(String shardId) {
+            this.shardId = shardId;
+        }
+
+        /**
+         * 模拟跨分片可见性能力，使预写错误进入原始异常传播路径。
+         */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return true;
+        }
+
+        /**
+         * 返回当前分片编号。
+         */
+        @Override
+        public String shardId() {
+            return shardId;
+        }
+
+        /**
+         * 初始化测试适配器。
+         */
+        @Override
+        public void initialize() {
+        }
+
+        /**
+         * 读取指定键。
+         */
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return Optional.empty();
+        }
+
+        /**
+         * 扫描指定范围。
+         */
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return List.of();
+        }
+
+        /**
+         * 预写时抛出测试错误。
+         */
+        @Override
+        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+            throw new AssertionError("participant error");
+        }
+
+        /**
+         * 准备测试事务。
+         */
+        @Override
+        public void prepare(long txId) {
+        }
+
+        /**
+         * 提交测试事务。
+         */
+        @Override
+        public void commit(long txId, long commitTs) {
+        }
+
+        /**
+         * 提交已知测试写集合。
+         */
+        @Override
+        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        }
+
+        /**
+         * 回滚测试事务。
+         */
+        @Override
+        public void abort(long txId) {
+        }
+
+        /**
+         * 查找待恢复事务编号。
+         */
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return Set.of();
+        }
+
+        /**
+         * 清理历史版本。
+         */
+        @Override
+        public int gc(long safePoint, int limit) {
+            return 0;
+        }
+    }
+
+    /**
+     * 会在预写阶段抛出 RuntimeException 的存储适配器。
+     */
+    private static final class RuntimeExceptionPrewriteStorageAdapter implements StorageAdapter {
+        private final String shardId;
+
+        /**
+         * 构造运行时异常预写适配器。
+         */
+        private RuntimeExceptionPrewriteStorageAdapter(String shardId) {
+            this.shardId = shardId;
+        }
+
+        /**
+         * 模拟跨分片可见性能力，使预写异常进入原始异常传播路径。
+         */
+        @Override
+        public boolean supportsCommittedIntentResolution() {
+            return true;
+        }
+
+        /**
+         * 返回当前分片编号。
+         */
+        @Override
+        public String shardId() {
+            return shardId;
+        }
+
+        /**
+         * 初始化测试适配器。
+         */
+        @Override
+        public void initialize() {
+        }
+
+        /**
+         * 读取指定键。
+         */
+        @Override
+        public Optional<VersionedValue> get(ReadContext context, String key) {
+            return Optional.empty();
+        }
+
+        /**
+         * 扫描指定范围。
+         */
+        @Override
+        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+            return List.of();
+        }
+
+        /**
+         * 预写时抛出测试运行时异常。
+         */
+        @Override
+        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+            throw new IllegalStateException("participant runtime failure");
+        }
+
+        /**
+         * 准备测试事务。
+         */
+        @Override
+        public void prepare(long txId) {
+        }
+
+        /**
+         * 提交测试事务。
+         */
+        @Override
+        public void commit(long txId, long commitTs) {
+        }
+
+        /**
+         * 提交已知测试写集合。
+         */
+        @Override
+        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        }
+
+        /**
+         * 回滚测试事务。
+         */
+        @Override
+        public void abort(long txId) {
+        }
+
+        /**
+         * 查找待恢复事务编号。
+         */
+        @Override
+        public Set<Long> findPendingTransactionIds(int limit) {
+            return Set.of();
+        }
+
+        /**
+         * 清理历史版本。
+         */
+        @Override
+        public int gc(long safePoint, int limit) {
+            return 0;
+        }
+    }
+}

@@ -67,7 +67,7 @@ run_case() {
   export AZIR_TX_BENCH_CONCURRENCY="$concurrency"
   export AZIR_TX_BENCH_DURATION_SECONDS
   export AZIR_TX_BENCH_CONFLICT="$conflict"
-  mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.MysqlTxnBenchmark
+  mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlTxnBenchmark
 }
 
 run_direct_case() {
@@ -76,7 +76,7 @@ run_direct_case() {
   export AZIR_TX_BENCH_CONCURRENCY="$concurrency"
   export AZIR_TX_BENCH_DURATION_SECONDS
   export AZIR_TX_BENCH_CONFLICT=false
-  mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.MysqlDirectTwoShardTxnBenchmark
+  mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlDirectTwoShardTxnBenchmark
 }
 
 for c in 50 100 200; do

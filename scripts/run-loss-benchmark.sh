@@ -39,14 +39,14 @@ for concurrency in ${AZIR_TX_BENCH_CONCURRENCY_LIST}; do
     AZIR_TX_RESET=true \
     AZIR_TX_BENCH_CONCURRENCY="$concurrency" \
     AZIR_TX_BENCH_CONFLICT=false \
-    mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.MysqlDirectTwoShardTxnBenchmark \
+    mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlDirectTwoShardTxnBenchmark \
       | grep 'DIRECT_TWO_SHARD_BENCH'
   )"
   mvcc_line="$(
     AZIR_TX_RESET=true \
     AZIR_TX_BENCH_CONCURRENCY="$concurrency" \
     AZIR_TX_BENCH_CONFLICT=false \
-    mvn -q -DskipTests exec:java -Dexec.mainClass=mvcc.e2e.MysqlTxnBenchmark \
+    mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlTxnBenchmark \
       | grep '^BENCH '
   )"
   direct_tps="$(printf '%s\n' "$direct_line" | sed -n 's/.*commit_tps=\([0-9.]*\).*/\1/p')"
