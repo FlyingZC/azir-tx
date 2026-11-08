@@ -1,19 +1,51 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 锁等待策略，定义冲突等待方式和超时时间。
+ * Locks the waiting policy, defines the conflict waiting mode and timeout time.
+ *
+ * @param conflictMode conflict mode
+ * @param lockWaitTimeoutMs lock wait timeout ms
+ * @param initialBackoffMs initial backoff ms
+ * @param maxBackoffMs max backoff ms
+ * @param backoffMultiplier backoff multiplier
+ * @param jitter jitter
  */
 public record LockWaitPolicy(ConflictMode conflictMode,
-                             long lockWaitTimeoutMs,
-                             long initialBackoffMs,
-                             long maxBackoffMs,
-                             double backoffMultiplier,
-                             boolean jitter) {
+        long lockWaitTimeoutMs,
+        long initialBackoffMs,
+        long maxBackoffMs,
+        double backoffMultiplier,
+        boolean jitter) {
+
     /**
-     * 构造 LockWaitPolicy 实例。
+     * Construct a LockWaitPolicy instance.
+     *
+     * @param conflictMode conflict mode
+     * @param lockWaitTimeoutMs lock wait timeout ms
+     * @param initialBackoffMs initial backoff ms
+     * @param maxBackoffMs max backoff ms
+     * @param backoffMultiplier backoff multiplier
+     * @param jitter jitter
+     * @throws IllegalArgumentException if the operation cannot complete
      */
     public LockWaitPolicy {
         Objects.requireNonNull(conflictMode, "conflictMode");
@@ -32,23 +64,30 @@ public record LockWaitPolicy(ConflictMode conflictMode,
     }
 
     /**
-     * 返回失败优先的配置。
+     * Return fail-fast options.
+     *
+     * @return the operation result
      */
     public static LockWaitPolicy failFast() {
         return new LockWaitPolicy(ConflictMode.FAIL_FAST, 0L, 0L, 0L, 1.0d, false);
     }
 
     /**
-     * 返回接近 MySQL 行为的默认配置。
+     * Return defaults approximating MySQL conflict handling.
+     *
+     * @return the operation result
      */
     public static LockWaitPolicy mysqlLikeDefaults() {
         return new LockWaitPolicy(ConflictMode.WAIT, 5_000L, 5L, 100L, 2.0d, true);
     }
 
     /**
-     * 计算下一次重试前的等待时间。
+     * Compute the delay before the next retry.
+     *
+     * @param attempt attempt
+     * @return the operation result
      */
-    long nextDelayMillis(int attempt) {
+    long nextDelayMillis(final int attempt) {
         if (conflictMode == ConflictMode.FAIL_FAST || maxBackoffMs == 0L) {
             return 0L;
         }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -18,41 +34,33 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 
-/** 正式参与者预写事务内的分条序号保留账本，与 `mvcc_intent` 共用物理提交。 */
+/**
+ * Regular participant prewrite transaction sub-numbers keep the account book with `mvcc_intent 'to share physics commit.
+ */
 final class MysqlVectorReservationStore {
+
     private final DataSource dataSource;
+
     private final int stripes;
+
     private final MysqlVectorLocalBatchProcedure batchProcedure;
+
     private final MysqlVectorCrossPrewriteProcedure crossPrewriteProcedure;
+
     private final MysqlVectorCrossPrewriteBatchProcedure crossPrewriteBatchProcedure;
+
     private final MysqlVectorCrossMaterializeProcedure crossMaterializeProcedure;
+
     private volatile boolean localFastProcedureReady;
 
-    /** 向中心暴露的保留身份不包含可变载荷引用。 */
-    record Reservation(long txId, String key, int stripe, long startSequence, long reservedSequence) {
-        /** 每个保留序号必须晚于起始分条快照。 */
-        Reservation {
-            Objects.requireNonNull(key, "key");
-            if (txId == 0 || key.isBlank() || stripe < 0 || startSequence < 0
-                    || reservedSequence <= startSequence) {
-                throw new IllegalArgumentException("invalid vector prewrite reservation");
-            }
-        }
-    }
-
-    /** 已物化映射沿用预写序号，中心决议时间仅用于跨片可见性判断。 */
-    record CommittedReservation(Reservation reservation, long commitTs) {
-        /** 跨片已提交版本必须拥有正决议时间。 */
-        CommittedReservation {
-            Objects.requireNonNull(reservation, "reservation");
-            if (commitTs < 1) {
-                throw new IllegalArgumentException("invalid vector committed reservation");
-            }
-        }
-    }
-
-    /** 绑定现有参与者的同一 DataSource，禁止跨库保留无法原子证明的序号。 */
-    MysqlVectorReservationStore(DataSource dataSource, int stripes) {
+    /**
+     * Ties the same DataSource of existing participant, and prohibits cross-queuing to keep serial numbers that cannot be demonstrated by atomic.
+     *
+     * @param dataSource database connection source
+     * @param stripes stripes
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    MysqlVectorReservationStore(final DataSource dataSource, final int stripes) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         if (stripes < 1 || stripes > 256) {
             throw new IllegalArgumentException("invalid vector stripe count");
@@ -64,7 +72,11 @@ final class MysqlVectorReservationStore {
         this.crossMaterializeProcedure = new MysqlVectorCrossMaterializeProcedure(dataSource);
     }
 
-    /** 持久布局只允许首次建立或精确重入，不清除已有版本与意向证明。 */
+    /**
+     * The durable layout only allows for first-time creation or accurate re-entry, without removing existing version and intent certificates.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     void initialize() throws SQLException {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("""
@@ -161,8 +173,13 @@ final class MysqlVectorReservationStore {
         }
     }
 
-    /** 只创建一次版本化单键例程，重启后仍核对其持久存在。 */
-    private void ensureLocalCommitProcedure(Connection connection) throws SQLException {
+    /**
+     * Creates only once a single version key routine, checking the existence of its durable after restarting.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureLocalCommitProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database()
@@ -280,15 +297,25 @@ final class MysqlVectorReservationStore {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 单次服务器调用执行正式本地 1PC，异常由适配器映射为可重试或结果未知。 */
-    long commitLocalFast(long txId, Mutation mutation, int stripe, long startSequence) throws SQLException {
+    /**
+     * Execute local 1PC in one server call; the adapter maps failures to retryable errors or an unknown outcome.
+     *
+     * @param txId transaction identifier
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    long commitLocalFast(final long txId, final Mutation mutation, final int stripe, final long startSequence) throws SQLException {
         if (!localFastProcedureReady) {
             throw new IllegalStateException("vector local commit procedure is not initialized");
         }
@@ -313,15 +340,32 @@ final class MysqlVectorReservationStore {
         }
     }
 
-    /** 批量例程只执行一次物理提交，成员序号按原调用顺序返回。 */
-    List<Long> commitLocalBatchFast(List<MysqlStorageAdapter.LocalVectorCommitRequest> requests)
-            throws SQLException {
+    /**
+     * The batch routine performs only one physical commit and the members' serial numbers return in order of their original call.
+     *
+     * @param requests requests
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    List<Long> commitLocalBatchFast(final List<MysqlStorageAdapter.LocalVectorCommitRequest> requests) throws SQLException {
         return batchProcedure.commit(requests);
     }
 
-    /** 正式意向与序号保留在单次服务器调用中提交，保留同一重放身份。 */
-    long reserveFast(long txId, long startTs, Mutation mutation, int stripe,
-                     long startSequence, long expireAtMillis) throws SQLException {
+    /**
+     * Formal intent and serial numbers are kept in a single server call commit, with the same replay identity.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @param expireAtMillis expire at millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    long reserveFast(final long txId, final long startTs, final Mutation mutation, final int stripe,
+                     final long startSequence, final long expireAtMillis) throws SQLException {
         if (txId == 0 || startTs < 0 || stripe < 0 || stripe >= stripes
                 || startSequence < 0 || expireAtMillis < 1) {
             throw new IllegalArgumentException("invalid vector prewrite identity or stripe");
@@ -330,20 +374,45 @@ final class MysqlVectorReservationStore {
                 stripe, startSequence, expireAtMillis);
     }
 
-    /** 同批跨片事务的每个序号仍绑定原始请求位置和事务身份。 */
-    List<Long> reserveBatchFast(List<MysqlStorageAdapter.VectorPrewriteRequest> requests)
-            throws SQLException {
+    /**
+     * Each serial number of the same batch cross-shard transaction still binds the original request location and transaction identity.
+     *
+     * @param requests requests
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    List<Long> reserveBatchFast(final List<MysqlStorageAdapter.VectorPrewriteRequest> requests) throws SQLException {
         return crossPrewriteBatchProcedure.prewrite(requests);
     }
 
-    /** 中心提交已确定后，单次物理调用搬迁真实版本和向量序号。 */
-    void materializeFast(long txId, long startTs, long commitTs) throws SQLException {
+    /**
+     * The Centre commit has been identified and the single physical call for the real version and vector serial numbers of the move.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @throws SQLException if the operation cannot complete
+     */
+    void materializeFast(final long txId, final long startTs, final long commitTs) throws SQLException {
         crossMaterializeProcedure.materialize(txId, startTs, commitTs);
     }
 
-    /** 必须由适配器在稳定键锁内调用，复用同一连接与 `mvcc_intent` 原子提交。 */
-    Reservation reserve(Connection connection, long txId, long startTs,
-                        Mutation mutation, int stripe, long startSequence) throws SQLException {
+    /**
+     * This must be called by the adaptor within the stabilization key lock, with the same connection and `mvcc_intent ' atomic commit.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    Reservation reserve(final Connection connection, final long txId, final long startTs,
+                        final Mutation mutation, final int stripe, final long startSequence) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(mutation, "mutation");
         if (txId == 0 || startTs < 0 || stripe < 0 || stripe >= stripes || startSequence < 0) {
@@ -409,8 +478,9 @@ final class MysqlVectorReservationStore {
             }
         }
         long reserved;
-        try (PreparedStatement query = connection.prepareStatement("select last_insert_id()");
-             ResultSet row = query.executeQuery()) {
+        try (
+                PreparedStatement query = connection.prepareStatement("select last_insert_id()");
+                ResultSet row = query.executeQuery()) {
             if (!row.next()) {
                 throw new SQLException("vector stripe did not return a reserved sequence");
             }
@@ -439,9 +509,21 @@ final class MysqlVectorReservationStore {
         return new Reservation(txId, mutation.key(), stripe, startSequence, reserved);
     }
 
-    /** 本地单键 1PC 在同一事务完成幂等、同键冲突、分条取号及版本落盘。 */
-    long commitLocal(Connection connection, long txId, Mutation mutation,
-                     int stripe, long startSequence) throws SQLException {
+    /**
+     * Single local key 1PC completes the idempotent, same-key conflicts, strip numbers and version drops in the same transaction.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    long commitLocal(final Connection connection, final long txId, final Mutation mutation,
+                     final int stripe, final long startSequence) throws SQLException {
         if (txId >= 0 || stripe < 0 || stripe >= stripes || startSequence < 0) {
             throw new IllegalArgumentException("local vector transaction requires a negative id and valid stripe");
         }
@@ -528,8 +610,9 @@ final class MysqlVectorReservationStore {
             }
         }
         long localSequence;
-        try (PreparedStatement query = connection.prepareStatement("select last_insert_id()");
-             ResultSet row = query.executeQuery()) {
+        try (
+                PreparedStatement query = connection.prepareStatement("select last_insert_id()");
+                ResultSet row = query.executeQuery()) {
             if (!row.next()) {
                 throw new SQLException("local vector commit did not return a sequence");
             }
@@ -558,8 +641,15 @@ final class MysqlVectorReservationStore {
         return localSequence;
     }
 
-    /** 提交响应未知时按事务号核对持久键、分条、起始界限和载荷。 */
-    OptionalLong verifyLocalCommit(MysqlStorageAdapter.LocalVectorCommitRequest request) throws SQLException {
+    /**
+     * Commit Check durable key, strips, threshold and payload when responding to unknown transaction ID.
+     *
+     * @param request request
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    OptionalLong verifyLocalCommit(final MysqlStorageAdapter.LocalVectorCommitRequest request) throws SQLException {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select user_key, stripe_id, start_seq, local_seq, deleted, payload
                 from mvcc_vector_local_data_v1 where tx_id = ?
@@ -583,9 +673,20 @@ final class MysqlVectorReservationStore {
         }
     }
 
-    /** 与真实 mvcc_data 插入处于同一事务，映射从意向转为已提交且序号不变。 */
-    void materialize(Connection connection, long txId, String key, boolean deleted,
-                     byte[] value, long commitTs) throws SQLException {
+    /**
+     * The same transaction as the actual mvcc_data inserted, the map is changed from intent to commit and the serial number remains unchanged.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param key business key
+     * @param deleted deleted
+     * @param value value to write
+     * @param commitTs durable commit timestamp
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    void materialize(final Connection connection, final long txId, final String key, final boolean deleted,
+                     final byte[] value, final long commitTs) throws SQLException {
         byte[] encodedKey = key.getBytes(StandardCharsets.UTF_8);
         try (PreparedStatement existing = connection.prepareStatement("""
                 select reserved_seq, commit_ts, deleted, payload
@@ -652,8 +753,15 @@ final class MysqlVectorReservationStore {
         }
     }
 
-    /** 中心 ABORTED 后产品回滚标记负责阻止重放，分条预留行同事务清除。 */
-    void abort(Connection connection, long txId, String key) throws SQLException {
+    /**
+     * The center ABORTED post-product rollback tag is responsible for stopping replay, with sub-sections reserved for the same transaction clearance.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param key business key
+     * @throws SQLException if the operation cannot complete
+     */
+    void abort(final Connection connection, final long txId, final String key) throws SQLException {
         try (PreparedStatement delete = connection.prepareStatement("""
                 delete from mvcc_vector_intent_reservation_v1 where user_key = ? and tx_id = ?
                 """)) {
@@ -663,8 +771,17 @@ final class MysqlVectorReservationStore {
         }
     }
 
-    /** 响应丢失后要求物化映射与真实已提交版本同在，缺失则拒绝确认。 */
-    void requireCommitted(Connection connection, long txId, String key, long commitTs) throws SQLException {
+    /**
+     * Responding to a request for materialization mapping after loss is with the real commit version and missing is denied confirmation.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param key business key
+     * @param commitTs durable commit timestamp
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    void requireCommitted(final Connection connection, final long txId, final String key, final long commitTs) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select commit_ts from mvcc_vector_committed_v1
                 where user_key = ? and tx_id = ?
@@ -680,8 +797,15 @@ final class MysqlVectorReservationStore {
         }
     }
 
-    /** 恢复器按事务和键读取已经从意向转入版本链的持久序号。 */
-    Optional<CommittedReservation> findCommitted(long txId, String key) throws SQLException {
+    /**
+     * Recovery press transaction and key to read the durable serial number that has been transferred from intent to version chain.
+     *
+     * @param txId transaction identifier
+     * @param key business key
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    Optional<CommittedReservation> findCommitted(final long txId, final String key) throws SQLException {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select stripe_id, start_seq, reserved_seq, commit_ts
                 from mvcc_vector_committed_v1 where user_key = ? and tx_id = ?
@@ -699,8 +823,15 @@ final class MysqlVectorReservationStore {
         }
     }
 
-    /** 重启或响应丢失后按真实物理行复核保留序号。 */
-    Optional<Reservation> find(long txId, String key) throws SQLException {
+    /**
+     * Reactivate or respond to the loss and review the retention number by real physical line.
+     *
+     * @param txId transaction identifier
+     * @param key business key
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    Optional<Reservation> find(final long txId, final String key) throws SQLException {
         byte[] encodedKey = key.getBytes(StandardCharsets.UTF_8);
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select stripe_id, start_seq, reserved_seq
@@ -715,8 +846,15 @@ final class MysqlVectorReservationStore {
         }
     }
 
-    /** 查询当前持久分条上界，供集成测试核对重放没有再次取号。 */
-    long sequence(int stripe) throws SQLException {
+    /**
+     * Querys the current durable subdivision upper bounds for integration test check replay without renumbering.
+     *
+     * @param stripe stripe
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    long sequence(final int stripe) throws SQLException {
         if (stripe < 0 || stripe >= stripes) {
             throw new IllegalArgumentException("invalid vector stripe");
         }
@@ -729,6 +867,59 @@ final class MysqlVectorReservationStore {
                     throw new SQLException("vector stripe state is missing");
                 }
                 return row.getLong(1);
+            }
+        }
+    }
+
+    /**
+     * The reservation identity exposed to the centre does not contain variable payload references.
+     *
+     * @param txId transaction identifier
+     * @param key business key
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @param reservedSequence reserved sequence
+     */
+    record Reservation(long txId, String key, int stripe, long startSequence, long reservedSequence) {
+
+        /**
+         * Each reservation must have a serial number later than the initial subsection snapshot.
+         *
+         * @param txId transaction identifier
+         * @param key business key
+         * @param stripe stripe
+         * @param startSequence start sequence
+         * @param reservedSequence reserved sequence
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        Reservation {
+            Objects.requireNonNull(key, "key");
+            if (txId == 0 || key.isBlank() || stripe < 0 || startSequence < 0
+                    || reservedSequence <= startSequence) {
+                throw new IllegalArgumentException("invalid vector prewrite reservation");
+            }
+        }
+    }
+
+    /**
+     * The materialization map follows the prewrite serial number and the centre decision time is used only for cross-shard Visibility judgement.
+     *
+     * @param reservation reservation
+     * @param commitTs durable commit timestamp
+     */
+    record CommittedReservation(Reservation reservation, long commitTs) {
+
+        /**
+         * Cross-shard already commit version must have positive decision time.
+         *
+         * @param reservation reservation
+         * @param commitTs durable commit timestamp
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        CommittedReservation {
+            Objects.requireNonNull(reservation, "reservation");
+            if (commitTs < 1) {
+                throw new IllegalArgumentException("invalid vector committed reservation");
             }
         }
     }

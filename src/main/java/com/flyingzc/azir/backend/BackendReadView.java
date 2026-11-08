@@ -1,36 +1,109 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.backend;
 
 import com.flyingzc.azir.storage.KeyRange;
 import java.util.List;
 import java.util.Optional;
 
-/** 固定语句读边界，点读、全部分片及分页重扫共用同一实例。 */
+/**
+ * A fixed statement reads the boundary and reads, all shard s and page breaks repeat the same example.
+ */
 public interface BackendReadView extends AutoCloseable {
-    /** 原始候选行；空值表示此快照不可见，仍可用于输入预算计费。 */
+
+    /**
+     * Returns the current statement to a fixed read border.
+     *
+     * @return the operation result
+     */
+    long readTs();
+
+    /**
+     * Reads the specified shard key, which contains this transaction write set overwrite.
+     *
+     * @param shard logical shard identifier
+     * @param key business key
+     * @return the operation result
+     */
+    Optional<byte[]> get(String shard, String key);
+
+    /**
+     * Use the same border to read a page containing an invisible cursor position.
+     *
+     * @param shard logical shard identifier
+     * @param range range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    Page scanPage(String shard, KeyRange range, String afterKeyExclusive, int limit);
+
+    /**
+     * Release native read-only statement resources without committing the business write transaction.
+     */
+    @Override
+    void close();
+
+    /**
+     * Original candidate line; empty value indicates this snapshot is invisible and can still be used to enter the budget billing.
+     *
+     * @param key business key
+     * @param value value to write
+     */
     record Row(String key, byte[] value) {
-        /** 防止调用方改动返回内容。 */
+
+        /**
+         * Prevents the caller from changing the content to return.
+         *
+         * @param key business key
+         * @param value value to write
+         */
         public Row {
             java.util.Objects.requireNonNull(key, "key");
             value = value == null ? null : value.clone();
         }
-        /** 返回独立值副本。 */
+
+        /**
+         * Returns a standalone value of replica.
+         *
+         * @return the operation result
+         */
         @Override
-        public byte[] value() { return value == null ? null : value.clone(); }
+        public byte[] value() {
+            return value == null ? null : value.clone();
+        }
     }
 
-    /** 有界原始键页，nextKey 是排他游标，空值表示该范围结束。 */
+    /**
+     * Bounded Original Key Page, nextKey is exclusive cursor, empty values indicate the end of this range.
+     *
+     * @param rows rows
+     * @param nextKey next key
+     */
     record Page(List<Row> rows, String nextKey) {
-        /** 固定页中候选集合。 */
-        public Page { rows = List.copyOf(rows); }
-    }
 
-    /** 返回当前语句固定读边界。 */
-    long readTs();
-    /** 读取指定分片业务键，包含本事务写集覆盖。 */
-    Optional<byte[]> get(String shard, String key);
-    /** 使用同一边界读取一页，包含不可见候选的游标位置。 */
-    Page scanPage(String shard, KeyRange range, String afterKeyExclusive, int limit);
-    /** 释放原生只读语句资源，不能提交业务写事务。 */
-    @Override
-    void close();
+        /**
+         * Fixes the list of candidates on a page.
+         *
+         * @param rows rows
+         * @param nextKey next key
+         */
+        public Page {
+            rows = List.copyOf(rows);
+        }
+    }
 }

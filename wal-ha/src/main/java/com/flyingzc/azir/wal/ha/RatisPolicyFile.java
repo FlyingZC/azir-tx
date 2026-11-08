@@ -1,59 +1,178 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal.ha;
 
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.file.*;
+
 import java.util.Arrays;
 import java.util.UUID;
 
-/** 控制策略的统一持久发布，既有正确文件也须重新同步，不能以存在冒充上次同步成功。 */
+/**
+ * The unified durable control policy is issued with both the correct document and re-synchronisation, which cannot be used to impersonate the last sync success.
+ */
 final class RatisPolicyFile {
-    /** 仅允许固定协议名字及其私有暂存前缀，不接收业务路径。 */
-    enum Kind {
-        HEALTH("HEALTH_POLICY", ".health-"), SNAPSHOT("SNAPSHOT_POLICY", ".snapshot-policy-"), GC("GC_POLICY", ".gc-policy-"), AUTHENTICATED("AUTHENTICATED", ".authenticated-");
-        final String file, scratch;
-        /** 文件名与半写暂存属于同一受控策略。 */
-        Kind(String file, String scratch) { this.file = file; this.scratch = scratch; }
-    }
-    /** 包内 I/O 注入可让真实操作前后报错，正式入口只使用真实文件系统实现。 */
-    interface Io {
-        /** 部分写入也不能产生可用正式记录。 */
-        default void write(FileChannel channel, byte[] bytes) throws IOException { RatisGenerationRecord.write(channel, ByteBuffer.wrap(bytes)); }
-        /** 新文件与既有正确文件采用相同的持久确认。 */
-        default void forceFile(FileChannel channel) throws IOException { channel.force(true); }
-        /** 不支持原子移动时直接失败，不能降级为部分覆盖。 */
-        default void move(Path source, Path target) throws IOException { Files.move(source, target, StandardCopyOption.ATOMIC_MOVE); }
-        /** 记录名与暂存清理都需要目录持久确认。 */
-        default void forceDirectory(Path root) throws IOException { RatisGenerationRecord.forceDirectory(root); }
-    }
-    /** 正式装配不使用任何注入或全局可变故障开关。 */
-    static final Io REAL = new Io() { };
-    /** 工具不允许实例化。 */
-    private RatisPolicyFile() { }
 
-    /** 节点独占目录锁内调用，任何操作失败都传播，后续重试保留并重新确认完整结果。 */
-    static void publish(Path root, Kind kind, byte[] bytes, Io io) throws IOException {
-        if (bytes.length < 1 || bytes.length > 512) { throw new IOException("policy encoding exceeds budget"); }
+    /**
+     * The formal assembly does not use any injection or global variable failure switches.
+     */
+    static final Io REAL = new Io() {
+    };
+
+    /**
+     * Prevent instantiation of this utility class.
+     */
+    private RatisPolicyFile() {
+    }
+
+    /**
+     * Node has a unique directory lock to call, and any operation failed is spread, followed by retry to keep and reconfirm the full result.
+     *
+     * @param root root
+     * @param kind kind
+     * @param bytes bytes
+     * @param io io
+     * @throws IOException if the operation cannot complete
+     */
+    static void publish(final Path root, final Kind kind, final byte[] bytes, final Io io) throws IOException {
+        if (bytes.length < 1 || bytes.length > 512) {
+            throw new IOException("policy encoding exceeds budget");
+        }
         Path target = root.resolve(kind.file);
         if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
             verify(target, bytes);
-            try (var file = FileChannel.open(target, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) { io.forceFile(file); }
-            io.forceDirectory(root); return;
+            try (var file = FileChannel.open(target, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                io.forceFile(file);
+            }
+            io.forceDirectory(root);
+            return;
         }
         int scanned = 0, removed = 0;
-        try (var entries = Files.list(root)) { var iterator = entries.iterator(); while (iterator.hasNext()) {
-            if (++scanned > 4096) { throw new IOException("policy staging scan budget exhausted"); } Path path = iterator.next();
-            if (!path.getFileName().toString().matches(java.util.regex.Pattern.quote(kind.scratch) + "[a-f0-9-]{36}")) { continue; }
-            if (++removed > 128 || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) { throw new IOException("policy staging deletion budget exhausted or invalid"); }
-            Files.delete(path); io.forceDirectory(root);
-        } }
+        try (var entries = Files.list(root)) {
+            var iterator = entries.iterator();
+            while (iterator.hasNext()) {
+                if (++scanned > 4096) {
+                    throw new IOException("policy staging scan budget exhausted");
+                }
+                Path path = iterator.next();
+                if (!path.getFileName().toString().matches(java.util.regex.Pattern.quote(kind.scratch) + "[a-f0-9-]{36}")) {
+                    continue;
+                }
+                if (++removed > 128 || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new IOException("policy staging deletion budget exhausted or invalid");
+                }
+                Files.delete(path);
+                io.forceDirectory(root);
+            }
+        }
         Path temporary = root.resolve(kind.scratch + UUID.randomUUID());
-        try (var file = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) { io.write(file, bytes); io.forceFile(file); }
-        io.move(temporary, target); io.forceDirectory(root);
+        try (var file = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+            io.write(file, bytes);
+            io.forceFile(file);
+        }
+        io.move(temporary, target);
+        io.forceDirectory(root);
     }
-    /** 已存在文件必须字节完全一致，损坏、外来配置、链接和特殊文件都不能被覆盖。 */
-    private static void verify(Path target, byte[] bytes) throws IOException {
-        if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || Files.size(target) != bytes.length || !Arrays.equals(Files.readAllBytes(target), bytes)) { throw new IOException("existing policy differs from requested immutable record"); }
+
+    /**
+     * Documents already in existence must be fully byte consistent and no damage, external configuration, links or special documents can be covered.
+     *
+     * @param target target
+     * @param bytes bytes
+     * @throws IOException if the operation cannot complete
+     */
+    private static void verify(final Path target, final byte[] bytes) throws IOException {
+        if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || Files.size(target) != bytes.length || !Arrays.equals(Files.readAllBytes(target), bytes)) {
+            throw new IOException("existing policy differs from requested immutable record");
+        }
+    }
+
+    /**
+     * Only fixed protocol names and their private suspense prefixes are allowed, and no business path is accepted.
+     */
+    enum Kind {
+
+        HEALTH("HEALTH_POLICY", ".health-"), SNAPSHOT("SNAPSHOT_POLICY", ".snapshot-policy-"), GC("GC_POLICY", ".gc-policy-"), AUTHENTICATED("AUTHENTICATED", ".authenticated-");
+
+        final String file, scratch;
+
+        /**
+         * File name is the same controlled policy as half-written temporary storage.
+         *
+         * @param file file
+         * @param scratch scratch
+         */
+        Kind(final String file, final String scratch) {
+            this.file = file;
+            this.scratch = scratch;
+        }
+    }
+
+    /**
+     * The I/O injection in the package allows real operations to report errors, and the official entry is done using a real file system only.
+     */
+    interface Io {
+
+        /**
+         * A partial write must never produce a usable final record.
+         *
+         * @param channel channel
+         * @param bytes bytes
+         * @throws IOException if the operation cannot complete
+         */
+        default void write(final FileChannel channel, final byte[] bytes) throws IOException {
+            RatisGenerationRecord.write(channel, ByteBuffer.wrap(bytes));
+        }
+
+        /**
+         * The new document uses the same durable confirmation as the existing correct document.
+         *
+         * @param channel channel
+         * @throws IOException if the operation cannot complete
+         */
+        default void forceFile(final FileChannel channel) throws IOException {
+            channel.force(true);
+        }
+
+        /**
+         * Directly fails when atomic moves are not supported and cannot be downgraded to partially overwrite.
+         *
+         * @param source database connection source
+         * @param target target
+         * @throws IOException if the operation cannot complete
+         */
+        default void move(final Path source, final Path target) throws IOException {
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+        }
+
+        /**
+         * Recording names and temporary clean-up require directory durable confirmation.
+         *
+         * @param root root
+         * @throws IOException if the operation cannot complete
+         */
+        default void forceDirectory(final Path root) throws IOException {
+            RatisGenerationRecord.forceDirectory(root);
+        }
     }
 }

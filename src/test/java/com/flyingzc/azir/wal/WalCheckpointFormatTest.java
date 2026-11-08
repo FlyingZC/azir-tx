@@ -1,4 +1,23 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import org.junit.jupiter.api.Assertions;
 
 import org.junit.jupiter.api.Test;
 import java.io.IOException;
@@ -6,31 +25,51 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
-import static org.junit.jupiter.api.Assertions.*;
 
-/** 新镜像必须阻止旧程序缺失冷冲突栅栏后继续运行，同时保留旧镜像升级读取能力。 */
+/**
+ * The new mirror must stop the old application from missing cold conflict fence and continue to operate after that, while retaining its ability to upgrade reading.
+ */
 class WalCheckpointFormatTest {
-    /** 编码版本升到二，版本一仅作为旧镜像读取，重新编码后必须写出新版本。 */
-    @Test void newImagesRejectLegacyReaderButLegacyImagesRemainReadable() throws Exception {
-        var state = image(); byte[] current = state.encode();
-        assertEquals(2, ByteBuffer.wrap(current).getInt(4));
-        byte[] legacy = current.clone(); ByteBuffer.wrap(legacy).putInt(4, 1);
+
+    /**
+     * Encoding version to Two, version One is only read as an old mirror and must be recoded with a new version.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void newImagesRejectLegacyReaderButLegacyImagesRemainReadable() throws Exception {
+        var state = image();
+        byte[] current = state.encode();
+        Assertions.assertEquals(2, ByteBuffer.wrap(current).getInt(4));
+        byte[] legacy = current.clone();
+        ByteBuffer.wrap(legacy).putInt(4, 1);
         var restored = WalCheckpointState.decode(legacy);
-        assertEquals(state.engineId(), restored.engineId()); assertEquals(state.versions(), restored.versions());
-        assertEquals(2, ByteBuffer.wrap(restored.encode()).getInt(4));
-        // 上一版解码器要求格式一，不能把新镜像误当成无冲突历史的空引擎。
-        assertNotEquals(1, ByteBuffer.wrap(current).getInt(4));
+        Assertions.assertEquals(state.engineId(), restored.engineId());
+        Assertions.assertEquals(state.versions(), restored.versions());
+        Assertions.assertEquals(2, ByteBuffer.wrap(restored.encode()).getInt(4));
+        // The previous version of the decoder required format I, and no new mirror could be misconceived as an empty engine for a conflict-free history.
+        Assertions.assertNotEquals(1, ByteBuffer.wrap(current).getInt(4));
     }
 
-    /** 未知格式不得猜测兼容，不能在未来镜像上丢失恢复字段后继续运行。 */
-    @Test void unknownImageVersionsFailClosed() throws Exception {
+    /**
+     * Unknown format cannot be guessed compatible and can not continue after the recovery field is lost on a future mirror.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void unknownImageVersionsFailClosed() throws Exception {
         for (int format : new int[]{0, 3, Integer.MAX_VALUE}) {
-            byte[] bytes = image().encode(); ByteBuffer.wrap(bytes).putInt(4, format);
+            byte[] bytes = image().encode();
+            ByteBuffer.wrap(bytes).putInt(4, format);
             assertThrows(IOException.class, () -> WalCheckpointState.decode(bytes));
         }
     }
 
-    /** 构造带已物化旧头的最小镜像，验证旧字段仍被完整解析而非静默丢弃。 */
+    /**
+     * The smallest mirror of the constructed materialization header, and the old verify field is still fully disassembled instead of being left silent.
+     *
+     * @return the operation result
+     */
     private static WalCheckpointState image() {
         var receipt = new WalReceipt(UUID.randomUUID(), 1, "0".repeat(64));
         return new WalCheckpointState(UUID.randomUUID(), Set.of("a"), Set.of("a"), 1, 0, receipt,

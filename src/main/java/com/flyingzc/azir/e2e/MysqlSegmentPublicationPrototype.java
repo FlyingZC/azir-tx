@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -19,31 +35,61 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 隔离数据库中的分段时间槽与连续发布性能原型；仍未实现完整事务恢复和多协调者切换。 */
+/**
+ * Segregation of the segment slot in database with a continuous release performance prototype; complete transaction recovery and multi-coordinate switch is still not achieved.
+ */
 public final class MysqlSegmentPublicationPrototype {
+
     private final HikariDataSource source;
+
     private final int segmentSize;
+
     private final boolean metadataMode;
+
     private final long leaseMillis;
+
     private final String ownerId;
+
     private final AtomicLong published = new AtomicLong();
+
     private final LongAdder reserved = new LongAdder();
+
     private final LongAdder sealedSegments = new LongAdder();
+
     private final LongAdder sealedSlots = new LongAdder();
+
     private final AtomicInteger deciding = new AtomicInteger();
+
     private long next = 1;
+
     private long end;
+
     private boolean closing;
 
-    /** 保存独立数据库资源与固定分段大小。 */
-    private MysqlSegmentPublicationPrototype(HikariDataSource source, int segmentSize,
-                                             boolean metadataMode, long leaseMillis) {
+    /**
+     * Saves an independent database resource with a fixed segment size.
+     *
+     * @param source database connection source
+     * @param segmentSize segment size
+     * @param metadataMode metadata mode
+     * @param leaseMillis lease millis
+     */
+    private MysqlSegmentPublicationPrototype(final HikariDataSource source, final int segmentSize,
+                                             final boolean metadataMode, final long leaseMillis) {
         this(source, segmentSize, metadataMode, leaseMillis, UUID.randomUUID().toString());
     }
 
-    /** 故障探针可携带旧 owner 身份验证过期和封存后的 fencing。 */
-    private MysqlSegmentPublicationPrototype(HikariDataSource source, int segmentSize,
-                                             boolean metadataMode, long leaseMillis, String ownerId) {
+    /**
+     * Failure probe can carry old owner identity verify expired and sealed fencing.
+     *
+     * @param source database connection source
+     * @param segmentSize segment size
+     * @param metadataMode metadata mode
+     * @param leaseMillis lease millis
+     * @param ownerId owner id
+     */
+    private MysqlSegmentPublicationPrototype(final HikariDataSource source, final int segmentSize,
+                                             final boolean metadataMode, final long leaseMillis, final String ownerId) {
         this.source = source;
         this.segmentSize = segmentSize;
         this.metadataMode = metadataMode;
@@ -51,8 +97,14 @@ public final class MysqlSegmentPublicationPrototype {
         this.ownerId = ownerId;
     }
 
-    /** 在显式隔离重置开关下运行原型，输出已发布确认吞吐与尾延迟。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Runs the prototype under a visible segregation reset switch, and the output has been published to confirm throughput and tail delay.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         boolean tailProbe = Boolean.parseBoolean(System.getenv().getOrDefault("AZIR_TX_PROTO_TAIL_PROBE", "false"));
         if (!Boolean.parseBoolean(System.getenv().getOrDefault("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("prototype requires AZIR_TX_RESET=true");
@@ -69,8 +121,9 @@ public final class MysqlSegmentPublicationPrototype {
         }
         boolean metadataMode = Boolean.parseBoolean(System.getenv().getOrDefault("AZIR_TX_PROTO_METADATA", "false"));
         String url = System.getenv().getOrDefault("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control");
-        try (var source = (HikariDataSource) MysqlDataSourceFactory.create(url, System.getenv().getOrDefault("AZIR_TX_USERNAME", "root"),
-                System.getenv().getOrDefault("AZIR_TX_PASSWORD", "root"))) {
+        try (
+                var source = (HikariDataSource) MysqlDataSourceFactory.create(url, System.getenv().getOrDefault("AZIR_TX_USERNAME", "root"),
+                        System.getenv().getOrDefault("AZIR_TX_PASSWORD", "root"))) {
             var benchmark = new MysqlSegmentPublicationPrototype(source, segment, metadataMode, leaseMillis);
             if (tailProbe) {
                 benchmark.probeTail();
@@ -81,7 +134,11 @@ public final class MysqlSegmentPublicationPrototype {
         }
     }
 
-    /** 只重置专用原型表，不触及实际事务账本。 */
+    /**
+     * Reset only the special prototype table and do not touch the actual transaction account book.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     private void initialize() throws Exception {
         try (Connection connection = source.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("drop table if exists bench_segment_slot");
@@ -89,14 +146,22 @@ public final class MysqlSegmentPublicationPrototype {
             statement.execute("drop table if exists bench_segment_owner");
             statement.execute("drop table if exists bench_segment_state");
             statement.execute("create table if not exists bench_segment_state (id tinyint primary key, next_ts bigint not null, published_ts bigint not null) engine=InnoDB");
-            statement.execute("create table if not exists bench_segment_slot (commit_ts bigint primary key, tx_id bigint unique, status varchar(16) not null, expires_at bigint not null) engine=InnoDB");
+            statement.execute(
+                    "create table if not exists bench_segment_slot (commit_ts bigint primary key, tx_id bigint unique, status varchar(16) not null, expires_at bigint not null) engine=InnoDB");
             statement.execute("create table if not exists bench_segment_txn (tx_id bigint primary key, status varchar(16) not null, commit_ts bigint null) engine=InnoDB");
-            statement.execute("create table if not exists bench_segment_owner (segment_start bigint primary key, segment_end bigint not null, owner_id varchar(36) not null, generation bigint not null, expires_at bigint not null, status varchar(16) not null, index bench_owner_expiry(status,expires_at,segment_start), index bench_owner_heartbeat(owner_id,status,segment_end)) engine=InnoDB");
+            statement.execute(
+                    "create table if not exists bench_segment_owner (segment_start bigint primary key, segment_end bigint not null, owner_id varchar(36) not null, generation bigint not null, expires_at bigint not null, status varchar(16) not null, index bench_owner_expiry(status,expires_at,segment_start), index bench_owner_heartbeat(owner_id,status,segment_end)) engine=InnoDB");
             statement.executeUpdate("insert into bench_segment_state(id,next_ts,published_ts) values (1,0,0) on duplicate key update next_ts=0,published_ts=0");
         }
     }
 
-    /** 仅当上段耗尽时锁一次全局状态行，并持久创建全部占位槽。 */
+    /**
+     * Locks the global status line once only when the previous part is exhausted, and durable creates all slots.
+     *
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
     private synchronized long allocate() throws Exception {
         if (closing) {
             return -1;
@@ -107,17 +172,20 @@ public final class MysqlSegmentPublicationPrototype {
         }
         try (Connection connection = source.getConnection()) {
             connection.setAutoCommit(false);
-            try (PreparedStatement state = connection.prepareStatement("select next_ts from bench_segment_state where id=1 for update");
-                 ResultSet row = state.executeQuery()) {
+            try (
+                    PreparedStatement state = connection.prepareStatement("select next_ts from bench_segment_state where id=1 for update");
+                    ResultSet row = state.executeQuery()) {
                 if (!row.next()) {
                     throw new IllegalStateException("segment state missing");
                 }
                 long lower = row.getLong(1);
-                try (PreparedStatement update = connection.prepareStatement("update bench_segment_state set next_ts=? where id=1");
-                     PreparedStatement insert = connection.prepareStatement("insert into bench_segment_slot(commit_ts,tx_id,status,expires_at) values (?,null,'PENDING',?)");
-                     PreparedStatement owner = connection.prepareStatement("insert into bench_segment_owner(segment_start,segment_end,owner_id,generation,expires_at,status) values (?,?,?,1,?,'ACTIVE')");
-                     PreparedStatement clock = connection.prepareStatement("select cast(unix_timestamp(current_timestamp(3))*1000 as signed)");
-                     ResultSet now = clock.executeQuery()) {
+                try (
+                        PreparedStatement update = connection.prepareStatement("update bench_segment_state set next_ts=? where id=1");
+                        PreparedStatement insert = connection.prepareStatement("insert into bench_segment_slot(commit_ts,tx_id,status,expires_at) values (?,null,'PENDING',?)");
+                        PreparedStatement owner =
+                                connection.prepareStatement("insert into bench_segment_owner(segment_start,segment_end,owner_id,generation,expires_at,status) values (?,?,?,1,?,'ACTIVE')");
+                        PreparedStatement clock = connection.prepareStatement("select cast(unix_timestamp(current_timestamp(3))*1000 as signed)");
+                        ResultSet now = clock.executeQuery()) {
                     now.next();
                     long deadline = now.getLong(1) + leaseMillis;
                     update.setLong(1, lower + segmentSize);
@@ -140,24 +208,36 @@ public final class MysqlSegmentPublicationPrototype {
                 reserved.add(segmentSize);
                 deciding.incrementAndGet();
                 return lower + 1;
-            } catch (Exception failure) {
+            } catch (final Exception failure) {
                 connection.rollback();
                 throw failure;
             }
         }
     }
 
-    /** 模拟预写前已经登记的中心事务记录。 */
-    private void createMetadata(long commitTs) throws Exception {
-        try (Connection connection = source.getConnection();
-             PreparedStatement insert = connection.prepareStatement("insert into bench_segment_txn(tx_id,status,commit_ts) values (?,'ACTIVE',null)")) {
+    /**
+     * Simulates a centre transaction record that was registered before prewrite.
+     *
+     * @param commitTs durable commit timestamp
+     * @throws Exception if the operation cannot complete
+     */
+    private void createMetadata(final long commitTs) throws Exception {
+        try (
+                Connection connection = source.getConnection();
+                PreparedStatement insert = connection.prepareStatement("insert into bench_segment_txn(tx_id,status,commit_ts) values (?,'ACTIVE',null)")) {
             insert.setLong(1, commitTs);
             insert.executeUpdate();
         }
     }
 
-    /** 决议先锁持久 owner 代数，再与中心元数据同事务提交单槽终态。 */
-    private void decide(long commitTs) throws Exception {
+    /**
+     * Decision Locks the durable own algebra first, then corresponds to the centre metadata with the transaction commit slot terminal state.
+     *
+     * @param commitTs durable commit timestamp
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private void decide(final long commitTs) throws Exception {
         try (Connection connection = source.getConnection()) {
             connection.setAutoCommit(false);
             try {
@@ -173,8 +253,9 @@ public final class MysqlSegmentPublicationPrototype {
                         expiresAt = row.getLong("expires_at");
                     }
                 }
-                try (PreparedStatement clock = connection.prepareStatement("select cast(unix_timestamp(current_timestamp(3))*1000 as signed)");
-                     ResultSet now = clock.executeQuery()) {
+                try (
+                        PreparedStatement clock = connection.prepareStatement("select cast(unix_timestamp(current_timestamp(3))*1000 as signed)");
+                        ResultSet now = clock.executeQuery()) {
                     now.next();
                     if (expiresAt <= now.getLong(1)) {
                         throw new IllegalStateException("segment owner lease expired: " + segmentStart);
@@ -197,19 +278,24 @@ public final class MysqlSegmentPublicationPrototype {
                     }
                 }
                 connection.commit();
-            } catch (Exception failure) {
+            } catch (final Exception failure) {
                 connection.rollback();
                 throw failure;
             }
         }
     }
 
-    /** 单发布器只越过连续终态前缀，并将新水位持久写回控制行。 */
+    /**
+     * Single publisher only crosses the continuous terminal state prefix and writes new watermark durable back to the control line.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     private void publish() throws Exception {
         try (Connection connection = source.getConnection()) {
             connection.setAutoCommit(false);
-            try (PreparedStatement state = connection.prepareStatement("select published_ts from bench_segment_state where id=1 for update");
-                 ResultSet row = state.executeQuery()) {
+            try (
+                    PreparedStatement state = connection.prepareStatement("select published_ts from bench_segment_state where id=1 for update");
+                    ResultSet row = state.executeQuery()) {
                 row.next();
                 long current = row.getLong(1);
                 long cursor = current;
@@ -232,15 +318,22 @@ public final class MysqlSegmentPublicationPrototype {
                 }
                 connection.commit();
                 published.set(cursor);
-            } catch (Exception failure) {
+            } catch (final Exception failure) {
                 connection.rollback();
                 throw failure;
             }
         }
     }
 
-    /** 租约过期后先排他 fencing 分段，再原子封存未决尾槽。 */
-    private int sealExpiredSegment(long segmentStart) throws Exception {
+    /**
+     * Lease Expires before segregating fencing sub-section, and then atomic seal pending tailings.
+     *
+     * @param segmentStart segment start
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private int sealExpiredSegment(final long segmentStart) throws Exception {
         try (Connection connection = source.getConnection()) {
             connection.setAutoCommit(false);
             try {
@@ -256,15 +349,17 @@ public final class MysqlSegmentPublicationPrototype {
                         expiresAt = row.getLong("expires_at");
                     }
                 }
-                try (PreparedStatement clock = connection.prepareStatement("select cast(unix_timestamp(current_timestamp(3))*1000 as signed)");
-                     ResultSet now = clock.executeQuery()) {
+                try (
+                        PreparedStatement clock = connection.prepareStatement("select cast(unix_timestamp(current_timestamp(3))*1000 as signed)");
+                        ResultSet now = clock.executeQuery()) {
                     now.next();
                     if (expiresAt > now.getLong(1)) {
                         throw new IllegalStateException("segment owner lease is still active: " + segmentStart);
                     }
                 }
-                try (PreparedStatement fence = connection.prepareStatement("update bench_segment_owner set status='SEALED',generation=generation+1 where segment_start=?");
-                     PreparedStatement abort = connection.prepareStatement("update bench_segment_slot set status='ABORTED' where commit_ts>=? and commit_ts<=? and status='PENDING'")) {
+                try (
+                        PreparedStatement fence = connection.prepareStatement("update bench_segment_owner set status='SEALED',generation=generation+1 where segment_start=?");
+                        PreparedStatement abort = connection.prepareStatement("update bench_segment_slot set status='ABORTED' where commit_ts>=? and commit_ts<=? and status='PENDING'")) {
                     fence.setLong(1, segmentStart);
                     fence.executeUpdate();
                     abort.setLong(1, segmentStart);
@@ -273,14 +368,20 @@ public final class MysqlSegmentPublicationPrototype {
                     connection.commit();
                     return sealed;
                 }
-            } catch (Exception failure) {
+            } catch (final Exception failure) {
                 connection.rollback();
                 throw failure;
             }
         }
     }
 
-    /** 正常停机先阻止新分配并等在途决议结束，再主动封存当前分段尾槽。 */
+    /**
+     * The normal stoppage prevents new distributions and waits for the end of the journey decision, before actively sealing the current slot.
+     *
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
     private synchronized int sealOwnedTail() throws Exception {
         closing = true;
         while (deciding.get() > 0) {
@@ -305,8 +406,9 @@ public final class MysqlSegmentPublicationPrototype {
                         }
                     }
                 }
-                try (PreparedStatement fence = connection.prepareStatement("update bench_segment_owner set status='SEALED',generation=generation+1 where segment_start=?");
-                     PreparedStatement abort = connection.prepareStatement("update bench_segment_slot set status='ABORTED' where commit_ts>=? and commit_ts<=? and status='PENDING'")) {
+                try (
+                        PreparedStatement fence = connection.prepareStatement("update bench_segment_owner set status='SEALED',generation=generation+1 where segment_start=?");
+                        PreparedStatement abort = connection.prepareStatement("update bench_segment_slot set status='ABORTED' where commit_ts>=? and commit_ts<=? and status='PENDING'")) {
                     fence.setLong(1, segmentStart);
                     fence.executeUpdate();
                     abort.setLong(1, segmentStart);
@@ -315,18 +417,25 @@ public final class MysqlSegmentPublicationPrototype {
                     connection.commit();
                     return sealed;
                 }
-            } catch (Exception failure) {
+            } catch (final Exception failure) {
                 connection.rollback();
                 throw failure;
             }
         }
     }
 
-    /** 后台以有界批次接管到期分段，关闭未用槽而不阻塞仍持有效租约的 owner。 */
-    private void recoverExpiredSegments(int limit) throws Exception {
+    /**
+     * Background closes the unused slot without blocking an owner that still holds valid lease with bounded batch.
+     *
+     * @param limit maximum number of items
+     * @throws Exception if the operation cannot complete
+     */
+    private void recoverExpiredSegments(final int limit) throws Exception {
         List<Long> expired = new ArrayList<>(limit);
-        try (Connection connection = source.getConnection();
-             PreparedStatement query = connection.prepareStatement("select segment_start from bench_segment_owner where status='ACTIVE' and expires_at<=cast(unix_timestamp(current_timestamp(3))*1000 as signed) order by expires_at,segment_start limit ?")) {
+        try (
+                Connection connection = source.getConnection();
+                PreparedStatement query = connection.prepareStatement(
+                        "select segment_start from bench_segment_owner where status='ACTIVE' and expires_at<=cast(unix_timestamp(current_timestamp(3))*1000 as signed) order by expires_at,segment_start limit ?")) {
             query.setInt(1, limit);
             try (ResultSet rows = query.executeQuery()) {
                 while (rows.next()) {
@@ -338,21 +447,27 @@ public final class MysqlSegmentPublicationPrototype {
             try {
                 sealedSlots.add(sealExpiredSegment(segmentStart));
                 sealedSegments.increment();
-            } catch (IllegalStateException ignored) {
-                // 其他接管者可能已完成 fencing，本轮下一次扫描会跳过终态分段。
+            } catch (final IllegalStateException ignored) {
+                // Other receivers may have completed fencing and the next scan in this round will skip terminal state.
             }
         }
     }
 
-    /** 心跳只续仍未越过发布水位的本 owner 分段，失联 owner 不再获得续期。 */
-    private void renewUnpublishedSegments(long publishedTs) throws Exception {
-        try (Connection connection = source.getConnection();
-             PreparedStatement renew = connection.prepareStatement("""
-                     update bench_segment_owner
-                     set expires_at = cast(unix_timestamp(current_timestamp(3))*1000 as signed) + ?
-                     where owner_id = ? and status = 'ACTIVE' and segment_end > ?
-                       and expires_at > cast(unix_timestamp(current_timestamp(3))*1000 as signed)
-                     """)) {
+    /**
+     * The heart beat has not been extended beyond the release of this owner sub-section watermark, and is not renewed.
+     *
+     * @param publishedTs published ts
+     * @throws Exception if the operation cannot complete
+     */
+    private void renewUnpublishedSegments(final long publishedTs) throws Exception {
+        try (
+                Connection connection = source.getConnection();
+                PreparedStatement renew = connection.prepareStatement("""
+                        update bench_segment_owner
+                        set expires_at = cast(unix_timestamp(current_timestamp(3))*1000 as signed) + ?
+                        where owner_id = ? and status = 'ACTIVE' and segment_end > ?
+                          and expires_at > cast(unix_timestamp(current_timestamp(3))*1000 as signed)
+                        """)) {
             renew.setLong(1, leaseMillis);
             renew.setString(2, ownerId);
             renew.setLong(3, publishedTs);
@@ -360,13 +475,19 @@ public final class MysqlSegmentPublicationPrototype {
         }
     }
 
-    /** 模拟原协调器退出后新分段被旧尾槽阻塞，再由到期接管者 fencing 并发布。 */
+    /**
+     * Simulates a new segment after the original coordinator exit is blocked by the old tailing slot and then the expired receiver fencing concurrent cloth.
+     *
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
     private void probeTail() throws Exception {
         long before;
         long oldUpper;
-        try (Connection connection = source.getConnection();
-             PreparedStatement query = connection.prepareStatement("select published_ts,next_ts from bench_segment_state where id=1");
-             ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = source.getConnection();
+                PreparedStatement query = connection.prepareStatement("select published_ts,next_ts from bench_segment_state where id=1");
+                ResultSet row = query.executeQuery()) {
             row.next();
             before = row.getLong(1);
             oldUpper = row.getLong(2);
@@ -386,8 +507,10 @@ public final class MysqlSegmentPublicationPrototype {
         long oldStart = oldUpper - segmentSize + 1;
         long waitDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(leaseMillis + 2000);
         while (System.nanoTime() < waitDeadline) {
-            try (Connection connection = source.getConnection();
-                 PreparedStatement lease = connection.prepareStatement("select expires_at,cast(unix_timestamp(current_timestamp(3))*1000 as signed) from bench_segment_owner where segment_start=?")) {
+            try (
+                    Connection connection = source.getConnection();
+                    PreparedStatement lease =
+                            connection.prepareStatement("select expires_at,cast(unix_timestamp(current_timestamp(3))*1000 as signed) from bench_segment_owner where segment_start=?")) {
                 lease.setLong(1, oldStart);
                 try (ResultSet row = lease.executeQuery()) {
                     if (row.next() && row.getLong(1) <= row.getLong(2)) {
@@ -398,8 +521,9 @@ public final class MysqlSegmentPublicationPrototype {
             Thread.sleep(20);
         }
         String oldOwner;
-        try (Connection connection = source.getConnection();
-             PreparedStatement owner = connection.prepareStatement("select owner_id from bench_segment_owner where segment_start=?")) {
+        try (
+                Connection connection = source.getConnection();
+                PreparedStatement owner = connection.prepareStatement("select owner_id from bench_segment_owner where segment_start=?")) {
             owner.setLong(1, oldStart);
             try (ResultSet row = owner.executeQuery()) {
                 if (!row.next()) {
@@ -412,14 +536,14 @@ public final class MysqlSegmentPublicationPrototype {
         boolean expiredFenced = false;
         try {
             stale.decide(before + 1);
-        } catch (IllegalStateException expected) {
+        } catch (final IllegalStateException expected) {
             expiredFenced = expected.getMessage().contains("lease expired");
         }
         int sealed = sealExpiredSegment(oldStart);
         boolean sealedFenced = false;
         try {
             stale.decide(before + 1);
-        } catch (IllegalStateException expected) {
+        } catch (final IllegalStateException expected) {
             sealedFenced = expected.getMessage().contains("fenced");
         }
         publish();
@@ -430,8 +554,16 @@ public final class MysqlSegmentPublicationPrototype {
         }
     }
 
-    /** 固定并发持续提交，等待持久发布后才计入成功。 */
-    private void run(int concurrency, int durationSeconds, int coordinatorCount, boolean crashOne) throws Exception {
+    /**
+     * Fixed concurrent lasts commit and waits for the durable release to be recorded successfully.
+     *
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param coordinatorCount coordinator count
+     * @param crashOne crash one
+     * @throws Exception if the operation cannot complete
+     */
+    private void run(final int concurrency, final int durationSeconds, final int coordinatorCount, final boolean crashOne) throws Exception {
         var running = new AtomicBoolean(true);
         var crashed = new AtomicBoolean();
         var failures = new LongAdder();
@@ -450,7 +582,7 @@ public final class MysqlSegmentPublicationPrototype {
                 try {
                     publish();
                     Thread.sleep(1);
-                } catch (Exception failure) {
+                } catch (final Exception failure) {
                     firstFailure.compareAndSet(null, failure.toString());
                     failures.increment();
                     running.set(false);
@@ -462,7 +594,7 @@ public final class MysqlSegmentPublicationPrototype {
                 try {
                     recoverExpiredSegments(32);
                     Thread.sleep(100);
-                } catch (Exception failure) {
+                } catch (final Exception failure) {
                     firstFailure.compareAndSet(null, failure.toString());
                     failures.increment();
                     running.set(false);
@@ -478,7 +610,7 @@ public final class MysqlSegmentPublicationPrototype {
                         }
                     }
                     Thread.sleep(Math.max(50, leaseMillis / 3));
-                } catch (Exception failure) {
+                } catch (final Exception failure) {
                     firstFailure.compareAndSet(null, failure.toString());
                     failures.increment();
                     running.set(false);
@@ -498,7 +630,7 @@ public final class MysqlSegmentPublicationPrototype {
                     }
                     crashed.set(true);
                 }
-            } catch (InterruptedException failure) {
+            } catch (final InterruptedException failure) {
                 Thread.currentThread().interrupt();
             }
         });
@@ -515,7 +647,7 @@ public final class MysqlSegmentPublicationPrototype {
                         }
                     }
                 }
-            } catch (Exception failure) {
+            } catch (final Exception failure) {
                 firstFailure.compareAndSet(null, failure.toString());
                 failures.increment();
                 running.set(false);
@@ -566,13 +698,13 @@ public final class MysqlSegmentPublicationPrototype {
                                 }
                                 committed.increment();
                                 latencies.add(System.nanoTime() - begun);
-                            } catch (Exception failure) {
+                            } catch (final Exception failure) {
                                 firstFailure.compareAndSet(null, failure.toString());
                                 failures.increment();
                                 running.set(false);
                             }
                         }
-                    } catch (InterruptedException failure) {
+                    } catch (final InterruptedException failure) {
                         Thread.currentThread().interrupt();
                     }
                 });
@@ -597,7 +729,8 @@ public final class MysqlSegmentPublicationPrototype {
         double p999 = sorted.length == 0 ? Double.NaN : sorted[Math.max(0, (int) Math.ceil(sorted.length * 0.999) - 1)] / 1_000_000.0;
         double maximum = sorted.length == 0 ? Double.NaN : sorted[sorted.length - 1] / 1_000_000.0;
         long reservedSlots = coordinators.stream().mapToLong(value -> value.reserved.sum()).sum();
-        System.out.printf("SEGMENT_PROTOTYPE concurrency=%d coordinators=%d crashed_one=%s duration_s=%.2f segment=%d metadata=%s committed=%d failures=%d abandoned=%d tps=%.2f p99_ms=%.2f p999_ms=%.2f max_ms=%.2f reserved=%d published=%d sealed_segments=%d sealed_slots=%d graceful_slots=%d first_failure=%s%n",
+        System.out.printf(
+                "SEGMENT_PROTOTYPE concurrency=%d coordinators=%d crashed_one=%s duration_s=%.2f segment=%d metadata=%s committed=%d failures=%d abandoned=%d tps=%.2f p99_ms=%.2f p999_ms=%.2f max_ms=%.2f reserved=%d published=%d sealed_segments=%d sealed_slots=%d graceful_slots=%d first_failure=%s%n",
                 concurrency, coordinatorCount, crashOne, seconds, segmentSize, metadataMode,
                 committed.sum(), failures.sum(), abandoned.sum(),
                 committed.sum() / seconds, p99, p999, maximum, reservedSlots, published.get(),

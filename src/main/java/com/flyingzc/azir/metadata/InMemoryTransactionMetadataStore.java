@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metadata;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -19,26 +35,37 @@ import static com.flyingzc.azir.metadata.TransactionMetadataValidation.validateP
 import static com.flyingzc.azir.metadata.TransactionMetadataValidation.validateParticipants;
 
 /**
- * 基于内存的事务元数据存储实现，主要用于本地测试和原型验证。
+ * Memory-based transaction metadata storage achieved, mainly for local testing and prototype verify.
  */
 public final class InMemoryTransactionMetadataStore implements TransactionMetadataStore {
+
     private final Map<Long, TxRecord> records = new HashMap<>();
+
     private final Map<Long, SnapshotLease> snapshots = new HashMap<>();
+
     private final Map<Long, Long> finalizedAt = new HashMap<>();
 
-    /** 保存固定截止时间和始终不提高的快照保护下界。 */
-    private record SnapshotLease(long readTs, long expiresAtMillis) {
-    }
-
-    /** 所有元数据操作共用同一实例监视器，允许屏障内部重入。 */
+    /**
+     * All metadata operations share the same example monitor to allow re-entry within barrier.
+     *
+     * @param <T> value type
+     * @param action action
+     * @return the operation result
+     */
     @Override
-    public synchronized <T> T withPublicationLock(Supplier<T> action) {
+    public synchronized <T> T withPublicationLock(final Supplier<T> action) {
         return action.get();
     }
 
-    /** 持久化唯一参与者的本地提交占位，重复调用必须使用相同时间戳。 */
+    /**
+     * Durable storage single participant local commit position, and the same timestamp must be used for repeated calls.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
-    public synchronized void markLocalCommitPending(long txId, long commitTs) {
+    public synchronized void markLocalCommitPending(final long txId, final long commitTs) {
         TxRecord record = requireRecord(txId, records.get(txId));
         validateCommitTs(txId, record.startTs(), commitTs);
         if (record.participants().size() != 1 || record.status() == TxStatus.ABORTED
@@ -50,7 +77,9 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
                 TxStatus.PREPARING, commitTs));
     }
 
-    /** 本地提交未知时停止发出新快照，直到恢复封住迟到请求并写入真实终态。 */
+    /**
+     * Stop sending new snapshot when local commit is unknown until recovery has blocked late requests and written real terminal state.
+     */
     @Override
     public synchronized void assertNoPendingPublications() {
         records.values().stream().filter(record -> record.status() == TxStatus.PREPARING && record.commitTs() != null)
@@ -60,9 +89,16 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
                 });
     }
 
-    /** 登记固定租约，重复登记只允许降低读时间戳。 */
+    /**
+     * Registers are fixed lease and duplicate registrations allow only lower reading timestamp.
+     *
+     * @param txId transaction identifier
+     * @param readTs snapshot read timestamp
+     * @param expiresAtMillis expires at millis
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
-    public synchronized void registerSnapshot(long txId, long readTs, long expiresAtMillis) {
+    public synchronized void registerSnapshot(final long txId, final long readTs, final long expiresAtMillis) {
         SnapshotLease previous = snapshots.get(txId);
         if (previous != null && previous.expiresAtMillis() != expiresAtMillis) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "snapshot lease cannot be renewed", false, txId);
@@ -70,21 +106,37 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
         snapshots.put(txId, new SnapshotLease(previous == null ? readTs : Math.min(previous.readTs(), readTs), expiresAtMillis));
     }
 
-    /** 返回租约固定截止时间。 */
+    /**
+     * Returns a fixed deadline of lease.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
     @Override
-    public synchronized Optional<Long> snapshotExpiry(long txId) {
+    public synchronized Optional<Long> snapshotExpiry(final long txId) {
         return Optional.ofNullable(snapshots.get(txId)).map(SnapshotLease::expiresAtMillis);
     }
 
-    /** 幂等释放快照租约。 */
+    /**
+     * Release the snapshot lease idempotently.
+     *
+     * @param txId transaction identifier
+     */
     @Override
-    public synchronized void releaseSnapshot(long txId) {
+    public synchronized void releaseSnapshot(final long txId) {
         snapshots.remove(txId);
     }
 
-    /** 合并未决事务参与者，不修改其状态或覆盖终态。 */
+    /**
+     * Merge pending transaction participant, without changing its status or overwhelming terminal state.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
-    public synchronized TxRecord registerParticipants(long txId, Set<String> participants) {
+    public synchronized TxRecord registerParticipants(final long txId, final Set<String> participants) {
         validateParticipants(txId, participants);
         TxRecord current = requireRecord(txId, records.get(txId));
         if (current.status() == TxStatus.COMMITTED || current.status() == TxStatus.ABORTED) {
@@ -98,9 +150,16 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
         return next;
     }
 
-    /** 用有序游标发现租约失效的未决事务和未完成物化的终态。 */
+    /**
+     * Pending transaction with sequence cursor found lease invalid and terminal state without materialization completed.
+     *
+     * @param nowMillis now millis
+     * @param afterTxId after tx id
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public synchronized List<TxRecord> findRecoveryCandidates(long nowMillis, long afterTxId, int limit) {
+    public synchronized List<TxRecord> findRecoveryCandidates(final long nowMillis, final long afterTxId, final int limit) {
         if (limit <= 0) {
             return List.of();
         }
@@ -111,9 +170,14 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
                 .sorted(Comparator.comparingLong(TxRecord::txId)).limit(limit).toList();
     }
 
-    /** 保存首次完成物化的时间，重复通知不延长保留期限。 */
+    /**
+     * Saves the first materialization completion time and repeated notifications do not extend the duration of a reservation.
+     *
+     * @param txId transaction identifier
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
-    public synchronized void markFinalized(long txId) {
+    public synchronized void markFinalized(final long txId) {
         TxRecord record = records.get(txId);
         if (record == null) {
             return;
@@ -124,9 +188,16 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
         finalizedAt.putIfAbsent(txId, currentTimeMillis());
     }
 
-    /** 仅删除已物化且严格早于安全点与保留时间的记录。 */
+    /**
+     * Deletes only records that are already materialization and are strictly earlier than safe point and the time they are kept.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param finalizedBeforeMillis finalized before millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public synchronized int purgeFinalized(long safePoint, long finalizedBeforeMillis, int limit) {
+    public synchronized int purgeFinalized(final long safePoint, final long finalizedBeforeMillis, final int limit) {
         if (limit <= 0) {
             return 0;
         }
@@ -137,7 +208,7 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
                     TxRecord record = records.get(entry.getKey());
                     return record != null && record.startTs() < safePoint
                             && (record.status() == TxStatus.ABORTED
-                            || record.status() == TxStatus.COMMITTED && record.commitTs() < safePoint);
+                                    || record.status() == TxStatus.COMMITTED && record.commitTs() < safePoint);
                 }).map(Map.Entry::getKey).sorted().limit(limit).toList();
         ids.forEach(id -> {
             records.remove(id);
@@ -146,9 +217,15 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
         return ids.size();
     }
 
-    /** 分批清除已到期租约，未清理部分继续保守阻挡 GC。 */
+    /**
+     * Batch clearance expired lease, and the uncleaned part continues to hold back GC.
+     *
+     * @param nowMillis now millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public synchronized int expireSnapshots(long nowMillis, int limit) {
+    public synchronized int expireSnapshots(final long nowMillis, final int limit) {
         if (limit <= 0) {
             return 0;
         }
@@ -159,10 +236,16 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
     }
 
     /**
-     * 创建组件实例或事务记录。
+     * Create the component or transaction record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
     @Override
-    public synchronized TxRecord create(long txId, long startTs, IsolationLevel isolationLevel) {
+    public synchronized TxRecord create(final long txId, final long startTs, final IsolationLevel isolationLevel) {
         TxRecord record = new TxRecord(txId, startTs, isolationLevel, Set.of(), TxStatus.ACTIVE, null);
         TxRecord previous = records.putIfAbsent(txId, record);
         if (previous != null) {
@@ -172,10 +255,17 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
     }
 
     /**
-     * 创建 PREPARING 状态的事务元数据记录。
+     * Create a PREPARING transaction metadata record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
     @Override
-    public synchronized TxRecord createPreparing(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants) {
+    public synchronized TxRecord createPreparing(final long txId, final long startTs, final IsolationLevel isolationLevel, final Set<String> participants) {
         validateParticipants(txId, participants);
         TxRecord record = new TxRecord(txId, startTs, isolationLevel, new LinkedHashSet<>(participants), TxStatus.PREPARING, null);
         TxRecord previous = records.putIfAbsent(txId, record);
@@ -186,10 +276,18 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
     }
 
     /**
-     * 创建 COMMITTED 状态的事务元数据记录。
+     * Create a COMMITTED transaction metadata record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @param commitTs durable commit timestamp
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
     @Override
-    public synchronized TxRecord createCommitted(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants, long commitTs) {
+    public synchronized TxRecord createCommitted(final long txId, final long startTs, final IsolationLevel isolationLevel, final Set<String> participants, final long commitTs) {
         validateCommitTs(txId, startTs, commitTs);
         validateParticipants(txId, participants);
         TxRecord existing = records.get(txId);
@@ -206,18 +304,25 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
     }
 
     /**
-     * 读取指定键或事务的当前可见数据。
+     * Read the currently visible data for the key or transaction.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
      */
     @Override
-    public synchronized Optional<TxRecord> get(long txId) {
+    public synchronized Optional<TxRecord> get(final long txId) {
         return Optional.ofNullable(records.get(txId));
     }
 
     /**
-     * 将事务标记为 PREPARING 状态。
+     * Mark the transaction PREPARING.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @return the operation result
      */
     @Override
-    public synchronized TxRecord markPreparing(long txId, Set<String> participants) {
+    public synchronized TxRecord markPreparing(final long txId, final Set<String> participants) {
         validateParticipants(txId, participants);
         return records.compute(txId, (id, current) -> {
             TxRecord existing = requireRecord(id, current);
@@ -233,24 +338,32 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
                     existing.isolationLevel(),
                     mergeParticipants(existing, participants),
                     TxStatus.PREPARING,
-                    existing.commitTs()
-            );
+                    existing.commitTs());
         });
     }
 
     /**
-     * 将事务标记为 COMMITTED 状态。
+     * Mark the transaction COMMITTED.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     @Override
-    public synchronized TxRecord markCommitted(long txId, long commitTs) {
+    public synchronized TxRecord markCommitted(final long txId, final long commitTs) {
         return markCommitted(txId, null, commitTs);
     }
 
     /**
-     * 将事务标记为 COMMITTED 状态。
+     * Mark the transaction COMMITTED.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     @Override
-    public synchronized TxRecord markCommitted(long txId, Set<String> participants, long commitTs) {
+    public synchronized TxRecord markCommitted(final long txId, final Set<String> participants, final long commitTs) {
         if (participants != null) {
             validateParticipants(txId, participants);
         }
@@ -281,19 +394,27 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
     }
 
     /**
-     * 将单分片事务标记为已提交。
+     * Mark the single-shard transaction committed.
+     *
+     * @param txId transaction identifier
+     * @param participant participant
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     @Override
-    public synchronized TxRecord markSingleShardCommitted(long txId, String participant, long commitTs) {
+    public synchronized TxRecord markSingleShardCommitted(final long txId, final String participant, final long commitTs) {
         validateParticipant(txId, participant);
         return markCommitted(txId, Set.of(participant), commitTs);
     }
 
     /**
-     * 将事务标记为 ABORTED 状态。
+     * Mark the transaction ABORTED.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
      */
     @Override
-    public synchronized TxRecord markAborted(long txId) {
+    public synchronized TxRecord markAborted(final long txId) {
         return records.compute(txId, (id, current) -> {
             TxRecord existing = requireRecord(id, current);
             if (existing.status() == TxStatus.COMMITTED) {
@@ -307,7 +428,9 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
     }
 
     /**
-     * 查询所有快照和未完成物化事务的最小保护下界，完成历史记录不再阻挡 GC。
+     * Query for all snapshot and incomplete materialization transaction minimum protected lower bounds and complete history records without blocking GC.
+     *
+     * @return the operation result
      */
     @Override
     public synchronized Optional<Long> oldestActiveStartTs() {
@@ -319,8 +442,14 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
         return java.util.stream.Stream.concat(active.stream(), snapshot.stream()).min(Long::compareTo);
     }
 
-    /** 合并参与者，避免重复阶段调用丢失已登记分片。 */
-    private static Set<String> mergeParticipants(TxRecord record, Set<String> participants) {
+    /**
+     * Merge participant, and avoid the loss of registered shard calls at the duplicate stage.
+     *
+     * @param record record
+     * @param participants participants
+     * @return the operation result
+     */
+    private static Set<String> mergeParticipants(final TxRecord record, final Set<String> participants) {
         Set<String> merged = new LinkedHashSet<>(record.participants());
         if (participants != null) {
             merged.addAll(participants);
@@ -329,12 +458,26 @@ public final class InMemoryTransactionMetadataStore implements TransactionMetada
     }
 
     /**
-     * 校验并返回事务记录，不存在时抛出异常。
+     * Validate and returns the transaction record, dropping an anomaly when it does not exist.
+     *
+     * @param txId transaction identifier
+     * @param current current
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private static TxRecord requireRecord(long txId, TxRecord current) {
+    private static TxRecord requireRecord(final long txId, final TxRecord current) {
         if (current == null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction not found: " + txId, false, txId);
         }
         return current;
+    }
+
+    /**
+     * Saves fixed cut-off times and constant snapshot protection of the lower boundary.
+     *
+     * @param readTs snapshot read timestamp
+     * @param expiresAtMillis expires at millis
+     */
+    private record SnapshotLease(long readTs, long expiresAtMillis) {
     }
 }

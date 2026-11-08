@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import java.sql.Connection;
@@ -5,14 +21,24 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 
-/** 主事务 ACTIVE 行与主参与者意向在一次 InnoDB 提交中持久化的隔离存储过程。 */
+/**
+ * The main transaction ACTIVE line is separated from the main participant intent in an InnoDB commit durable storage storage process.
+ */
 final class MysqlPrimaryCombinedPrewriteProcedure {
-    /** 存储过程不保存 Java 进程内的事务状态。 */
+
+    /**
+     * The storage process does not save transaction state in Java.
+     */
     private MysqlPrimaryCombinedPrewriteProcedure() {
     }
 
-    /** 在当前隔离主分片创建单次提交例程，已存在时保持数据库状态不变。 */
-    static void ensure(Connection connection) throws SQLException {
+    /**
+     * Creates a single commit routine in the current isolation primary shard, while it already exists, keeping database status unchanged.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    static void ensure(final Connection connection) throws SQLException {
         try (PreparedStatement check = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database()
@@ -176,7 +202,7 @@ final class MysqlPrimaryCombinedPrewriteProcedure {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }

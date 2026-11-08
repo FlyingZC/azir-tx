@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.MutationType;
@@ -8,25 +24,37 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.IntStream;
 
-/** 多笔独立本地逻辑事务在一个 MySQL 事务内完成校验、取号和持久落盘。 */
+/**
+ * Multiple separate local Logic transaction completes the validate & durable drop-off in a MySQL transaction.
+ */
 final class MysqlVectorLocalBatchProcedure {
+
     private final DataSource dataSource;
+
     private volatile boolean ready;
 
-    /** 后台组批与参与者版本必须使用同一物理数据库。 */
-    MysqlVectorLocalBatchProcedure(DataSource dataSource) {
+    /**
+     * The background batch and participant version must use the same physics database.
+     *
+     * @param dataSource database connection source
+     */
+    MysqlVectorLocalBatchProcedure(final DataSource dataSource) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     }
 
-    /** 版本化例程只在缺失时创建，重复初始化保留已提交本地版本。 */
-    void ensure(Connection connection) throws SQLException {
+    /**
+     * Version routine was created only when it was missing, and the initialization reservation has been duplicated commit local version.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    void ensure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database()
@@ -190,7 +218,7 @@ final class MysqlVectorLocalBatchProcedure {
                 """)) {
             create.execute();
             ready = true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
@@ -198,8 +226,16 @@ final class MysqlVectorLocalBatchProcedure {
         }
     }
 
-    /** 先按分条再按二进制键排序，统一分条行与同键锁的跨批次获取顺序。 */
-    List<Long> commit(List<MysqlStorageAdapter.LocalVectorCommitRequest> requests) throws SQLException {
+    /**
+     * Orders the rows and the batch -retribution of the same key lock by clicking on a bar and then pressing the binary.
+     *
+     * @param requests requests
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws NumberFormatException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    List<Long> commit(final List<MysqlStorageAdapter.LocalVectorCommitRequest> requests) throws SQLException {
         if (!ready || requests == null || requests.isEmpty() || requests.size() > 64) {
             throw new IllegalArgumentException("invalid vector local server batch");
         }
@@ -260,7 +296,7 @@ final class MysqlVectorLocalBatchProcedure {
                         }
                         originalOrder[ordered.get(index).index()] = value;
                     }
-                } catch (NumberFormatException ex) {
+                } catch (final NumberFormatException ex) {
                     throw new SQLException("vector local batch returned malformed sequence", ex);
                 }
                 return List.of(originalOrder);
@@ -268,7 +304,12 @@ final class MysqlVectorLocalBatchProcedure {
         }
     }
 
-    /** 排序后的请求保留原始位置，用于按调用方顺序返回提交序号。 */
+    /**
+     * The sorted request retains its original location and returns the commit serial number in the order in which it is called.
+     *
+     * @param index index
+     * @param request request
+     */
     private record IndexedRequest(int index, MysqlStorageAdapter.LocalVectorCommitRequest request) {
     }
 }

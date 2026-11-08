@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""独立核对七类三 JVM/MySQL 安装强杀历史及完整数据摘要，不读取事务内核对象。"""
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Audit seven three-JVM/MySQL installation-crash scenarios and complete data digests independently of runtime objects."""
 
 import argparse
 import copy
@@ -14,7 +28,7 @@ BOUNDARIES = {"BEFORE_INPUT_FORCE", "AFTER_INSTALL_RECORD", "MID_RESTORE_BATCH",
 
 
 def expected_digest(live):
-    """从固定测试契约独立重建双片全部六十八个键位，明确编码墓碑与长度。"""
+    """Independently rebuild all 68 keys on both shards, explicitly encoding tombstones and lengths."""
     digest = hashlib.sha256()
     for shard, value in (("a", live), ("b", -live)):
         entries = [(f"cold{i}", None if i == 0 else f"{shard}:{i}".encode()) for i in range(32)]
@@ -30,7 +44,7 @@ def expected_digest(live):
 
 
 def events(directory):
-    """时间戳由同一父 JVM 产生，保留实际进程 PID 与事件关联。"""
+    """Use timestamps from one parent JVM and retain the association between process PIDs and events."""
     result = []
     for line in (directory / "events.tsv").read_text().splitlines():
         stamp, node, pid, kind, text = line.split("\t", 4)
@@ -39,7 +53,7 @@ def events(directory):
 
 
 def crc32c(data):
-    """小型元数据使用 Castagnoli CRC，不能用普通 CRC32 冒充。"""
+    """Use Castagnoli CRC for metadata, not ordinary CRC32."""
     crc = 0xFFFFFFFF
     for value in data:
         crc ^= value
@@ -49,7 +63,7 @@ def crc32c(data):
 
 
 def record(path):
-    """直接解析实际指针的小文件证据，验证 CRC、身份、代次和位置。"""
+    """Parse actual pointer files and validate CRC, identity, generation and position."""
     data = path.read_bytes()
     assert 80 <= len(data) <= 512 and struct.unpack(">I", data[-4:])[0] == crc32c(data[:-4]), "bad pointer checksum"
     offset = 0
@@ -80,7 +94,7 @@ def record(path):
 
 
 def verify(case, history, directory):
-    """检查定向历史的外部不变量，不将此检查器称为通用线性化证明。"""
+    """Check external invariants of targeted histories, without claiming general linearizability."""
     assert case["passed"] and case["boundary"] in BOUNDARIES
     assert {event["node"] for event in history} == {0, 1, 2}
     starts = [event for event in history if event["kind"] == "SPAWN"]
@@ -145,7 +159,7 @@ def verify(case, history, directory):
 
 
 def main():
-    """每个目录必须是七类边界的一次完整验收，不接受残缺目录的绿灯摘要。"""
+    """Require a complete run of all seven boundary scenarios per directory; reject incomplete evidence."""
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()

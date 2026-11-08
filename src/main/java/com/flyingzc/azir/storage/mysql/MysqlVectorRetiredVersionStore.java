@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -17,14 +33,24 @@ import java.sql.Statement;
 import java.util.Arrays;
 import java.util.Objects;
 
-/** 跨片旧版本退役后保留不含业务载荷的持久重放凭据。 */
+/**
+ * Cross-shard old version retains durable replay receipt without business payload after decommissioning.
+ */
 final class MysqlVectorRetiredVersionStore {
-    /** 仅允许正式向量布局初始化创建紧凑凭据表，不修改已有提交版本。 */
+
+    /**
+     * Allows only the initialisation of the official vector layout to create a compact receipt table without modifying an existing commit version.
+     */
     private MysqlVectorRetiredVersionStore() {
     }
 
-    /** 凭据身份绑定事务、键、原保留序号和载荷摘要，主键阻止事务号重用。 */
-    static void ensure(Connection connection) throws SQLException {
+    /**
+     * Receipt identity binding transaction, keys, original retention numbers and payload digests, primary key preventing transaction ID reuse.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    static void ensure(final Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("""
                     create table if not exists mvcc_vector_retired_v1 (
@@ -43,21 +69,30 @@ final class MysqlVectorRetiredVersionStore {
         }
     }
 
-    /** 旧物化调用仅在真实终态与退役凭据完整匹配且大载荷行已消失时视为幂等成功。 */
-    static boolean matches(DataSource dataSource, long txId, long startTs, long commitTs)
-            throws SQLException {
+    /**
+     * The old materialization call is considered successful only when the real terminal state matches the full of decommissioned receipt and large payload rows have disappeared.
+     *
+     * @param dataSource database connection source
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    static boolean matches(final DataSource dataSource, final long txId, final long startTs, final long commitTs) throws SQLException {
         Objects.requireNonNull(dataSource, "dataSource");
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement query = connection.prepareStatement("""
-                     select r.tx_id from mvcc_vector_retired_v1 r
-                     join mvcc_participant_txn p on p.tx_id = r.tx_id
-                     where r.tx_id = ? and r.start_ts = ? and r.commit_ts = ?
-                       and p.start_ts = r.start_ts and p.commit_ts = r.commit_ts
-                       and p.status = 'COMMITTED'
-                       and not exists(select 1 from mvcc_vector_committed_v1 c
-                                      where c.tx_id = r.tx_id)
-                       and not exists(select 1 from mvcc_data d where d.tx_id = r.tx_id)
-                     """)) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement query = connection.prepareStatement("""
+                        select r.tx_id from mvcc_vector_retired_v1 r
+                        join mvcc_participant_txn p on p.tx_id = r.tx_id
+                        where r.tx_id = ? and r.start_ts = ? and r.commit_ts = ?
+                          and p.start_ts = r.start_ts and p.commit_ts = r.commit_ts
+                          and p.status = 'COMMITTED'
+                          and not exists(select 1 from mvcc_vector_committed_v1 c
+                                         where c.tx_id = r.tx_id)
+                          and not exists(select 1 from mvcc_data d where d.tx_id = r.tx_id)
+                        """)) {
             query.setLong(1, txId);
             query.setLong(2, startTs);
             query.setLong(3, commitTs);
@@ -67,9 +102,20 @@ final class MysqlVectorRetiredVersionStore {
         }
     }
 
-    /** 前台同号重放还要精确匹配原键、墓碑及载荷摘要，不能只凭提交时间成功。 */
-    static boolean matchesExpected(Connection connection, long txId, long startTs,
-                                   long commitTs, Mutation expected) throws SQLException {
+    /**
+     * Foreground Synonym replay also needs to accurately match the original key, tombstone and payload digests, which cannot be successful only with commit time.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param expected expected
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    static boolean matchesExpected(final Connection connection, final long txId, final long startTs,
+                                   final long commitTs, final Mutation expected) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select user_key, start_ts, commit_ts, deleted, payload_sha
                 from mvcc_vector_retired_v1 where tx_id = ? for update
@@ -105,8 +151,15 @@ final class MysqlVectorRetiredVersionStore {
         }
     }
 
-    /** 摘要区分墓碑、SQL NULL 与空字节载荷，凭据本身不保留业务值。 */
-    static byte[] payloadDigest(boolean deleted, byte[] payload) {
+    /**
+     * Summary distinguishes between tombstone, SQL NULL and empty bytes payload, receipt does not retain business values per se.
+     *
+     * @param deleted deleted
+     * @param payload payload
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    static byte[] payloadDigest(final boolean deleted, final byte[] payload) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             digest.update((byte) (deleted ? 1 : 0));
@@ -115,7 +168,7 @@ final class MysqlVectorRetiredVersionStore {
                 digest.update(payload);
             }
             return digest.digest();
-        } catch (NoSuchAlgorithmException ex) {
+        } catch (final NoSuchAlgorithmException ex) {
             throw new IllegalStateException("JDK SHA-256 provider is unavailable", ex);
         }
     }

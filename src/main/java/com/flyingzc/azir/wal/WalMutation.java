@@ -1,11 +1,41 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
-/** 不可变的分片键变更，空值专门表示删除墓碑。 */
+/**
+ * Immutable shard key change, empty value is specifically for the deletion of tombstone.
+ *
+ * @param shard logical shard identifier
+ * @param key business key
+ * @param value value to write
+ */
 public record WalMutation(String shard, String key, byte[] value) {
-    /** 校验键编码上限并复制调用方数组，避免日志内容被外部修改。 */
+
+    /**
+     * Validate key encodes the upper limit and copys the caller array to avoid external changes in log contents.
+     *
+     * @param shard logical shard identifier
+     * @param key business key
+     * @param value value to write
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
     public WalMutation {
         Objects.requireNonNull(shard, "shard");
         Objects.requireNonNull(key, "key");
@@ -18,16 +48,39 @@ public record WalMutation(String shard, String key, byte[] value) {
         value = value == null ? null : value.clone();
     }
 
-    /** 返回值副本，保持已冻结写集不可变。 */
-    @Override public byte[] value() { return value == null ? null : value.clone(); }
+    /**
+     * Return value replica, keep the write set immutable frozen.
+     *
+     * @return the operation result
+     */
+    @Override
+    public byte[] value() {
+        return value == null ? null : value.clone();
+    }
 
-    /** 返回是否为删除墓碑。 */
-    public boolean deleted() { return value == null; }
+    /**
+     * Return whether this is a deletion tombstone.
+     *
+     * @return the operation result
+     */
+    public boolean deleted() {
+        return value == null;
+    }
 
-    /** 返回不可变载荷长度，容量校验无需复制整份数据。 */
-    public int valueLength() { return value == null ? 0 : value.length; }
+    /**
+     * Returns immutable payload length, capacity validate does not require copying of the whole data.
+     *
+     * @return the operation result
+     */
+    public int valueLength() {
+        return value == null ? 0 : value.length;
+    }
 
-    /** 返回资源记账大小，包含每个版本的保守固定开销。 */
+    /**
+     * Returns the size of the resource account, which contains a conservative fixed cost per version.
+     *
+     * @return the operation result
+     */
     public long retainedBytes() {
         return 128L + shard.getBytes(StandardCharsets.UTF_8).length
                 + key.getBytes(StandardCharsets.UTF_8).length + (value == null ? 0 : value.length);

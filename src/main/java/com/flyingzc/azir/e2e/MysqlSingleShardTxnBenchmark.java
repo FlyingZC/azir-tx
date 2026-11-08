@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -29,19 +45,24 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * MySQL 单分片事务基准测试入口。
+ * MySQL single shard transaction benchmark test entry.
  */
 public final class MysqlSingleShardTxnBenchmark {
+
     /**
-     * 构造 MysqlSingleShardTxnBenchmark 实例。
+     * Construct a MysqlSingleShardTxnBenchmark instance.
      */
     private MysqlSingleShardTxnBenchmark() {
     }
 
     /**
-     * 程序入口方法。
+     * Run the application entry point.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
      */
-    public static void main(String[] args) throws Exception {
+    public static void main(final String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource controlDataSource = MysqlDataSourceFactory.create(config.controlJdbcUrl(), config.username(), config.password());
         DataSource shard1DataSource = MysqlDataSourceFactory.create(config.shard1JdbcUrl(), config.username(), config.password());
@@ -80,26 +101,22 @@ public final class MysqlSingleShardTxnBenchmark {
                                     config.lockWaitBackoffInitialMs(),
                                     config.lockWaitBackoffMaxMs(),
                                     config.lockWaitBackoffMultiplier(),
-                                    config.lockWaitBackoffJitter()
-                            ),
+                                    config.lockWaitBackoffJitter()),
                             new TransactionRetryPolicy(
                                     config.maxAttempts(),
                                     config.retryBackoffInitialMs(),
                                     config.retryBackoffMaxMs(),
                                     config.retryBackoffMultiplier(),
-                                    config.retryBackoffJitter()
-                            ),
+                                    config.retryBackoffJitter()),
                             CrossShardCommitPolicy.serial(),
                             config.bufferWrites(),
                             config.lazyBeginMetadata(),
-                            false
-                    ),
-                    Map.of(shard1.shardId(), shard1)
-            );
+                            false),
+                    Map.of(shard1.shardId(), shard1));
 
             BenchmarkResult result = runBenchmark(transactionManager, config);
             System.out.println(result.toLine(config));
-            // 失败计数不能只写入日志后仍以零退出码作为有效容量结果。
+            // The failure count cannot only be written in the log with a zero exit code as a valid capacity result.
             if (result.failures() != 0 || result.committed() == 0) {
                 throw new IllegalStateException("Azir single-shard benchmark is invalid: "
                         + (result.firstFailure() == null ? "no committed transaction" : result.firstFailure()));
@@ -111,9 +128,14 @@ public final class MysqlSingleShardTxnBenchmark {
     }
 
     /**
-     * 执行基准测试并返回统计结果。
+     * Run the benchmark and return its statistics.
+     *
+     * @param transactionManager transaction manager
+     * @param config config
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
-    private static BenchmarkResult runBenchmark(TransactionManager transactionManager, Config config) throws Exception {
+    private static BenchmarkResult runBenchmark(final TransactionManager transactionManager, final Config config) throws Exception {
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
         LongAdder conflicts = new LongAdder();
@@ -144,7 +166,7 @@ public final class MysqlSingleShardTxnBenchmark {
                                 return null;
                             });
                             committed.increment();
-                        } catch (MvccException ex) {
+                        } catch (final MvccException ex) {
                             if (ex.errorCode() == ErrorCode.LOCK_CONFLICT
                                     || ex.errorCode() == ErrorCode.LOCK_WAIT_TIMEOUT
                                     || ex.errorCode() == ErrorCode.WRITE_CONFLICT) {
@@ -153,12 +175,12 @@ public final class MysqlSingleShardTxnBenchmark {
                                 failures.increment();
                                 firstFailure.compareAndSet(null, describeFailure(ex));
                             }
-                        } catch (RuntimeException ex) {
+                        } catch (final RuntimeException ex) {
                             failures.increment();
                             firstFailure.compareAndSet(null, describeFailure(ex));
                         }
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 } finally {
                     finishLatch.countDown();
@@ -176,8 +198,13 @@ public final class MysqlSingleShardTxnBenchmark {
                 conflicts.sum(), failures.sum(), firstFailure.get());
     }
 
-    /** 保留首个非冲突异常链，避免基准失败时只剩失败计数。 */
-    private static String describeFailure(Throwable failure) {
+    /**
+     * Keeps the first non-conflict abnormal chain and avoids the number of failures when benchmark fails.
+     *
+     * @param failure failure
+     * @return the operation result
+     */
+    private static String describeFailure(final Throwable failure) {
         StringBuilder result = new StringBuilder();
         for (Throwable cause = failure; cause != null && result.length() < 600; cause = cause.getCause()) {
             if (!result.isEmpty()) {
@@ -193,16 +220,23 @@ public final class MysqlSingleShardTxnBenchmark {
     }
 
     /**
-     * 将字符串转换为字节数组。
+     * Encode the string as a byte array.
+     *
+     * @param value value to write
+     * @return the operation result
      */
-    private static byte[] bytes(String value) {
+    private static byte[] bytes(final String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**
-     * 重置基准测试表数据。
+     * Reset the benchmark tables.
+     *
+     * @param dataSource database connection source
+     * @param tables tables
+     * @throws Exception if the operation cannot complete
      */
-    private static void reset(DataSource dataSource, String... tables) throws Exception {
+    private static void reset(final DataSource dataSource, final String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
                 statement.execute("delete from " + table);
@@ -211,42 +245,84 @@ public final class MysqlSingleShardTxnBenchmark {
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void close(DataSource dataSource) throws Exception {
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
     /**
-     * 基准测试配置对象。
+     * Read a string-valued environment variable.
+     *
+     * @param key business key
+     * @param defaultValue default value
+     * @return the operation result
+     */
+    private static String env(final String key, final String defaultValue) {
+        String value = System.getenv(key);
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    /**
+     * Benchmark configuration.
+     *
+     * @param controlJdbcUrl control jdbc url
+     * @param shard1JdbcUrl shard1 jdbc url
+     * @param username username
+     * @param password password
+     * @param resetTables reset tables
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param conflictMode conflict mode
+     * @param conflictModeSetting conflict mode setting
+     * @param lockWaitTimeoutMs lock wait timeout ms
+     * @param lockWaitBackoffInitialMs lock wait backoff initial ms
+     * @param lockWaitBackoffMaxMs lock wait backoff max ms
+     * @param lockWaitBackoffMultiplier lock wait backoff multiplier
+     * @param lockWaitBackoffJitter lock wait backoff jitter
+     * @param maxAttempts max attempts
+     * @param retryBackoffInitialMs retry backoff initial ms
+     * @param retryBackoffMaxMs retry backoff max ms
+     * @param retryBackoffMultiplier retry backoff multiplier
+     * @param retryBackoffJitter retry backoff jitter
+     * @param segmentTso segment tso
+     * @param tsoBatchSize tso batch size
+     * @param bufferWrites buffer writes
+     * @param lazyBeginMetadata lazy begin metadata
      */
     private record Config(String controlJdbcUrl,
-                          String shard1JdbcUrl,
-                          String username,
-                          String password,
-                          boolean resetTables,
-                          int concurrency,
-                          int durationSeconds,
-                          boolean conflictMode,
-                          ConflictMode conflictModeSetting,
-                          long lockWaitTimeoutMs,
-                          long lockWaitBackoffInitialMs,
-                          long lockWaitBackoffMaxMs,
-                          double lockWaitBackoffMultiplier,
-                          boolean lockWaitBackoffJitter,
-                          int maxAttempts,
-                          long retryBackoffInitialMs,
-                          long retryBackoffMaxMs,
-                          double retryBackoffMultiplier,
-                          boolean retryBackoffJitter,
-                          boolean segmentTso,
-                          int tsoBatchSize,
-                          boolean bufferWrites,
-                          boolean lazyBeginMetadata) {
+            String shard1JdbcUrl,
+            String username,
+            String password,
+            boolean resetTables,
+            int concurrency,
+            int durationSeconds,
+            boolean conflictMode,
+            ConflictMode conflictModeSetting,
+            long lockWaitTimeoutMs,
+            long lockWaitBackoffInitialMs,
+            long lockWaitBackoffMaxMs,
+            double lockWaitBackoffMultiplier,
+            boolean lockWaitBackoffJitter,
+            int maxAttempts,
+            long retryBackoffInitialMs,
+            long retryBackoffMaxMs,
+            double retryBackoffMultiplier,
+            boolean retryBackoffJitter,
+            boolean segmentTso,
+            int tsoBatchSize,
+            boolean bufferWrites,
+            boolean lazyBeginMetadata) {
+
         /**
-         * 从环境变量读取配置对象。
+         * Read configuration from environment variables.
+         *
+         * @return the operation result
          */
         private static Config fromEnv() {
             return new Config(
@@ -272,24 +348,34 @@ public final class MysqlSingleShardTxnBenchmark {
                     Boolean.parseBoolean(env("AZIR_TX_SEGMENT_TSO", "true")),
                     Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "256")),
                     Boolean.parseBoolean(env("AZIR_TX_BUFFER_WRITES", "true")),
-                    Boolean.parseBoolean(env("AZIR_TX_LAZY_BEGIN_METADATA", "true"))
-            );
+                    Boolean.parseBoolean(env("AZIR_TX_LAZY_BEGIN_METADATA", "true")));
         }
     }
 
     /**
-     * 基准测试结果对象。
+     * Benchmark results.
+     *
+     * @param elapsedSeconds elapsed seconds
+     * @param attempts attempts
+     * @param committed committed
+     * @param conflicts conflicts
+     * @param failures failures
+     * @param firstFailure first failure
      */
     private record BenchmarkResult(double elapsedSeconds,
-                                   long attempts,
-                                   long committed,
-                                   long conflicts,
-                                   long failures,
-                                   String firstFailure) {
+            long attempts,
+            long committed,
+            long conflicts,
+            long failures,
+            String firstFailure) {
+
         /**
-         * 将基准测试结果格式化为一行文本。
+         * Format benchmark results as a single line.
+         *
+         * @param config config
+         * @return the operation result
          */
-        private String toLine(Config config) {
+        private String toLine(final Config config) {
             double attemptTps = attempts / elapsedSeconds;
             double commitTps = committed / elapsedSeconds;
             double conflictTps = conflicts / elapsedSeconds;
@@ -312,13 +398,5 @@ public final class MysqlSingleShardTxnBenchmark {
                     + " commit_tps=" + String.format("%.2f", commitTps)
                     + " conflict_tps=" + String.format("%.2f", conflictTps);
         }
-    }
-
-    /**
-     * 读取字符串环境变量配置。
-     */
-    private static String env(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value == null || value.isBlank() ? defaultValue : value;
     }
 }

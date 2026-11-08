@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -6,16 +22,30 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
 
-/** 可直接运行的新模式示例，演示本地持久提交和跨片转账。 */
+/**
+ * Examples of new modes that can be directly run, demonstrating local durable commit and cross-shard transfers.
+ */
 public final class WalMvccExample {
-    /** 示例参数格式；事务期限使用毫秒，省略时沿用默认值。 */
+
+    /**
+     * Example parameter formats; transaction period uses milliseconds and default values are used when omitted.
+     */
     private static final String USAGE = "用法：WalMvccExample [WAL目录] [--timeout-millis 毫秒数]";
 
-    /** 禁止实例化示例入口。 */
-    private WalMvccExample() { }
+    /**
+     * Prohibits the entry of example examples.
+     */
+    private WalMvccExample() {
+    }
 
-    /** 使用可选 WAL 目录与事务期限启动示例，未指定目录时创建隔离临时目录。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Starts the example with an optional WAL directory and transaction period, creating a temporary isolated directory when no directory has been specified.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         Path directory = null;
         WalOptions options = WalOptions.defaults();
         for (int index = 0; index < args.length; index++) {
@@ -26,7 +56,7 @@ public final class WalMvccExample {
                     }
                     try {
                         options = options.withTimeout(Long.parseLong(args[index]));
-                    } catch (IllegalArgumentException failure) {
+                    } catch (final IllegalArgumentException failure) {
                         throw new IllegalArgumentException("事务期限必须为 1..86400000 的整数毫秒数。" + USAGE, failure);
                     }
                 }
@@ -38,7 +68,7 @@ public final class WalMvccExample {
                 }
             }
         }
-        // 参数全部校验成功后才创建目录，避免无效调试配置留下临时文件。
+        // All validate arguments are created only after success, avoiding invalid debug configuration leaving a temporary file.
         if (directory == null) {
             directory = Files.createTempDirectory("azir-wal-example-");
         }
@@ -60,9 +90,23 @@ public final class WalMvccExample {
         }
     }
 
-    /** 将余额编码为 UTF-8 字节。 */
-    private static byte[] bytes(int value) { return Integer.toString(value).getBytes(StandardCharsets.UTF_8); }
+    /**
+     * Encoding the balance as UTF-8 bytes.
+     *
+     * @param value value to write
+     * @return the operation result
+     */
+    private static byte[] bytes(final int value) {
+        return Integer.toString(value).getBytes(StandardCharsets.UTF_8);
+    }
 
-    /** 解码余额，显式保留简单示例的数据类型。 */
-    private static int integer(byte[] value) { return Integer.parseInt(new String(value, StandardCharsets.UTF_8)); }
+    /**
+     * Decodes the balance, leaving a simple example of data type in a visible way.
+     *
+     * @param value value to write
+     * @return the operation result
+     */
+    private static int integer(final byte[] value) {
+        return Integer.parseInt(new String(value, StandardCharsets.UTF_8));
+    }
 }

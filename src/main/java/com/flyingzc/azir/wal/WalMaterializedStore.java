@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
 
 import java.util.List;
@@ -5,95 +21,275 @@ import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.UUID;
 
-/** 新模式专属物化契约，不复用原模式的 intent 或两阶段提交接口。 */
+/**
+ * The new mode is exclusive to materialization contracts and does not repeat the inent or two-stage commit interface of the original model.
+ */
 public interface WalMaterializedStore {
-    /** 在写入 WAL 前检查后端固定的单行容量约束，默认存储不额外限制。 */
-    default void validateMutation(WalMutation mutation) { }
-    /** 将空存储绑定到固定日志身份，已有不同身份必须拒绝。 */
+
+    /**
+     * Checks the one-line limit of a fixed single-volume limit at the back end before writing to WAL, and the default storage is not additional.
+     *
+     * @param mutation mutation
+     */
+    default void validateMutation(final WalMutation mutation) {
+    }
+
+    /**
+     * Staples empty storage to a fixed log identity, different identity must be rejected.
+     *
+     * @param engineId engine id
+     * @param shard logical shard identifier
+     */
     void initialize(UUID engineId, String shard);
 
-    /** 复制模式要求独立副本所有权，不允许多个不同节点共享同一应用前缀。 */
-    default boolean supportsReplicaOwnership() { return false; }
+    /**
+     * Copy mode requires independent replica ownership and does not allow multiple different nodes to share the same application prefix.
+     *
+     * @return the operation result
+     */
+    default boolean supportsReplicaOwnership() {
+        return false;
+    }
 
-    /** 绑定节点专属后端；已有普通存储或另一节点的存储必须拒绝接管。 */
-    default void initializeReplica(WalReplicaIdentity identity, String shard) { throw new UnsupportedOperationException("replica ownership unsupported"); }
+    /**
+     * Bind node exclusive backend; storage of a common or another node must be refused.
+     *
+     * @param identity identity
+     * @param shard logical shard identifier
+     * @throws UnsupportedOperationException if the operation cannot complete
+     */
+    default void initializeReplica(final WalReplicaIdentity identity, final String shard) {
+        throw new UnsupportedOperationException("replica ownership unsupported");
+    }
 
-    /** 取得包含内容摘要的持久物化前缀。 */
+    /**
+     * Gets the durable materialization prefix that contains the executive summary.
+     *
+     * @return the operation result
+     */
     WalCheckpoint checkpoint();
 
-    /** 原子应用连续日志项和检查点，允许提交确认丢失后重复调用。 */
+    /**
+     * Atomic Apply continuous log entries and check points to allow commit to confirm a lost call.
+     *
+     * @param commits commits
+     * @return the operation result
+     */
     WalCheckpoint apply(List<WalCommit> commits);
 
-    /** 返回快照下最新版本，墓碑由上层统一遮蔽。 */
+    /**
+     * Returns the latest version, tombstone under snapshot, which is covered by a unified upper layer.
+     *
+     * @param key business key
+     * @param readSequence read sequence
+     * @return the operation result
+     */
     Optional<WalValue> get(String key, long readSequence);
 
-    /** 查询持久化最新版本栅栏；缺省实现保证自定义后端兼容，可覆盖为不读取载荷的索引查询。 */
-    default long latestSequence(String key) {
+    /**
+     * Query durable storage latest version fence; default ensures custom backend compatibility to cover index queries that do not read payload.
+     *
+     * @param key business key
+     * @return the operation result
+     */
+    default long latestSequence(final String key) {
         return get(key, Long.MAX_VALUE).map(WalValue::commitSequence).orElse(0L);
     }
 
-    /** 按 UTF-8 二进制顺序返回半开区间的快照版本。 */
+    /**
+     * Returns snapshot version in UTF-8 binary order between semi-open areas.
+     *
+     * @param fromInclusive from inclusive
+     * @param toExclusive to exclusive
+     * @param readSequence read sequence
+     * @return the operation result
+     */
     NavigableMap<String, WalValue> scan(String fromInclusive, String toExclusive, long readSequence);
 
-    /** 有界清除历史版本，保留安全点锚点；锚点为墓碑时可退休墓碑及全部更旧版本，重放不得复活。 */
+    /**
+     * Bounded clears history version and maintains the safe point anchor; retirement tombstone and all old version and replay cannot be revived when the anchor is tombstone.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param keyLimit key limit
+     * @return the operation result
+     */
     int gc(long safePoint, int keyLimit);
 
-    /** 后端必须显式提供扫描、删除和时间预算，才允许托管自动维护。 */
-    default boolean supportsBoundedMaintenance() { return false; }
+    /**
+     * The backend must clearly provide scans, deletions and time budget, so that the hosting is allowed for automatic maintenance.
+     *
+     * @return the operation result
+     */
+    default boolean supportsBoundedMaintenance() {
+        return false;
+    }
 
-    /** 在受保护的安全点上执行一次有限回收，时间预算为协作式，单次 I/O 另受驱动超时约束。 */
-    default GcProgress gcBounded(long safePoint, int keyLimit, int rowLimit, long budgetMillis) {
+    /**
+     * A limited collection, time budget on a protected safe point, is collaborative, single I/ O and subject to driver timeout.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param keyLimit key limit
+     * @param rowLimit row limit
+     * @param budgetMillis budget millis
+     * @return the operation result
+     * @throws UnsupportedOperationException if the operation cannot complete
+     */
+    default GcProgress gcBounded(final long safePoint, final int keyLimit, final int rowLimit, final long budgetMillis) {
         throw new UnsupportedOperationException("bounded backend maintenance is not supported");
     }
 
-    /** 返回实际检查键和删除行数，不能用删除数冒充扫描工作量。 */
-    record GcProgress(int inspectedKeys, int removedRows, boolean wrapped) {
-        /** 拒绝无效回收统计，便于运行时核对后端遵守预算。 */
-        public GcProgress { if (inspectedKeys < 0 || removedRows < 0) { throw new IllegalArgumentException("invalid GC progress"); } }
+    /**
+     * The hosting assembly validate durable and timeout before the creation of WAL, without a custom backend for verify cannot by default declare production to be serviceable.
+     *
+     * @throws UnsupportedOperationException if the operation cannot complete
+     */
+    default void validateProduction() {
+        throw new UnsupportedOperationException("backend production validation is not supported");
     }
 
-    /** 托管装配在创建 WAL 前校验持久性和超时，未验证的自定义后端不能默认宣称生产可服务。 */
-    default void validateProduction() { throw new UnsupportedOperationException("backend production validation is not supported"); }
-
-    /** 自定义后端必须显式实现备份和可重试恢复，不能默认用有行数上限的普通扫描代替。 */
-    default boolean supportsBackup() { return false; }
-
-    /** 后端须在打开时固定读视图，才能在并发物化与 GC 期间导出同一提交边界。 */
-    default boolean supportsPinnedSnapshot() { return false; }
-
-    /** 调用发生于已追平且暂停物化的准备阶段，返回后必须已经固定实际数据库读视图。 */
-    default SnapshotView openSnapshot(WalCheckpoint boundary) { throw new UnsupportedOperationException("pinned snapshot unsupported"); }
-
-    /** 一个备份独占的只读视图，结束或失败以后归还自己的连接，不影响共享 WAL。 */
-    interface SnapshotView extends AutoCloseable {
-        /** 只输出打开时的边界数据，不在此时重新建立可能已推进的读视图。 */
-        void export(BackupSink sink) throws java.io.IOException;
-        /** 关闭本视图自己的只读事务与资源。 */
-        @Override void close() throws java.io.IOException;
+    /**
+     * Custom backends must be visible for backup and retry recovery, which cannot be used by default instead of a normal scan with line upper limit.
+     *
+     * @return the operation result
+     */
+    default boolean supportsBackup() {
+        return false;
     }
 
-    /** 只有显式校验恢复目标副本身份的适配器才能接收可迁移复制快照。 */
-    default boolean supportsReplicaRestore() { return false; }
+    /**
+     * The backend must fix a reading view when it is open to export the same commit border during concurrent materialization and GC.
+     *
+     * @return the operation result
+     */
+    default boolean supportsPinnedSnapshot() {
+        return false;
+    }
 
-    /** 流式输出固定确认前缀下每个键的最新版本，输出键必须按 UTF-8 二进制顺序递增。 */
-    default void exportSnapshot(WalCheckpoint boundary, BackupSink sink) throws java.io.IOException {
+    /**
+     * The call takes place during the preparation phase of the track and suspend materialization, which, upon return, must have fixed the actual database reading view.
+     *
+     * @param boundary boundary
+     * @return the operation result
+     * @throws UnsupportedOperationException if the operation cannot complete
+     */
+    default SnapshotView openSnapshot(final WalCheckpoint boundary) {
+        throw new UnsupportedOperationException("pinned snapshot unsupported");
+    }
+
+    /**
+     * Only the adaptor for visible validate recovery target replica identity can receive a transportable copy of snapshot.
+     *
+     * @return the operation result
+     */
+    default boolean supportsReplicaRestore() {
+        return false;
+    }
+
+    /**
+     * Fluid output fixes the latest version for each key, and output keys must be increased in the UTF-8 binary order.
+     *
+     * @param boundary boundary
+     * @param sink sink
+     * @throws UnsupportedOperationException if the operation cannot complete
+     * @throws java.io.IOException if the operation cannot complete
+     */
+    default void exportSnapshot(final WalCheckpoint boundary, final BackupSink sink) throws java.io.IOException {
         throw new UnsupportedOperationException("backend backup is not supported");
     }
 
-    /** 从全新存储开始恢复或继续同一备份，返回是否仍需导入数据；普通运行时必须拒绝恢复中存储。 */
-    default boolean beginRestore(WalRestoreSpec spec) { throw new UnsupportedOperationException("backend restore is not supported"); }
-
-    /** 幂等导入有限批次，所有变更仍处于不可服务的恢复中状态。 */
-    default void restoreBatch(WalRestoreSpec spec, List<WalBackupRow> rows) { throw new UnsupportedOperationException("backend restore is not supported"); }
-
-    /** 核对完整物理数据摘要和行数后，原子发布此后端的完整确认前缀。 */
-    default void finishRestore(WalRestoreSpec spec, long expectedRows, String expectedDataHash) {
+    /**
+     * Returns whether or not you still need to import data from a whole new store starting with recovery or continuing the same backup; storage in recovery must be rejected when running
+     * normally.
+     *
+     * @param spec spec
+     * @return the operation result
+     * @throws UnsupportedOperationException if the operation cannot complete
+     */
+    default boolean beginRestore(final WalRestoreSpec spec) {
         throw new UnsupportedOperationException("backend restore is not supported");
     }
 
-    /** 公开存储扩展接口的流式行消费方，不暴露运行时内部锁与版本链。 */
-    @FunctionalInterface interface BackupSink {
-        /** 处理一条最新版本，写出失败必须传播以阻断备份发布。 */
+    /**
+     * Idempotent Imports limited batch and all changes remain unserviceable in recovery.
+     *
+     * @param spec spec
+     * @param rows rows
+     * @throws UnsupportedOperationException if the operation cannot complete
+     */
+    default void restoreBatch(final WalRestoreSpec spec, final List<WalBackupRow> rows) {
+        throw new UnsupportedOperationException("backend restore is not supported");
+    }
+
+    /**
+     * After checking the complete physical data summary and number of rows, atomic releases a full confirmation prefix at the later end.
+     *
+     * @param spec spec
+     * @param expectedRows expected rows
+     * @param expectedDataHash expected data hash
+     * @throws UnsupportedOperationException if the operation cannot complete
+     */
+    default void finishRestore(final WalRestoreSpec spec, final long expectedRows, final String expectedDataHash) {
+        throw new UnsupportedOperationException("backend restore is not supported");
+    }
+
+    /**
+     * Returns the actual check key and deletes the number of lines, which cannot be used to impersonate a scanning workload.
+     *
+     * @param inspectedKeys inspected keys
+     * @param removedRows removed rows
+     * @param wrapped wrapped
+     */
+    record GcProgress(int inspectedKeys, int removedRows, boolean wrapped) {
+
+        /**
+         * Rejects invalid collection statistics and allows the backend to be checked for budget while running.
+         *
+         * @param inspectedKeys inspected keys
+         * @param removedRows removed rows
+         * @param wrapped wrapped
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public GcProgress {
+            if (inspectedKeys < 0 || removedRows < 0) {
+                throw new IllegalArgumentException("invalid GC progress");
+            }
+        }
+    }
+
+    /**
+     * A backup exclusive read-only view returns its own connection after termination or failure, without prejudice to sharing WAL.
+     */
+    interface SnapshotView extends AutoCloseable {
+
+        /**
+         * Only output of boundary data when it is open, without re-establishing a read view that may have been advanced at this time.
+         *
+         * @param sink sink
+         * @throws java.io.IOException if the operation cannot complete
+         */
+        void export(BackupSink sink) throws java.io.IOException;
+
+        /**
+         * Closes this view with its own read-only transaction resource.
+         *
+         * @throws java.io.IOException if the operation cannot complete
+         */
+        @Override
+        void close() throws java.io.IOException;
+    }
+
+    /**
+     * Open storage of the flow-line consumer for interface extension without exposing the internal lock and version chain while running.
+     */
+    @FunctionalInterface
+    interface BackupSink {
+
+        /**
+         * Process an updated version and write that the failure must be disseminated to block back-up posting.
+         *
+         * @param row row
+         * @throws java.io.IOException if the operation cannot complete
+         */
         void accept(WalBackupRow row) throws java.io.IOException;
     }
 }

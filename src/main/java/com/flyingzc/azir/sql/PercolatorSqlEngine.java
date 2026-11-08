@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -17,22 +33,43 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 
-/** 显式选择 Percolator 的 SQL 后端，复用现有 SqlEngine/SqlSession 与 Calcite 计划器。 */
+/**
+ * Explicit SQL entry point for the project's MySQL Percolator runtime, sharing the Calcite planner and executor.
+ */
 public final class PercolatorSqlEngine implements SqlEngine, AutoCloseable {
+
     private final PercolatorRuntime runtime;
+
     private final SqlPlanner planner;
+
     private final ShardResolver resolver;
+
     private final SqlValueCodec codec;
+
     private final IsolationLevel isolation;
+
     private final SqlExecutionOptions options;
+
     private com.flyingzc.azir.maintenance.MaintenanceService maintenance;
+
     private boolean ownsRuntime;
+
     private volatile boolean closed;
+
     private final java.util.concurrent.locks.ReentrantLock lifecycleLock = new java.util.concurrent.locks.ReentrantLock();
 
-    /** 借用现有运行时，可配置轻量主键计划、Calcite 关系计划与 SQL 资源预算。 */
-    public PercolatorSqlEngine(PercolatorRuntime runtime, SqlPlanner planner, ShardResolver resolver,
-                                SqlValueCodec codec, IsolationLevel isolation, SqlExecutionOptions options) {
+    /**
+     * The lightweight master key plan, Calcite relationship plan and SQL resource budget can be configured when using the existing run.
+     *
+     * @param runtime runtime
+     * @param planner planner
+     * @param resolver resolver
+     * @param codec codec
+     * @param isolation global transaction isolation level
+     * @param options options
+     */
+    public PercolatorSqlEngine(final PercolatorRuntime runtime, final SqlPlanner planner, final ShardResolver resolver,
+                               final SqlValueCodec codec, final IsolationLevel isolation, final SqlExecutionOptions options) {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         this.planner = Objects.requireNonNull(planner, "planner");
         this.resolver = Objects.requireNonNull(resolver, "resolver");
@@ -41,40 +78,89 @@ public final class PercolatorSqlEngine implements SqlEngine, AutoCloseable {
         this.options = Objects.requireNonNull(options, "options");
     }
 
-    /** 与 AzirSqlEngine.calcite 对称的显式后端选择入口。 */
-    public static PercolatorSqlEngine calcite(PercolatorRuntime runtime, ShardResolver resolver,
-                                               SqlValueCodec codec, IsolationLevel isolation) {
+    /**
+     * Select the entrance with a visible backend symmetrical AzirSqlEngine.calcite.
+     *
+     * @param runtime runtime
+     * @param resolver resolver
+     * @param codec codec
+     * @param isolation global transaction isolation level
+     * @return the operation result
+     */
+    public static PercolatorSqlEngine calcite(final PercolatorRuntime runtime, final ShardResolver resolver,
+                                              final SqlValueCodec codec, final IsolationLevel isolation) {
         return new PercolatorSqlEngine(runtime, new CalciteSqlPlanner(), resolver, codec, isolation,
                 SqlExecutionOptions.defaults());
     }
 
-    /** 简单主键语句走轻量计划，其余 SQL 仍使用相同的完整 Calcite 执行器。 */
-    public static PercolatorSqlEngine hybrid(PercolatorRuntime runtime, ShardResolver resolver,
-                                              SqlValueCodec codec, IsolationLevel isolation) {
+    /**
+     * Simple primary key statement takes a light schedule, and the rest of SQL still uses the same complete Calcite implementer.
+     *
+     * @param runtime runtime
+     * @param resolver resolver
+     * @param codec codec
+     * @param isolation global transaction isolation level
+     * @return the operation result
+     */
+    public static PercolatorSqlEngine hybrid(final PercolatorRuntime runtime, final ShardResolver resolver,
+                                             final SqlValueCodec codec, final IsolationLevel isolation) {
         return new PercolatorSqlEngine(runtime, new HybridSqlPlanner(), resolver, codec, isolation,
                 SqlExecutionOptions.defaults());
     }
 
-    /** 使用调用方拥有的连接池装配 MySQL Percolator，所有实例必须共用同一持久 TSO 库。 */
-    public static PercolatorSqlEngine mysql(DataSource timestampControl, Map<String, DataSource> shardSources,
-                                             ShardResolver resolver, SqlValueCodec codec, IsolationLevel isolation) {
+    /**
+     * Use the connection pool configuration of MySQL Percolator, which is owned by the caller. All examples must be shared in the same durable TSO library.
+     *
+     * @param timestampControl timestamp control
+     * @param shardSources shard sources
+     * @param resolver resolver
+     * @param codec codec
+     * @param isolation global transaction isolation level
+     * @return the operation result
+     */
+    public static PercolatorSqlEngine mysql(final DataSource timestampControl, final Map<String, DataSource> shardSources,
+                                            final ShardResolver resolver, final SqlValueCodec codec, final IsolationLevel isolation) {
         return mysql(timestampControl, shardSources, resolver, codec, isolation,
                 PercolatorRuntime.Options.defaults(), SqlExecutionOptions.defaults());
     }
 
-    /** 校验配置和物理命名空间后初始化协议表；不清空数据、不迁移旧模型或关闭借用的池。 */
-    public static PercolatorSqlEngine mysql(DataSource timestampControl, Map<String, DataSource> shardSources,
-                                             ShardResolver resolver, SqlValueCodec codec, IsolationLevel isolation,
-                                             PercolatorRuntime.Options transactionOptions, SqlExecutionOptions sqlOptions) {
+    /**
+     * Validate Configure and Physical namespace Initialize protocol tables; unclear empty data, do not migrate old models or close borrowed pools.
+     *
+     * @param timestampControl timestamp control
+     * @param shardSources shard sources
+     * @param resolver resolver
+     * @param codec codec
+     * @param isolation global transaction isolation level
+     * @param transactionOptions transaction options
+     * @param sqlOptions sql options
+     * @return the operation result
+     */
+    public static PercolatorSqlEngine mysql(final DataSource timestampControl, final Map<String, DataSource> shardSources,
+                                            final ShardResolver resolver, final SqlValueCodec codec, final IsolationLevel isolation,
+                                            final PercolatorRuntime.Options transactionOptions, final SqlExecutionOptions sqlOptions) {
         return mysql(timestampControl, shardSources, resolver, codec, isolation, transactionOptions, sqlOptions,
                 com.flyingzc.azir.maintenance.MaintenanceOptions.defaults());
     }
 
-    /** 生产入口允许配置恢复/GC 的周期和预算；调用方必须在池之前关闭返回句柄。 */
-    public static PercolatorSqlEngine mysql(DataSource timestampControl, Map<String, DataSource> shardSources,
-                                             ShardResolver resolver, SqlValueCodec codec, IsolationLevel isolation,
-                                             PercolatorRuntime.Options transactionOptions, SqlExecutionOptions sqlOptions,
-                                             com.flyingzc.azir.maintenance.MaintenanceOptions maintenanceOptions) {
+    /**
+     * Production portal allows the configuration of recovery /GC cycles and budget; callers must close before the pool to return handles.
+     *
+     * @param timestampControl timestamp control
+     * @param shardSources shard sources
+     * @param resolver resolver
+     * @param codec codec
+     * @param isolation global transaction isolation level
+     * @param transactionOptions transaction options
+     * @param sqlOptions sql options
+     * @param maintenanceOptions maintenance options
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static PercolatorSqlEngine mysql(DataSource timestampControl, final Map<String, DataSource> shardSources,
+                                            final ShardResolver resolver, final SqlValueCodec codec, final IsolationLevel isolation,
+                                            final PercolatorRuntime.Options transactionOptions, final SqlExecutionOptions sqlOptions,
+                                            final com.flyingzc.azir.maintenance.MaintenanceOptions maintenanceOptions) {
         Objects.requireNonNull(timestampControl, "timestampControl");
         Objects.requireNonNull(resolver, "resolver");
         Objects.requireNonNull(codec, "codec");
@@ -85,7 +171,9 @@ public final class PercolatorSqlEngine implements SqlEngine, AutoCloseable {
         var validated = new LinkedHashMap<String, DataSource>();
         shardSources.forEach((id, source) -> validated.put(id, new com.flyingzc.azir.control.ProtocolMysqlDataSource(source)));
         Map<String, DataSource> sources = Map.copyOf(validated);
-        if (sources.isEmpty()) { throw new IllegalArgumentException("shards must not be empty"); }
+        if (sources.isEmpty()) {
+            throw new IllegalArgumentException("shards must not be empty");
+        }
         requireAutoCommit(timestampControl);
         var identities = new HashSet<MysqlDatabaseAuthority.Identity>();
         Map<String, PercolatorStore> stores = new LinkedHashMap<>();
@@ -108,51 +196,100 @@ public final class PercolatorSqlEngine implements SqlEngine, AutoCloseable {
             engine.ownsRuntime = true;
             engine.maintenance = new com.flyingzc.azir.maintenance.MaintenanceService("percolator", maintenanceOptions, runtime::maintain);
             return engine;
-        } catch (RuntimeException | Error failure) { lifecycle.close(); throw failure; }
+        } catch (final RuntimeException | Error failure) {
+            lifecycle.close();
+            throw failure;
+        }
     }
 
-    /** 借用连接池必须默认自动提交，避免初始化或 TSO 发号悄悄依赖未提交的本地事务。 */
-    private static void requireAutoCommit(DataSource source) {
+    /**
+     * Use connection pool must default autocommit to avoid initialization or TSO timestamp allocation quietly relying on local transaction without commit.
+     *
+     * @param source database connection source
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    private static void requireAutoCommit(final DataSource source) {
         try (var connection = source.getConnection()) {
             if (!connection.getAutoCommit()) {
                 throw new IllegalArgumentException("Percolator requires an auto-commit connection pool");
             }
-        } catch (SQLException failure) {
+        } catch (final SQLException failure) {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "inspect Percolator pool failed", false, null, failure);
         }
     }
 
-    /** 供装配工厂设置 SQL 预算，维持轻量主键与完整关系计划的相同后端。 */
-    private static PercolatorSqlEngine hybrid(PercolatorRuntime runtime, ShardResolver resolver,
-                                               SqlValueCodec codec, IsolationLevel isolation, SqlExecutionOptions options) {
+    /**
+     * The assembly plant sets up SQL budget to maintain the same back end of the light primary key and complete relationship plan.
+     *
+     * @param runtime runtime
+     * @param resolver resolver
+     * @param codec codec
+     * @param isolation global transaction isolation level
+     * @param options options
+     * @return the operation result
+     */
+    private static PercolatorSqlEngine hybrid(final PercolatorRuntime runtime, final ShardResolver resolver,
+                                              final SqlValueCodec codec, final IsolationLevel isolation, final SqlExecutionOptions options) {
         return new PercolatorSqlEngine(runtime, new HybridSqlPlanner(), resolver, codec, isolation, options);
     }
 
-    /** 返回同一后端的 KV、原 primary 查询和有界恢复入口。 */
-    public PercolatorRuntime runtime() { return runtime; }
-
-    /** 每个调用方获得独立 SQL 事务会话，不影响原有默认后端。 */
-    @Override
-    public SqlSession openSession() {
-        if (closed) { throw new IllegalStateException("Percolator SQL engine closed"); }
-        lifecycleLock.lock();
-        try {
-            if (closed) { throw new IllegalStateException("Percolator SQL engine closed"); }
-            return new PercolatorSqlSession(runtime, planner, resolver, codec, isolation, options);
-        } finally { lifecycleLock.unlock(); }
+    /**
+     * Returns the KV, the original Primary Query and bounded recovery entry to the same backend.
+     *
+     * @return the operation result
+     */
+    public PercolatorRuntime runtime() {
+        return runtime;
     }
 
-    /** 返回自动维护健康状态；借用自定义运行时的引擎没有自动调度器。 */
+    /**
+     * Each caller acquires an independent SQL transaction session, without prejudice to the original default backend.
+     *
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    @Override
+    public SqlSession openSession() {
+        if (closed) {
+            throw new IllegalStateException("Percolator SQL engine closed");
+        }
+        lifecycleLock.lock();
+        try {
+            if (closed) {
+                throw new IllegalStateException("Percolator SQL engine closed");
+            }
+            return new PercolatorSqlSession(runtime, planner, resolver, codec, isolation, options);
+        } finally {
+            lifecycleLock.unlock();
+        }
+    }
+
+    /**
+     * Returns the automatic state of health; there is no automated scheduler for a custom running engine.
+     *
+     * @return the operation result
+     */
     public java.util.Optional<com.flyingzc.azir.maintenance.MaintenanceService.Health> maintenanceHealth() {
         return java.util.Optional.ofNullable(maintenance).map(com.flyingzc.azir.maintenance.MaintenanceService::health);
     }
 
-    /** 停止并等待后台维护，再关闭工厂拥有的运行时；关闭超时允许稍后重试。 */
-    @Override public void close() {
-        closed = true; lifecycleLock.lock();
+    /**
+     * Stop and wait for background maintenance to close the plant-owned running time; close timeout allows later retry.
+     */
+    @Override
+    public void close() {
+        closed = true;
+        lifecycleLock.lock();
         try {
-            if (maintenance != null) { maintenance.close(); }
-            if (ownsRuntime) { runtime.close(); }
-        } finally { lifecycleLock.unlock(); }
+            if (maintenance != null) {
+                maintenance.close();
+            }
+            if (ownsRuntime) {
+                runtime.close();
+            }
+        } finally {
+            lifecycleLock.unlock();
+        }
     }
 }

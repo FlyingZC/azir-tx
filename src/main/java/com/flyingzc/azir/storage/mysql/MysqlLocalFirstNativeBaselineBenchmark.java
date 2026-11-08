@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -16,14 +32,25 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 与本地先提交协议相同键值负载的原生 MySQL 单键事务容量对照。 */
+/**
+ * MySQL single key transaction capacity contrasts with the original MySQL load, which is the same as the local first commit protocol.
+ */
 public final class MysqlLocalFirstNativeBaselineBenchmark {
-    /** 基准入口不保存全局可变状态。 */
+
+    /**
+     * The benchmark entry point keeps no global mutable state.
+     */
     private MysqlLocalFirstNativeBaselineBenchmark() {
     }
 
-    /** 显式重置独立业务表后，以相同键和值构造逐笔持久事务。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * When the standalone sheet is reset, it is constructed with the same key and value by durable transaction.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("native baseline requires AZIR_TX_RESET=true");
         }
@@ -41,16 +68,23 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
         String url = env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_1");
         String username = env("AZIR_TX_USERNAME", "root");
         String password = env("AZIR_TX_PASSWORD", "root");
-        try (HikariDataSource dataSource = (HikariDataSource) MysqlDataSourceFactory.create(
-                url, username, password)) {
+        try (
+                HikariDataSource dataSource = (HikariDataSource) MysqlDataSourceFactory.create(
+                        url, username, password)) {
             initializeAndReset(dataSource, watermarkStripes);
             run(dataSource, concurrency, durationSeconds, explicitTransaction,
                     reuseConnection, shardWatermark, watermarkStripes);
         }
     }
 
-    /** 仅清空本基准专用业务表，不碰控制协议与分片 MVCC 表。 */
-    private static void initializeAndReset(HikariDataSource dataSource, int watermarkStripes) throws Exception {
+    /**
+     * Emptys only the benchmark POP and does not touch the control protocol with the shard MVCC table.
+     *
+     * @param dataSource database connection source
+     * @param watermarkStripes watermark stripes
+     * @throws Exception if the operation cannot complete
+     */
+    private static void initializeAndReset(final HikariDataSource dataSource, final int watermarkStripes) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("""
                     create table if not exists bench_local_first_native (
@@ -79,10 +113,22 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
         }
     }
 
-    /** 可切换逐线程复用或逐事务借连接，量化连接策略对原生对照的影响。 */
-    private static void run(HikariDataSource dataSource, int concurrency, int durationSeconds,
-                            boolean explicitTransaction, boolean reuseConnection,
-                            boolean shardWatermark, int watermarkStripes) throws Exception {
+    /**
+     * Toggle the impact of the connection policy on primary contrasts by switching to line-by-line or transaction -by- connection.
+     *
+     * @param dataSource database connection source
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param explicitTransaction explicit transaction
+     * @param reuseConnection reuse connection
+     * @param shardWatermark shard watermark
+     * @param watermarkStripes watermark stripes
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static void run(final HikariDataSource dataSource, final int concurrency, final int durationSeconds,
+                            final boolean explicitTransaction, final boolean reuseConnection,
+                            final boolean shardWatermark, final int watermarkStripes) throws Exception {
         AtomicLong sequence = new AtomicLong(100);
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
@@ -97,10 +143,12 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
                 workers.submit(() -> {
                     try {
                         if (reuseConnection) {
-                            try (Connection connection = dataSource.getConnection();
-                                 PreparedStatement insert = insertStatement(connection);
-                                 PreparedStatement watermark = shardWatermark
-                                         ? watermarkStatement(connection) : null) {
+                            try (
+                                    Connection connection = dataSource.getConnection();
+                                    PreparedStatement insert = insertStatement(connection);
+                                    PreparedStatement watermark = shardWatermark
+                                            ? watermarkStatement(connection)
+                                            : null) {
                                 connection.setAutoCommit(!explicitTransaction);
                                 ready.countDown();
                                 start.await();
@@ -122,7 +170,7 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
                                         }
                                         committed.increment();
                                         latencies.add(System.nanoTime() - started);
-                                    } catch (Exception ex) {
+                                    } catch (final Exception ex) {
                                         failures.increment();
                                         firstFailure.compareAndSet(null,
                                                 ex.getClass().getSimpleName() + ":" + ex.getMessage());
@@ -141,9 +189,11 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
                                 long started = System.nanoTime();
                                 try (Connection connection = dataSource.getConnection()) {
                                     connection.setAutoCommit(!explicitTransaction);
-                                    try (PreparedStatement insert = insertStatement(connection);
-                                         PreparedStatement watermark = shardWatermark
-                                                 ? watermarkStatement(connection) : null) {
+                                    try (
+                                            PreparedStatement insert = insertStatement(connection);
+                                            PreparedStatement watermark = shardWatermark
+                                                    ? watermarkStatement(connection)
+                                                    : null) {
                                         long timestamp = sequence.incrementAndGet();
                                         writeOne(insert, timestamp);
                                         if (watermark != null) {
@@ -155,7 +205,7 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
                                         if (explicitTransaction) {
                                             connection.commit();
                                         }
-                                    } catch (Exception ex) {
+                                    } catch (final Exception ex) {
                                         if (explicitTransaction) {
                                             connection.rollback();
                                         }
@@ -163,14 +213,14 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
                                     }
                                     committed.increment();
                                     latencies.add(System.nanoTime() - started);
-                                } catch (Exception ex) {
+                                } catch (final Exception ex) {
                                     failures.increment();
                                     firstFailure.compareAndSet(null,
                                             ex.getClass().getSimpleName() + ":" + ex.getMessage());
                                 }
                             }
                         }
-                    } catch (Exception ex) {
+                    } catch (final Exception ex) {
                         firstFailure.compareAndSet(null,
                                 ex.getClass().getSimpleName() + ":" + ex.getMessage());
                         failures.increment();
@@ -197,10 +247,10 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
                 throw new IllegalStateException("native shard watermark differs from durable business rows");
             }
             System.out.printf("LOCAL_FIRST_NATIVE_BENCH concurrency=%d duration_s=%.2f "
-                            + "explicit_tx=%s reuse_connection=%s shard_watermark=%s "
-                            + "watermark_stripes=%d "
-                            + "attempts=%d committed=%d failures=%d "
-                            + "commit_tps=%.2f p99_ms=%.2f rows=%d watermark=%d first_failure=%s%n",
+                    + "explicit_tx=%s reuse_connection=%s shard_watermark=%s "
+                    + "watermark_stripes=%d "
+                    + "attempts=%d committed=%d failures=%d "
+                    + "commit_tps=%.2f p99_ms=%.2f rows=%d watermark=%d first_failure=%s%n",
                     concurrency, seconds, explicitTransaction, reuseConnection,
                     shardWatermark, watermarkStripes, attempts.sum(), committed.sum(),
                     failures.sum(), committed.sum() / seconds, p99Millis, rows, watermark,
@@ -208,23 +258,41 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
         }
     }
 
-    /** 两种连接策略使用同一条预编译单键写入语句。 */
-    private static PreparedStatement insertStatement(Connection connection) throws SQLException {
+    /**
+     * Two connection policies write statements using the same pre-compiled unit key.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static PreparedStatement insertStatement(final Connection connection) throws SQLException {
         return connection.prepareStatement("""
                 insert into bench_local_first_native(user_key, payload) values (?, ?)
                 """);
     }
 
-    /** 分条本地序号与业务行在同一 InnoDB 事务中持久化。 */
-    private static PreparedStatement watermarkStatement(Connection connection) throws SQLException {
+    /**
+     * Subsection local serial number is the same as business line in InnoDB transaction.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static PreparedStatement watermarkStatement(final Connection connection) throws SQLException {
         return connection.prepareStatement("""
                 update bench_local_first_watermark_stripes
                 set committed_seq = committed_seq + 1 where stripe_id = ?
                 """);
     }
 
-    /** 与协议基准保持相同的键和值字节，并要求恰好写入一行。 */
-    private static void writeOne(PreparedStatement insert, long timestamp) throws SQLException {
+    /**
+     * Keeps the same key and value bytes as the protocol benchmark, and requires that you write exactly to a line.
+     *
+     * @param insert insert
+     * @param timestamp timestamp
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void writeOne(final PreparedStatement insert, final long timestamp) throws SQLException {
         insert.setBytes(1, ("local-first:" + timestamp).getBytes(StandardCharsets.UTF_8));
         insert.setBytes(2, ("v" + timestamp).getBytes(StandardCharsets.UTF_8));
         if (insert.executeUpdate() != 1) {
@@ -232,10 +300,18 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
         }
     }
 
-    /** 实际物理业务行数作为成功提交量的持久证明。 */
-    private static long rowCount(HikariDataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection(); Statement query = connection.createStatement();
-             ResultSet row = query.executeQuery("select count(*) from bench_local_first_native")) {
+    /**
+     * Actual physical business lines as durable of the commit volume for success.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static long rowCount(final HikariDataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection(); Statement query = connection.createStatement();
+                ResultSet row = query.executeQuery("select count(*) from bench_local_first_native")) {
             if (!row.next()) {
                 throw new IllegalStateException("native row count returned no row");
             }
@@ -243,11 +319,19 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
         }
     }
 
-    /** 汇总所有持久分条水位以核对每笔成功提交都完成了同事务推进。 */
-    private static long watermarkValue(HikariDataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection(); Statement query = connection.createStatement();
-             ResultSet row = query.executeQuery("select sum(committed_seq) "
-                     + "from bench_local_first_watermark_stripes")) {
+    /**
+     * Summarize all durable subsections watermark to verify that each successful commit completed the same transaction advance.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static long watermarkValue(final HikariDataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection(); Statement query = connection.createStatement();
+                ResultSet row = query.executeQuery("select sum(committed_seq) "
+                        + "from bench_local_first_watermark_stripes")) {
             if (!row.next()) {
                 throw new IllegalStateException("native shard watermark returned no row");
             }
@@ -255,8 +339,14 @@ public final class MysqlLocalFirstNativeBaselineBenchmark {
         }
     }
 
-    /** 只使用本基准明确指定的连接和容量参数。 */
-    private static String env(String name, String fallback) {
+    /**
+     * Use only this benchmark specified connection and capacity parameters.
+     *
+     * @param name name
+     * @param fallback fallback
+     * @return the operation result
+     */
+    private static String env(final String name, final String fallback) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? fallback : value;
     }

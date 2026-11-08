@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -34,93 +50,64 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/** 分段账本的预留、owner fencing、中心终态与连续发布持久层。 */
+/**
+ * Retention, owner fencing, centre terminal state and continuous distribution of durable floors.
+ */
 public final class MysqlSegmentPublicationLedger {
+
     private final DataSource dataSource;
+
     private final MysqlPublicationLedger leaseGc;
 
-    /** 仅由成功提交中心事务的账本创建，分片用其避免重复查询同一决议。 */
-    public static final class CommittedProof {
-        private final long txId;
-        private final long startTs;
-        private final long commitTs;
-        private final Set<String> participants;
-        private final DataSource authority;
-
-        /** 限制构造入口，避免未落盘的调用方时间戳被当作持久决议。 */
-        private CommittedProof(long txId, long startTs, long commitTs, Set<String> participants,
-                               DataSource authority) {
-            this.txId = txId;
-            this.startTs = startTs;
-            this.commitTs = commitTs;
-            this.participants = Set.copyOf(participants);
-            this.authority = authority;
-        }
-
-        /** 返回已提交事务编号。 */
-        public long txId() { return txId; }
-
-        /** 返回决议核验过的开始水位。 */
-        public long startTs() { return startTs; }
-
-        /** 返回已提交时间槽。 */
-        public long commitTs() { return commitTs; }
-
-        /** 返回决议时已固定的完整参与分片集合。 */
-        public Set<String> participants() { return participants; }
-
-        /** 只允许原前台控制权威绑定的分片使用本凭据。 */
-        public boolean belongsTo(TransactionMetadataStore store) {
-            return store instanceof MysqlTransactionMetadataStore mysql && mysql.usesDataSource(authority);
-        }
-    }
-
-    /** 一次锁定读取的 owner 凭据和持久终态。 */
-    private record LockedSegment(PublicationSegmentLease lease, String status) {
-    }
-
-    /** 批次锁定读取的一笔快照租约。 */
-    private record BatchLease(long readTs, long expiresAtMillis) {
-    }
-
-    /** 批次锁定读取的一笔未决中心事务。 */
-    private record BatchMetadata(long startTs, String status, Long commitTs, String participants) {
-    }
-
-    /** 批次锁定读取的一条分段槽身份。 */
-    private record BatchSlot(long segmentStart, String status, Long txId) {
-    }
-
-    /** 绑定同一个 MySQL 控制数据库，调用方仍须提供独立的后台连接预算。 */
-    public MysqlSegmentPublicationLedger(DataSource dataSource) {
+    /**
+     * Bind with the same MySQL control database, the caller must still provide a stand-alone background connection budget.
+     *
+     * @param dataSource database connection source
+     */
+    public MysqlSegmentPublicationLedger(final DataSource dataSource) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.leaseGc = new MysqlPublicationLedger(dataSource);
     }
 
-    /** 前台分段事务与中心元数据必须共享同一数据源实例。 */
-    public boolean sharesMetadataAuthority(TransactionMetadataStore metadataStore) {
+    /**
+     * Sub-paragraph foreground transaction must share examples of the same data source with central metadata.
+     *
+     * @param metadataStore metadata store
+     * @return the operation result
+     */
+    public boolean sharesMetadataAuthority(final TransactionMetadataStore metadataStore) {
         return metadataStore instanceof MysqlTransactionMetadataStore mysql
                 && mysql.usesDataSource(dataSource);
     }
 
-    /** 在旧账本已停止写入且全部排空后，建立可崩溃续建的数据库级分段模式栅栏。 */
+    /**
+     * Create a crashable database -grade segment fence after the old book has been stopped and all empty.
+     */
     public void activateFromLedger() {
         new MysqlSegmentProtocolActivator(dataSource, this).activate();
     }
 
-    /** 业务入口启动前同时验证持久模式与旧状态表的物理写栅栏。 */
+    /**
+     * The physical writing of the verify durable mode and the old status table before the start-up of the business entry.
+     */
     public void assertActivated() {
         new MysqlSegmentProtocolActivator(dataSource, this).assertActivated();
     }
 
-    /** 只初始化隔离版本表，重复调用保留原时间线并拒绝改变初始上界。 */
-    public void initializeIsolated(long baseCommitTs) {
+    /**
+     * Only initializes the version table, repeats the call to keep the original time line and refuses to change the initial upper boundary.
+     *
+     * @param baseCommitTs base commit ts
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public void initializeIsolated(final long baseCommitTs) {
         if (baseCommitTs < 0 || baseCommitTs == Long.MAX_VALUE) {
             throw new IllegalArgumentException("invalid segment base timestamp");
         }
         MysqlConnectionContext.withPublicationLock(dataSource, 10, () -> {
-            try (Connection connection = MysqlConnectionContext.connection(dataSource);
-                 Statement statement = connection.createStatement()) {
+            try (
+                    Connection connection = MysqlConnectionContext.connection(dataSource);
+                    Statement statement = connection.createStatement()) {
                 statement.execute("""
                         create table if not exists mvcc_segment_publication_state_v1 (
                           singleton_id tinyint not null primary key,
@@ -170,12 +157,13 @@ public final class MysqlSegmentPublicationLedger {
                         """);
                 assertSchemaReady(connection);
                 MysqlConnectionContext.inTransaction(dataSource, transaction -> {
-                    try (PreparedStatement state = transaction.prepareStatement("""
-                            select base_commit_ts, next_commit_ts, published_ts, safe_point,
-                                   schema_version
-                            from mvcc_segment_publication_state_v1 where singleton_id = 1 for update
-                            """);
-                         ResultSet row = state.executeQuery()) {
+                    try (
+                            PreparedStatement state = transaction.prepareStatement("""
+                                    select base_commit_ts, next_commit_ts, published_ts, safe_point,
+                                           schema_version
+                                    from mvcc_segment_publication_state_v1 where singleton_id = 1 for update
+                                    """);
+                            ResultSet row = state.executeQuery()) {
                         if (row.next()) {
                             if (row.getLong(1) != baseCommitTs || row.getLong(4) > row.getLong(3)
                                     || row.getLong(3) > row.getLong(2) || row.getLong(2) < baseCommitTs
@@ -186,11 +174,12 @@ public final class MysqlSegmentPublicationLedger {
                             return null;
                         }
                     }
-                    try (PreparedStatement orphaned = transaction.prepareStatement("""
-                            select (select count(*) from mvcc_publication_segment_v1)
-                                 + (select count(*) from mvcc_publication_segment_slot_v1)
-                            """);
-                         ResultSet row = orphaned.executeQuery()) {
+                    try (
+                            PreparedStatement orphaned = transaction.prepareStatement("""
+                                    select (select count(*) from mvcc_publication_segment_v1)
+                                         + (select count(*) from mvcc_publication_segment_slot_v1)
+                                    """);
+                            ResultSet row = orphaned.executeQuery()) {
                         if (!row.next() || row.getLong(1) != 0) {
                             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                     "segment state missing while durable rows remain", false, null);
@@ -209,67 +198,78 @@ public final class MysqlSegmentPublicationLedger {
                     }
                     return null;
                 });
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw storageError("initialize isolated segment ledger failed", ex);
             }
             return null;
         });
     }
 
-    /** 启动时拒绝沿用缺少幂等键或可空占位槽的旧实验表结构。 */
-    void assertSchemaReady(Connection connection) throws SQLException {
-        try (PreparedStatement state = connection.prepareStatement("""
-                select count(*) from information_schema.columns
-                where table_schema = database()
-                  and table_name = 'mvcc_segment_publication_state_v1'
-                  and column_name = 'schema_version'
-                """);
-             ResultSet row = state.executeQuery()) {
+    /**
+     * Refuses to follow old experiments with missing idempotent keys or empty slot table schema at startup.
+     *
+     * @param connection connection
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    void assertSchemaReady(final Connection connection) throws SQLException {
+        try (
+                PreparedStatement state = connection.prepareStatement("""
+                        select count(*) from information_schema.columns
+                        where table_schema = database()
+                          and table_name = 'mvcc_segment_publication_state_v1'
+                          and column_name = 'schema_version'
+                        """);
+                ResultSet row = state.executeQuery()) {
             if (!row.next() || row.getLong(1) != 1) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "segment timeline lacks current schema version", false, null);
             }
         }
-        try (PreparedStatement version = connection.prepareStatement("""
-                select schema_version from mvcc_segment_publication_state_v1 where singleton_id = 1
-                """);
-             ResultSet row = version.executeQuery()) {
+        try (
+                PreparedStatement version = connection.prepareStatement("""
+                        select schema_version from mvcc_segment_publication_state_v1 where singleton_id = 1
+                        """);
+                ResultSet row = version.executeQuery()) {
             if (row.next() && row.getInt(1) != 3) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "segment timeline uses an incompatible slot protocol version", false, null);
             }
         }
-        try (PreparedStatement columns = connection.prepareStatement("""
-                select count(*) from information_schema.columns
-                where table_schema = database()
-                  and table_name = 'mvcc_publication_segment_v1'
-                  and column_name in ('reservation_key', 'lease_millis')
-                """);
-             ResultSet row = columns.executeQuery()) {
+        try (
+                PreparedStatement columns = connection.prepareStatement("""
+                        select count(*) from information_schema.columns
+                        where table_schema = database()
+                          and table_name = 'mvcc_publication_segment_v1'
+                          and column_name in ('reservation_key', 'lease_millis')
+                        """);
+                ResultSet row = columns.executeQuery()) {
             if (!row.next() || row.getLong(1) != 2) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "segment table lacks durable reservation identity", false, null);
             }
         }
-        try (PreparedStatement key = connection.prepareStatement("""
-                select count(*) from information_schema.statistics
-                where table_schema = database()
-                  and table_name = 'mvcc_publication_segment_v1'
-                  and column_name = 'reservation_key' and non_unique = 0
-                """);
-             ResultSet row = key.executeQuery()) {
+        try (
+                PreparedStatement key = connection.prepareStatement("""
+                        select count(*) from information_schema.statistics
+                        where table_schema = database()
+                          and table_name = 'mvcc_publication_segment_v1'
+                          and column_name = 'reservation_key' and non_unique = 0
+                        """);
+                ResultSet row = key.executeQuery()) {
             if (!row.next() || row.getLong(1) < 1) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "segment reservation key is not unique", false, null);
             }
         }
-        try (PreparedStatement slot = connection.prepareStatement("""
-                select is_nullable from information_schema.columns
-                where table_schema = database()
-                  and table_name = 'mvcc_publication_segment_slot_v1'
-                  and column_name = 'tx_id'
-                """);
-             ResultSet row = slot.executeQuery()) {
+        try (
+                PreparedStatement slot = connection.prepareStatement("""
+                        select is_nullable from information_schema.columns
+                        where table_schema = database()
+                          and table_name = 'mvcc_publication_segment_slot_v1'
+                          and column_name = 'tx_id'
+                        """);
+                ResultSet row = slot.executeQuery()) {
             if (!row.next() || !"YES".equals(row.getString(1))) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "segment slot cannot represent an unclaimed placeholder", false, null);
@@ -277,9 +277,18 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 一笔控制事务同时推进上界、持久化 owner 和全部 PENDING 占位槽。 */
-    public PublicationSegmentLease reserveSegment(String ownerId, String reservationKey,
-                                                  int size, long leaseMillis) {
+    /**
+     * One control transaction simultaneously pushes the upper boundary, durable storage owner and all PENDING slots.
+     *
+     * @param ownerId owner id
+     * @param reservationKey reservation key
+     * @param size size
+     * @param leaseMillis lease millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public PublicationSegmentLease reserveSegment(final String ownerId, final String reservationKey,
+                                                  final int size, final long leaseMillis) {
         requireOwner(ownerId);
         requireOwner(reservationKey);
         if (size < 1 || size > 4096 || leaseMillis < 1 || leaseMillis > 86_400_000) {
@@ -288,11 +297,12 @@ public final class MysqlSegmentPublicationLedger {
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long lower;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select next_commit_ts from mvcc_segment_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet row = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select next_commit_ts from mvcc_segment_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet row = state.executeQuery()) {
                     if (!row.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "segment timeline has not been initialized", false, null);
@@ -307,21 +317,22 @@ public final class MysqlSegmentPublicationLedger {
                 long expiresAt = Math.addExact(now, leaseMillis);
                 long first = lower + 1;
                 long last = lower + size;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        update mvcc_segment_publication_state_v1
-                        set next_commit_ts = ? where singleton_id = 1
-                        """);
-                     PreparedStatement owner = connection.prepareStatement("""
-                        insert into mvcc_publication_segment_v1
-                          (segment_start, segment_end, owner_id, reservation_key, lease_millis,
-                           generation, expires_at, status, created_at)
-                        values (?, ?, ?, ?, ?, 1, ?, 'ACTIVE', ?)
-                        """);
-                     PreparedStatement slot = connection.prepareStatement("""
-                        insert into mvcc_publication_segment_slot_v1
-                          (commit_ts, segment_start, tx_id, status, expires_at)
-                        values (?, ?, null, 'PENDING', null)
-                        """)) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                update mvcc_segment_publication_state_v1
+                                set next_commit_ts = ? where singleton_id = 1
+                                """);
+                        PreparedStatement owner = connection.prepareStatement("""
+                                insert into mvcc_publication_segment_v1
+                                  (segment_start, segment_end, owner_id, reservation_key, lease_millis,
+                                   generation, expires_at, status, created_at)
+                                values (?, ?, ?, ?, ?, 1, ?, 'ACTIVE', ?)
+                                """);
+                        PreparedStatement slot = connection.prepareStatement("""
+                                insert into mvcc_publication_segment_slot_v1
+                                  (commit_ts, segment_start, tx_id, status, expires_at)
+                                values (?, ?, null, 'PENDING', null)
+                                """)) {
                     state.setLong(1, last);
                     if (state.executeUpdate() != 1) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -344,7 +355,7 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return new PublicationSegmentLease(first, last, ownerId, 1, expiresAt);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() == 1062) {
                 return replayReservation(ownerId, reservationKey, size, leaseMillis, ex);
             }
@@ -352,16 +363,27 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 唯一请求键命中时只重放原范围；身份或预算改变不能悄悄分配新槽。 */
-    private PublicationSegmentLease replayReservation(String ownerId, String reservationKey,
-                                                       int size, long leaseMillis, SQLException original) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select segment_start, segment_end, owner_id, generation, expires_at,
-                            status, lease_millis,
-                            cast(unix_timestamp(current_timestamp(3))*1000 as signed) as database_now
-                     from mvcc_publication_segment_v1 where reservation_key = ?
-                     """)) {
+    /**
+     * Only replay range when requested to hit the key; identity or budget changes cannot quietly allocate new slots.
+     *
+     * @param ownerId owner id
+     * @param reservationKey reservation key
+     * @param size size
+     * @param leaseMillis lease millis
+     * @param original original
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private PublicationSegmentLease replayReservation(final String ownerId, final String reservationKey,
+                                                      final int size, final long leaseMillis, final SQLException original) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select segment_start, segment_end, owner_id, generation, expires_at,
+                               status, lease_millis,
+                               cast(unix_timestamp(current_timestamp(3))*1000 as signed) as database_now
+                        from mvcc_publication_segment_v1 where reservation_key = ?
+                        """)) {
             query.setString(1, reservationKey);
             try (ResultSet row = query.executeQuery()) {
                 if (!row.next()) {
@@ -383,13 +405,20 @@ public final class MysqlSegmentPublicationLedger {
                 return new PublicationSegmentLease(first, last, ownerId,
                         row.getLong("generation"), row.getLong("expires_at"));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("replay publication segment reservation failed", ex);
         }
     }
 
-    /** 按当前代数和数据库时钟续租，旧 owner 代数无法继续取得时间槽决议权。 */
-    public PublicationSegmentLease renewSegment(PublicationSegmentLease lease, long leaseMillis) {
+    /**
+     * Releasing at current algebra and database hours does not allow the old homeer algebra to continue to acquire slot decision rights.
+     *
+     * @param lease lease
+     * @param leaseMillis lease millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public PublicationSegmentLease renewSegment(final PublicationSegmentLease lease, final long leaseMillis) {
         Objects.requireNonNull(lease, "lease");
         if (leaseMillis < 1 || leaseMillis > 86_400_000) {
             throw new IllegalArgumentException("invalid segment renewal period");
@@ -420,21 +449,28 @@ public final class MysqlSegmentPublicationLedger {
                 return new PublicationSegmentLease(lease.firstTs(), lease.lastTs(), lease.ownerId(),
                         durable.generation() + 1, expiresAt);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("renew publication segment failed", ex);
         }
     }
 
-    /** 续租响应未知时读取当前持久 owner 代数，已封存分段不再返回可用凭据。 */
-    public Optional<PublicationSegmentLease> segmentLease(long firstTs) {
+    /**
+     * Resume lease to read the current durable own algebra at unknown time, and the closed segment no longer returns the available receipt.
+     *
+     * @param firstTs first ts
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public Optional<PublicationSegmentLease> segmentLease(final long firstTs) {
         if (firstTs < 1) {
             throw new IllegalArgumentException("invalid segment start");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select segment_end, owner_id, generation, expires_at, status
-                     from mvcc_publication_segment_v1 where segment_start = ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select segment_end, owner_id, generation, expires_at, status
+                        from mvcc_publication_segment_v1 where segment_start = ?
+                        """)) {
             query.setLong(1, firstTs);
             try (ResultSet row = query.executeQuery()) {
                 if (!row.next() || !"ACTIVE".equals(row.getString("status"))) {
@@ -444,13 +480,18 @@ public final class MysqlSegmentPublicationLedger {
                         row.getString("owner_id"), row.getLong("generation"),
                         row.getLong("expires_at")));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read current segment owner lease failed", ex);
         }
     }
 
-    /** owner 主动封存尾槽；调用方须先停止本地分配并等待在途决议结束。 */
-    public int sealOwnedSegment(PublicationSegmentLease lease) {
+    /**
+     * Owner actively seals the tailings; the caller must stop the local distribution and wait for the end of the journey decision.
+     *
+     * @param lease lease
+     * @return the operation result
+     */
+    public int sealOwnedSegment(final PublicationSegmentLease lease) {
         Objects.requireNonNull(lease, "lease");
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
@@ -465,13 +506,19 @@ public final class MysqlSegmentPublicationLedger {
                 requireCurrentOwner(lease, locked, now);
                 return sealLockedSegment(connection, lease.firstTs(), lease.lastTs());
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("seal owned publication segment failed", ex);
         }
     }
 
-    /** 接管者只能在数据库租约到期后 fencing，再封存仍未决议的占位槽。 */
-    public int sealExpiredSegment(long segmentStart) {
+    /**
+     * The receiver can only fencing after database lease expires and then seal the slot where pending is still held.
+     *
+     * @param segmentStart segment start
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public int sealExpiredSegment(final long segmentStart) {
         if (segmentStart < 1) {
             throw new IllegalArgumentException("invalid segment start");
         }
@@ -491,31 +538,38 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return sealLockedSegment(connection, segmentStart, locked.lease().lastTs());
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("seal expired publication segment failed", ex);
         }
     }
 
-    /** 轮转接管有界数量的到期分段，返回本轮封存的未决时间槽数。 */
-    public int sealExpiredSegments(int limit) {
+    /**
+     * Rotation takes over the expired bounded amount and returns the number of pending -time slots in this round.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public int sealExpiredSegments(final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("invalid expired segment scan limit");
         }
         List<Long> expired = new ArrayList<>(limit);
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select segment_start from mvcc_publication_segment_v1
-                     where status = 'ACTIVE'
-                       and expires_at <= cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                     order by expires_at, segment_start limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select segment_start from mvcc_publication_segment_v1
+                        where status = 'ACTIVE'
+                          and expires_at <= cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                        order by expires_at, segment_start limit ?
+                        """)) {
             query.setInt(1, limit);
             try (ResultSet rows = query.executeQuery()) {
                 while (rows.next()) {
                     expired.add(rows.getLong(1));
                 }
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("scan expired publication segments failed", ex);
         }
         int sealedSlots = 0;
@@ -525,8 +579,14 @@ public final class MysqlSegmentPublicationLedger {
         return sealedSlots;
     }
 
-    /** 排他锁住时间线后仅推进已持久化的连续终态前缀。 */
-    public long advancePublished(int limit) {
+    /**
+     * Platoon locks the time line and pushes only the continuous terminal state prefix of durable storage.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public long advancePublished(final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("invalid segment publication limit");
         }
@@ -534,11 +594,12 @@ public final class MysqlSegmentPublicationLedger {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long published;
                 long upper;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select published_ts, next_commit_ts from mvcc_segment_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet row = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select published_ts, next_commit_ts from mvcc_segment_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet row = state.executeQuery()) {
                     if (!row.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "segment timeline has not been initialized", false, null);
@@ -585,40 +646,51 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return next;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("advance segment publication failed", ex);
         }
     }
 
-    /** 读取持久发布水位，供等待已确认提交的协调器判断可见边界。 */
+    /**
+     * Read durable to release watermark for the coordinator determination of confirmed commit.
+     *
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
     public long currentPublished() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select published_ts from mvcc_segment_publication_state_v1 where singleton_id = 1
-                     """);
-             ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select published_ts from mvcc_segment_publication_state_v1 where singleton_id = 1
+                        """);
+                ResultSet row = query.executeQuery()) {
             if (!row.next()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "segment timeline has not been initialized", false, null);
             }
             return row.getLong(1);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read segment published watermark failed", ex);
         }
     }
 
-    /** 与分段开始快照共用状态行栅栏，按最老租约和未 finalized 元数据推进安全点。 */
+    /**
+     * Snapshot common state line fence with start of segment, advance safe point by the oldest lease and unfinalized metadata.
+     *
+     * @return the operation result
+     */
     public long advanceSafePoint() {
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 MysqlProtocolEpoch.requireSegment(connection);
                 long published;
                 long current;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select published_ts, safe_point from mvcc_segment_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet row = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select published_ts, safe_point from mvcc_segment_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet row = state.executeQuery()) {
                     if (!row.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "segmented safe point state is missing", false, null);
@@ -631,20 +703,21 @@ public final class MysqlSegmentPublicationLedger {
                             "segmented safe point already exceeds publication", false, null);
                 }
                 Long oldest = null;
-                try (PreparedStatement protectedSnapshots = connection.prepareStatement("""
-                        select min(read_ts) from (
-                          select read_ts from mvcc_snapshot_lease_v2
-                            where expires_at > cast(unix_timestamp(current_timestamp(3))*1000 as signed)
-                          union all
-                          select read_ts from mvcc_coordinator_snapshot_lease_v1
-                            where expires_at > cast(unix_timestamp(current_timestamp(3))*1000 as signed)
-                          union all
-                          select t.start_ts as read_ts from mvcc_txn t
-                            left join mvcc_txn_finalized f on f.tx_id = t.tx_id
-                            where f.tx_id is null
-                        ) active_snapshots
-                        """);
-                     ResultSet row = protectedSnapshots.executeQuery()) {
+                try (
+                        PreparedStatement protectedSnapshots = connection.prepareStatement("""
+                                select min(read_ts) from (
+                                  select read_ts from mvcc_snapshot_lease_v2
+                                    where expires_at > cast(unix_timestamp(current_timestamp(3))*1000 as signed)
+                                  union all
+                                  select read_ts from mvcc_coordinator_snapshot_lease_v1
+                                    where expires_at > cast(unix_timestamp(current_timestamp(3))*1000 as signed)
+                                  union all
+                                  select t.start_ts as read_ts from mvcc_txn t
+                                    left join mvcc_txn_finalized f on f.tx_id = t.tx_id
+                                    where f.tx_id is null
+                                ) active_snapshots
+                                """);
+                        ResultSet row = protectedSnapshots.executeQuery()) {
                     if (row.next() && row.getObject(1) != null) {
                         oldest = row.getLong(1);
                     }
@@ -663,54 +736,78 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return next;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("advance segmented safe point failed", ex);
         }
     }
 
-    /** 返回已经持久化且只能单调前进的分段安全点。 */
+    /**
+     * Returns a fraction safe point that is already durable storage and can only move in one-way motion.
+     *
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
     public long currentSafePoint() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select safe_point from mvcc_segment_publication_state_v1 where singleton_id = 1
-                     """);
-             ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select safe_point from mvcc_segment_publication_state_v1 where singleton_id = 1
+                        """);
+                ResultSet row = query.executeQuery()) {
             if (!row.next()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "segmented safe point state is missing", false, null);
             }
             return row.getLong(1);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read segmented safe point failed", ex);
         }
     }
 
-    /** 复用已验证的主键顺序删除，避免到期索引与前台释放发生反向死锁。 */
-    public int expireSnapshots(int limit) {
+    /**
+     * Reuse verify primary key order to delete and avoid a reverse death lock on the expired index and foreground release.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    public int expireSnapshots(final int limit) {
         return leaseGc.expireSnapshots(limit);
     }
 
-    /** 协调者读租约同样按主键顺序有界清理。 */
-    public int expireCoordinatorLeases(int limit) {
+    /**
+     * The coordinator reads the lease also in primary order bounded cleanup.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    public int expireCoordinatorLeases(final int limit) {
         return leaseGc.expireCoordinatorLeases(limit);
     }
 
-    /** 先凭 finalized 物化证明删终态槽，再允许下一 GC 阶段删除中心元数据。 */
-    public int purgeTerminalSlots(long safePoint, long expiredBeforeMillis, int limit) {
+    /**
+     * Allows to delete central metadata in the next GC phase first by certifying and deleting terminal state slots with Finalized materialization.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param expiredBeforeMillis expired before millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    public int purgeTerminalSlots(final long safePoint, final long expiredBeforeMillis, final int limit) {
         checkSegmentPurge(safePoint, expiredBeforeMillis, limit);
         List<Long> candidates = new ArrayList<>();
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select slot.commit_ts from mvcc_publication_segment_slot_v1 slot
-                     join mvcc_publication_segment_v1 segment
-                       on segment.segment_start = slot.segment_start
-                     where slot.commit_ts < ? and slot.status in ('COMMITTED', 'ABORTED')
-                       and slot.expires_at < ? and segment.status = 'SEALED'
-                       and (slot.tx_id is null or exists (
-                         select 1 from mvcc_txn_finalized f
-                         where f.tx_id = slot.tx_id and f.finalized_at < ?))
-                     order by slot.commit_ts limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select slot.commit_ts from mvcc_publication_segment_slot_v1 slot
+                        join mvcc_publication_segment_v1 segment
+                          on segment.segment_start = slot.segment_start
+                        where slot.commit_ts < ? and slot.status in ('COMMITTED', 'ABORTED')
+                          and slot.expires_at < ? and segment.status = 'SEALED'
+                          and (slot.tx_id is null or exists (
+                            select 1 from mvcc_txn_finalized f
+                            where f.tx_id = slot.tx_id and f.finalized_at < ?))
+                        order by slot.commit_ts limit ?
+                        """)) {
             query.setLong(1, safePoint);
             query.setLong(2, expiredBeforeMillis);
             query.setLong(3, expiredBeforeMillis);
@@ -739,29 +836,37 @@ public final class MysqlSegmentPublicationLedger {
                 }
             }
             return removed;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("purge segmented terminal slots failed", ex);
         }
     }
 
-    /** 只在对应分段槽先回收后清理 finalized 元数据，避免恢复器看见孤立终态。 */
-    public int purgeFinalizedMetadata(long safePoint, long finalizedBeforeMillis, int limit) {
+    /**
+     * Cleans up Finalized metadata only after collection in the corresponding slot to avoid seeing isolated terminal state.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param finalizedBeforeMillis finalized before millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    public int purgeFinalizedMetadata(final long safePoint, final long finalizedBeforeMillis, final int limit) {
         checkSegmentPurge(safePoint, finalizedBeforeMillis, limit);
         List<Long> candidates = new ArrayList<>();
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select t.tx_id from mvcc_txn t
-                     join mvcc_txn_finalized f on f.tx_id = t.tx_id
-                     left join mvcc_snapshot_lease_v2 lease on lease.tx_id = t.tx_id
-                     left join mvcc_snapshot_lease legacy on legacy.tx_id = t.tx_id
-                     where lease.tx_id is null and legacy.tx_id is null
-                       and f.finalized_at < ? and t.start_ts < ?
-                       and (t.status = 'ABORTED' or
-                            (t.status = 'COMMITTED' and t.commit_ts < ?))
-                       and not exists (select 1 from mvcc_publication_segment_slot_v1 slot
-                                       where slot.tx_id = t.tx_id)
-                     order by t.tx_id limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select t.tx_id from mvcc_txn t
+                        join mvcc_txn_finalized f on f.tx_id = t.tx_id
+                        left join mvcc_snapshot_lease_v2 lease on lease.tx_id = t.tx_id
+                        left join mvcc_snapshot_lease legacy on legacy.tx_id = t.tx_id
+                        where lease.tx_id is null and legacy.tx_id is null
+                          and f.finalized_at < ? and t.start_ts < ?
+                          and (t.status = 'ABORTED' or
+                               (t.status = 'COMMITTED' and t.commit_ts < ?))
+                          and not exists (select 1 from mvcc_publication_segment_slot_v1 slot
+                                          where slot.tx_id = t.tx_id)
+                        order by t.tx_id limit ?
+                        """)) {
             query.setLong(1, finalizedBeforeMillis);
             query.setLong(2, safePoint);
             query.setLong(3, safePoint);
@@ -783,33 +888,49 @@ public final class MysqlSegmentPublicationLedger {
                 }
             }
             return removed;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("purge finalized segmented metadata failed", ex);
         }
     }
 
-    /** 所有槽已删除且 owner 早于安全点与保留期限时回收分段头。 */
-    public int purgeSealedSegments(long safePoint, long expiredBeforeMillis, int limit) {
+    /**
+     * All slots have been deleted and owner is earlier than safe point and collection at the time of retention.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param expiredBeforeMillis expired before millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    public int purgeSealedSegments(final long safePoint, final long expiredBeforeMillis, final int limit) {
         checkSegmentPurge(safePoint, expiredBeforeMillis, limit);
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement delete = connection.prepareStatement("""
-                     delete from mvcc_publication_segment_v1
-                     where status = 'SEALED' and segment_end < ? and expires_at < ?
-                       and not exists (select 1 from mvcc_publication_segment_slot_v1 slot
-                                       where slot.segment_start = mvcc_publication_segment_v1.segment_start)
-                     order by segment_start limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement delete = connection.prepareStatement("""
+                        delete from mvcc_publication_segment_v1
+                        where status = 'SEALED' and segment_end < ? and expires_at < ?
+                          and not exists (select 1 from mvcc_publication_segment_slot_v1 slot
+                                          where slot.segment_start = mvcc_publication_segment_v1.segment_start)
+                        order by segment_start limit ?
+                        """)) {
             delete.setLong(1, safePoint);
             delete.setLong(2, expiredBeforeMillis);
             delete.setInt(3, limit);
             return delete.executeUpdate();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("purge sealed publication segments failed", ex);
         }
     }
 
-    /** 拒绝强推超过持久安全点的手工终态回收请求。 */
-    private void checkSegmentPurge(long safePoint, long expiredBeforeMillis, int limit) {
+    /**
+     * Rejects the manual terminal state collection request to push more than durable safe point.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param expiredBeforeMillis expired before millis
+     * @param limit maximum number of items
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    private void checkSegmentPurge(final long safePoint, final long expiredBeforeMillis, final int limit) {
         if (safePoint < 0 || expiredBeforeMillis < 0 || limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("invalid segmented GC limits");
         }
@@ -819,8 +940,16 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 在已激活分段模式下原子取得新水位和独立快照租约，RC/RR 均从已发布前缀开始。 */
-    public BeginReservation begin(IsolationLevel isolationLevel, long timeoutMillis, boolean persistMetadata) {
+    /**
+     * Atomic acquires new watermark and independent snapshot lease, in a activated segment mode, and RC/RR starts with the released prefix.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @param timeoutMillis timeout millis
+     * @param persistMetadata persist metadata
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public BeginReservation begin(final IsolationLevel isolationLevel, final long timeoutMillis, final boolean persistMetadata) {
         Objects.requireNonNull(isolationLevel, "isolationLevel");
         if (timeoutMillis < 1 || timeoutMillis > 86_400_000) {
             throw new IllegalArgumentException("invalid segmented snapshot timeout");
@@ -876,31 +1005,42 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return new BeginReservation(txId, readTs, deadline, persistMetadata);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("begin segmented publication snapshot failed", ex);
         }
     }
 
-    /** 已结束事务释放独立租约，未物化中心记录仍继续保护恢复和 GC。 */
-    public void releaseSnapshot(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement delete = connection.prepareStatement("""
-                     delete from mvcc_snapshot_lease_v2 where tx_id = ?
-                     """)) {
+    /**
+     * Transaction released independent lease and continued to protect recovery and GC without materialization centre records.
+     *
+     * @param txId transaction identifier
+     */
+    public void releaseSnapshot(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement delete = connection.prepareStatement("""
+                        delete from mvcc_snapshot_lease_v2 where tx_id = ?
+                        """)) {
             delete.setLong(1, txId);
             delete.executeUpdate();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("release segmented snapshot failed", ex);
         }
     }
 
-    /** 按真实事务编号读取新槽终态，空占位槽不会被误认为一笔事务。 */
-    public Optional<PublicationEntry> findByTxId(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select commit_ts, status, expires_at
-                     from mvcc_publication_segment_slot_v1 where tx_id = ?
-                     """)) {
+    /**
+     * Read the new slot terminal state by real transaction identifier, an empty slot will not be mistaken for a single transaction.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    public Optional<PublicationEntry> findByTxId(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select commit_ts, status, expires_at
+                        from mvcc_publication_segment_slot_v1 where tx_id = ?
+                        """)) {
             query.setLong(1, txId);
             try (ResultSet row = query.executeQuery()) {
                 if (!row.next()) {
@@ -908,25 +1048,33 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return Optional.of(mapTransactionEntry(row, txId));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read segmented decision by transaction id failed", ex);
         }
     }
 
-    /** 按提交时间戳有界发现未 finalized 的新槽终态，游标到末尾后由调用方回卷。 */
-    public List<PublicationEntry> findUnfinalizedTerminal(long afterCommitTs, int limit) {
+    /**
+     * Press commit timestamp bounded to find unfinalized new slot terminal state, cursor to end with a rollback by the caller.
+     *
+     * @param afterCommitTs after commit ts
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<PublicationEntry> findUnfinalizedTerminal(final long afterCommitTs, final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("invalid segmented terminal scan limit");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select s.tx_id, s.commit_ts, s.status, s.expires_at
-                     from mvcc_publication_segment_slot_v1 s
-                     left join mvcc_txn_finalized f on f.tx_id = s.tx_id
-                     where s.commit_ts > ? and s.status in ('COMMITTED', 'ABORTED')
-                       and s.tx_id is not null and f.tx_id is null
-                     order by s.commit_ts limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select s.tx_id, s.commit_ts, s.status, s.expires_at
+                        from mvcc_publication_segment_slot_v1 s
+                        left join mvcc_txn_finalized f on f.tx_id = s.tx_id
+                        where s.commit_ts > ? and s.status in ('COMMITTED', 'ABORTED')
+                          and s.tx_id is not null and f.tx_id is null
+                        order by s.commit_ts limit ?
+                        """)) {
             query.setLong(1, afterCommitTs);
             query.setInt(2, limit);
             try (ResultSet rows = query.executeQuery()) {
@@ -936,27 +1084,36 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return List.copyOf(found);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("scan unfinalized segmented decisions failed", ex);
         }
     }
 
-    /** 从中心元数据发现快照租约已失效且没有新槽终态的未决事务。 */
-    public List<Long> findExpiredUndecided(long nowMillis, long afterTxId, int limit) {
+    /**
+     * Snapshot lease was found to be invalid from central metadata and no new slot terminal state.
+     *
+     * @param nowMillis now millis
+     * @param afterTxId after tx id
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<Long> findExpiredUndecided(final long nowMillis, final long afterTxId, final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("invalid segmented undecided scan limit");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select t.tx_id from mvcc_txn t
-                     left join mvcc_snapshot_lease_v2 lease on lease.tx_id = t.tx_id
-                     left join mvcc_publication_segment_slot_v1 slot on slot.tx_id = t.tx_id
-                     left join mvcc_txn_finalized finalized on finalized.tx_id = t.tx_id
-                     where t.tx_id > ? and finalized.tx_id is null and slot.tx_id is null
-                       and (lease.tx_id is null or lease.expires_at <= ?)
-                       and t.status in ('ACTIVE', 'PREPARING', 'ABORTED', 'COMMITTED')
-                     order by t.tx_id limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select t.tx_id from mvcc_txn t
+                        left join mvcc_snapshot_lease_v2 lease on lease.tx_id = t.tx_id
+                        left join mvcc_publication_segment_slot_v1 slot on slot.tx_id = t.tx_id
+                        left join mvcc_txn_finalized finalized on finalized.tx_id = t.tx_id
+                        where t.tx_id > ? and finalized.tx_id is null and slot.tx_id is null
+                          and (lease.tx_id is null or lease.expires_at <= ?)
+                          and t.status in ('ACTIVE', 'PREPARING', 'ABORTED', 'COMMITTED')
+                        order by t.tx_id limit ?
+                        """)) {
             query.setLong(1, afterTxId);
             query.setLong(2, nowMillis);
             query.setInt(3, limit);
@@ -967,41 +1124,56 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return List.copyOf(found);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("scan expired undecided segmented transactions failed", ex);
         }
     }
 
-    /** 读取当前事务快照租约截止时间，缺失时由恢复路径核对中心记录。 */
-    public OptionalLong snapshotExpiry(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select expires_at from mvcc_snapshot_lease_v2 where tx_id = ?
-                     """)) {
+    /**
+     * Reads the current transaction snapshot lease deadline, which is recorded by the recovery Path Check Center when missing.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    public OptionalLong snapshotExpiry(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select expires_at from mvcc_snapshot_lease_v2 where tx_id = ?
+                        """)) {
             query.setLong(1, txId);
             try (ResultSet row = query.executeQuery()) {
                 return row.next() ? OptionalLong.of(row.getLong(1)) : OptionalLong.empty();
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read segmented snapshot deadline failed", ex);
         }
     }
 
-    /** 找出到期或 owner 已 fencing 的本地候选，按时间戳有界回卷。 */
-    public List<PublicationEntry> findRecoverableLocalPending(long nowMillis, long afterCommitTs, int limit) {
+    /**
+     * Finds the local candidate who is due or whose own is fencing, press timestamp bounded.
+     *
+     * @param nowMillis now millis
+     * @param afterCommitTs after commit ts
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<PublicationEntry> findRecoverableLocalPending(final long nowMillis, final long afterCommitTs, final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("invalid local pending scan limit");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select slot.tx_id, slot.commit_ts, slot.status, slot.expires_at
-                     from mvcc_publication_segment_slot_v1 slot
-                     join mvcc_publication_segment_v1 owner
-                       on owner.segment_start = slot.segment_start
-                     where slot.commit_ts > ? and slot.status = 'PENDING' and slot.tx_id is not null
-                       and (slot.expires_at <= ? or owner.status = 'SEALED')
-                     order by slot.commit_ts limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select slot.tx_id, slot.commit_ts, slot.status, slot.expires_at
+                        from mvcc_publication_segment_slot_v1 slot
+                        join mvcc_publication_segment_v1 owner
+                          on owner.segment_start = slot.segment_start
+                        where slot.commit_ts > ? and slot.status = 'PENDING' and slot.tx_id is not null
+                          and (slot.expires_at <= ? or owner.status = 'SEALED')
+                        order by slot.commit_ts limit ?
+                        """)) {
             query.setLong(1, afterCommitTs);
             query.setLong(2, nowMillis);
             query.setInt(3, limit);
@@ -1012,21 +1184,28 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return List.copyOf(found);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("scan recoverable segmented local candidates failed", ex);
         }
     }
 
-    /** 单笔恢复仍须重新检查到期或 owner fencing，避免扫描后误接管有效候选。 */
-    public boolean localPendingRecoverable(long commitTs, long nowMillis) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select slot.status, slot.tx_id, slot.expires_at, owner.status as owner_status
-                     from mvcc_publication_segment_slot_v1 slot
-                     join mvcc_publication_segment_v1 owner
-                       on owner.segment_start = slot.segment_start
-                     where slot.commit_ts = ?
-                     """)) {
+    /**
+     * Single recovery still needs to be rechecked for expiry or own fincing to avoid scanned and wrongly taking over the valid candidate.
+     *
+     * @param commitTs durable commit timestamp
+     * @param nowMillis now millis
+     * @return the operation result
+     */
+    public boolean localPendingRecoverable(final long commitTs, final long nowMillis) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select slot.status, slot.tx_id, slot.expires_at, owner.status as owner_status
+                        from mvcc_publication_segment_slot_v1 slot
+                        join mvcc_publication_segment_v1 owner
+                          on owner.segment_start = slot.segment_start
+                        where slot.commit_ts = ?
+                        """)) {
             query.setLong(1, commitTs);
             try (ResultSet row = query.executeQuery()) {
                 if (!row.next() || !"PENDING".equals(row.getString("status"))
@@ -1036,13 +1215,21 @@ public final class MysqlSegmentPublicationLedger {
                 return row.getLong("expires_at") <= nowMillis
                         || "SEALED".equals(row.getString("owner_status"));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("check segmented local candidate recovery eligibility failed", ex);
         }
     }
 
-    /** 真实事务槽必须带事务编号和截止时间，空占位槽不能被恢复器误用。 */
-    private PublicationEntry mapTransactionEntry(ResultSet row, long txId) throws SQLException {
+    /**
+     * The real transaction slot must be with an transaction identifier and a cut-off period, and the empty slot cannot be misused by the recovery.
+     *
+     * @param row row
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private PublicationEntry mapTransactionEntry(final ResultSet row, final long txId) throws SQLException {
         Object deadline = row.getObject("expires_at");
         PublicationEntryStatus status = PublicationEntryStatus.valueOf(row.getString("status"));
         if (txId == 0 || deadline == null || row.getLong("expires_at") < 1) {
@@ -1052,28 +1239,59 @@ public final class MysqlSegmentPublicationLedger {
         return new PublicationEntry(txId, row.getLong("commit_ts"), status, row.getLong("expires_at"));
     }
 
-    /** 在同一控制事务中核对 owner、快照与参与者，再原子落中心决议和分段槽终态。 */
-    public long decideCommitted(PublicationSegmentLease segment, long commitTs, long txId,
-                                long deadlineMillis, Set<String> participants) {
+    /**
+     * Check owner, snapshot and participant in the same control transaction, then atomic goes to centre decision and slot terminal state.
+     *
+     * @param segment segment
+     * @param commitTs durable commit timestamp
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @param participants participants
+     * @return the operation result
+     */
+    public long decideCommitted(final PublicationSegmentLease segment, final long commitTs, final long txId,
+                                final long deadlineMillis, final Set<String> participants) {
         decideCommittedReadTs(segment, commitTs, txId, deadlineMillis, participants, null);
         return commitTs;
     }
 
-    /** 只有中心与槽原子提交成功后才返回不可由外部构造的物化凭据。 */
-    public CommittedProof decideCommittedWithProof(PublicationSegmentLease segment, long commitTs,
-                                                   long txId, long startTs, long deadlineMillis,
-                                                   Set<String> participants) {
-        // 决议校验和凭据构造必须使用同一份不可变参与者集合。
+    /**
+     * Only the centre and slot atomic commit successfully returned an unconstructed materialization receipt.
+     *
+     * @param segment segment
+     * @param commitTs durable commit timestamp
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param deadlineMillis deadline millis
+     * @param participants participants
+     * @return the operation result
+     */
+    public CommittedProof decideCommittedWithProof(final PublicationSegmentLease segment, final long commitTs,
+                                                   final long txId, final long startTs, final long deadlineMillis,
+                                                   final Set<String> participants) {
+        // The decision validate and receipt configurations shall use the same immutable participant collection.
         Set<String> stableParticipants = Set.copyOf(participants);
         long confirmedStart = decideCommittedReadTs(segment, commitTs, txId,
                 deadlineMillis, stableParticipants, startTs);
         return new CommittedProof(txId, confirmedStart, commitTs, stableParticipants, dataSource);
     }
 
-    /** 统一校验新决议与完全相同的终态重放，返回中心核验的开始水位。 */
-    private long decideCommittedReadTs(PublicationSegmentLease segment, long commitTs, long txId,
-                                       long deadlineMillis, Set<String> participants,
-                                       Long expectedStartTs) {
+    /**
+     * Uniform validate new decision and identical terminal state replay, returns the start of central verification watermark.
+     *
+     * @param segment segment
+     * @param commitTs durable commit timestamp
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @param participants participants
+     * @param expectedStartTs expected start ts
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    private long decideCommittedReadTs(final PublicationSegmentLease segment, final long commitTs, final long txId,
+                                       final long deadlineMillis, final Set<String> participants,
+                                       final Long expectedStartTs) {
         Objects.requireNonNull(segment, "segment");
         TransactionMetadataValidation.validateParticipants(txId, participants);
         if (commitTs < segment.firstTs() || commitTs > segment.lastTs()
@@ -1146,18 +1364,19 @@ public final class MysqlSegmentPublicationLedger {
                     throw new MvccException(ErrorCode.ILLEGAL_STATE,
                             "segmented proof start differs from durable snapshot", false, txId);
                 }
-                try (PreparedStatement metadata = connection.prepareStatement("""
-                        update mvcc_txn set status = 'COMMITTED', commit_ts = ?
-                        where tx_id = ? and start_ts = ? and binary participants = binary ?
-                          and status in ('ACTIVE', 'PREPARING') and commit_ts is null
-                          and start_ts < ?
-                        """);
-                     PreparedStatement slot = connection.prepareStatement("""
-                        update mvcc_publication_segment_slot_v1
-                        set tx_id = ?, status = 'COMMITTED', expires_at = ?
-                        where commit_ts = ? and segment_start = ?
-                          and tx_id is null and status = 'PENDING'
-                        """)) {
+                try (
+                        PreparedStatement metadata = connection.prepareStatement("""
+                                update mvcc_txn set status = 'COMMITTED', commit_ts = ?
+                                where tx_id = ? and start_ts = ? and binary participants = binary ?
+                                  and status in ('ACTIVE', 'PREPARING') and commit_ts is null
+                                  and start_ts < ?
+                                """);
+                        PreparedStatement slot = connection.prepareStatement("""
+                                update mvcc_publication_segment_slot_v1
+                                set tx_id = ?, status = 'COMMITTED', expires_at = ?
+                                where commit_ts = ? and segment_start = ?
+                                  and tx_id is null and status = 'PENDING'
+                                """)) {
                     metadata.setLong(1, commitTs);
                     metadata.setLong(2, txId);
                     metadata.setLong(3, readTs);
@@ -1178,14 +1397,20 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return readTs;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "segmented decision outcome requires durable lookup before retry", false, txId, ex);
         }
     }
 
-    /** 同一 owner 分段内多笔意向在一笔控制事务中原子决议，失败整批回滚。 */
-    public void decideCommittedBatch(List<PublicationSegmentCommit> requests) {
+    /**
+     * Multiple X-Os in the same own segment atomic decision in one control transaction failed to complete rollback.
+     *
+     * @param requests requests
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public void decideCommittedBatch(final List<PublicationSegmentCommit> requests) {
         if (requests.isEmpty()) {
             return;
         }
@@ -1303,8 +1528,9 @@ public final class MysqlSegmentPublicationLedger {
                         + "when ? then ? ".repeat(byCommitTs.size())
                         + "end where commit_ts in (" + placeholders + ")"
                         + " and segment_start=? and status='PENDING' and tx_id is null";
-                try (PreparedStatement metadata = connection.prepareStatement(metadataUpdateSql);
-                     PreparedStatement slot = connection.prepareStatement(slotUpdateSql)) {
+                try (
+                        PreparedStatement metadata = connection.prepareStatement(metadataUpdateSql);
+                        PreparedStatement slot = connection.prepareStatement(slotUpdateSql)) {
                     int parameter = 1;
                     for (PublicationSegmentCommit request : byTxId) {
                         metadata.setLong(parameter++, request.txId());
@@ -1337,15 +1563,26 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return null;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "segmented batch decision outcome requires per-transaction lookup", false, null, ex);
         }
     }
 
-    /** 单分片物理提交前原子认领 PENDING 槽与中心 PREPARING 候选。 */
-    public long claimLocalPending(PublicationSegmentLease segment, long commitTs, long txId,
-                                  long deadlineMillis, String participant) {
+    /**
+     * Single shard Physical commit atomic identifies the PENDING slot and center PREPARING candidate.
+     *
+     * @param segment segment
+     * @param commitTs durable commit timestamp
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @param participant participant
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public long claimLocalPending(final PublicationSegmentLease segment, final long commitTs, final long txId,
+                                  final long deadlineMillis, final String participant) {
         Objects.requireNonNull(segment, "segment");
         TransactionMetadataValidation.validateParticipant(txId, participant);
         if (commitTs < segment.firstTs() || commitTs > segment.lastTs() || deadlineMillis < 1) {
@@ -1413,17 +1650,18 @@ public final class MysqlSegmentPublicationLedger {
                         readTs = row.getLong("read_ts");
                     }
                 }
-                try (PreparedStatement metadata = connection.prepareStatement("""
-                        update mvcc_txn set status = 'PREPARING', commit_ts = ?
-                        where tx_id = ? and start_ts = ? and binary participants = binary ?
-                          and status = 'ACTIVE' and commit_ts is null and start_ts < ?
-                        """);
-                     PreparedStatement slot = connection.prepareStatement("""
-                        update mvcc_publication_segment_slot_v1
-                        set tx_id = ?, expires_at = ?
-                        where commit_ts = ? and segment_start = ?
-                          and status = 'PENDING' and tx_id is null
-                        """)) {
+                try (
+                        PreparedStatement metadata = connection.prepareStatement("""
+                                update mvcc_txn set status = 'PREPARING', commit_ts = ?
+                                where tx_id = ? and start_ts = ? and binary participants = binary ?
+                                  and status = 'ACTIVE' and commit_ts is null and start_ts < ?
+                                """);
+                        PreparedStatement slot = connection.prepareStatement("""
+                                update mvcc_publication_segment_slot_v1
+                                set tx_id = ?, expires_at = ?
+                                where commit_ts = ? and segment_start = ?
+                                  and status = 'PENDING' and tx_id is null
+                                """)) {
                     metadata.setLong(1, commitTs);
                     metadata.setLong(2, txId);
                     metadata.setLong(3, readTs);
@@ -1444,15 +1682,25 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return commitTs;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "local candidate outcome requires durable lookup", false, txId, ex);
         }
     }
 
-    /** 认领响应丢失时只接受同一参与者和候选时间的中心记录。 */
-    private void verifyLocalCandidate(Connection connection, long txId, long commitTs,
-                                      String participant, boolean committed) throws SQLException {
+    /**
+     * Only central records of the same participant and candidate time are accepted when a response is lost.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @param committed committed
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void verifyLocalCandidate(final Connection connection, final long txId, final long commitTs,
+                                      final String participant, final boolean committed) throws SQLException {
         try (PreparedStatement metadata = connection.prepareStatement("""
                 select start_ts, status, commit_ts, participants from mvcc_txn
                 where tx_id = ? for update
@@ -1471,19 +1719,43 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 以分片已提交证明把本地候选与分段槽原子补为 COMMITTED。 */
-    public boolean completeLocalCommitAfterFencing(ParticipantRecord local, long commitTs, String participant) {
+    /**
+     * Shard has been commit proof to replace the local candidate with the slot atomic by COMMITTED.
+     *
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @return the operation result
+     */
+    public boolean completeLocalCommitAfterFencing(final ParticipantRecord local, final long commitTs, final String participant) {
         return completeLocalTerminal(local, commitTs, participant, true);
     }
 
-    /** 以分片已中止证明把本地候选与分段槽原子补为 ABORTED。 */
-    public boolean completeLocalAbortAfterFencing(ParticipantRecord local, long commitTs, String participant) {
+    /**
+     * Verify More key direct committee check to use a single bar in query.
+     *
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @return the operation result
+     */
+    public boolean completeLocalAbortAfterFencing(final ParticipantRecord local, final long commitTs, final String participant) {
         return completeLocalTerminal(local, commitTs, participant, false);
     }
 
-    /** owner 即使已经过期或封存，持久本地终态仍能恢复同一时间槽的中心决议。 */
-    private boolean completeLocalTerminal(ParticipantRecord local, long commitTs,
-                                          String participant, boolean committed) {
+    /**
+     * Owner durable local terminal state can still be the center of decision in the same time slot even if it is expired or sealed.
+     *
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @param committed committed
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    private boolean completeLocalTerminal(final ParticipantRecord local, final long commitTs,
+                                          final String participant, final boolean committed) {
         Objects.requireNonNull(local, "local");
         TransactionMetadataValidation.validateParticipant(local.txId(), participant);
         if (commitTs < 1 || (committed && (local.status() != TxStatus.COMMITTED
@@ -1496,7 +1768,7 @@ public final class MysqlSegmentPublicationLedger {
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 MysqlProtocolEpoch.requireSegment(connection);
-                // 候选已持久认领；封存仅中止未认领槽，直接锁主键即可在 owner 失效后补终态。
+                // Candidate durable accepted; sealing only suspends unrecognized kiosks and locks the main key directly to replace terminal state after an owner has lapsed.
                 String slotStatus;
                 try (PreparedStatement slot = connection.prepareStatement("""
                         select tx_id, status, expires_at from mvcc_publication_segment_slot_v1
@@ -1520,15 +1792,16 @@ public final class MysqlSegmentPublicationLedger {
                     throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                             "local terminal proof conflicts with another slot decision", false, txId);
                 }
-                try (PreparedStatement metadata = connection.prepareStatement("""
-                        update mvcc_txn set status = ?, commit_ts = ?
-                        where tx_id = ? and start_ts = ? and binary participants = binary ?
-                          and status = 'PREPARING' and commit_ts = ?
-                        """);
-                     PreparedStatement slot = connection.prepareStatement("""
-                        update mvcc_publication_segment_slot_v1 set status = ?
-                        where commit_ts = ? and tx_id = ? and status = 'PENDING'
-                        """)) {
+                try (
+                        PreparedStatement metadata = connection.prepareStatement("""
+                                update mvcc_txn set status = ?, commit_ts = ?
+                                where tx_id = ? and start_ts = ? and binary participants = binary ?
+                                  and status = 'PREPARING' and commit_ts = ?
+                                """);
+                        PreparedStatement slot = connection.prepareStatement("""
+                                update mvcc_publication_segment_slot_v1 set status = ?
+                                where commit_ts = ? and tx_id = ? and status = 'PENDING'
+                                """)) {
                     metadata.setString(1, terminal);
                     if (committed) {
                         metadata.setLong(2, commitTs);
@@ -1553,16 +1826,26 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return true;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "local terminal completion outcome requires durable proof lookup", false, txId, ex);
         }
     }
 
-    /** 本地补决议响应丢失时只接受同一开始、参与者和时间戳的中心终态。 */
-    private void verifyCompletedLocalCandidate(Connection connection, ParticipantRecord local,
-                                               long commitTs, String participant,
-                                               String terminal) throws SQLException {
+    /**
+     * Local Supplement decision only accepts the centre terminal state for the same start, participant and timestamp when the decision response is lost.
+     *
+     * @param connection connection
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @param terminal terminal
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void verifyCompletedLocalCandidate(final Connection connection, final ParticipantRecord local,
+                                               final long commitTs, final String participant,
+                                               final String terminal) throws SQLException {
         try (PreparedStatement metadata = connection.prepareStatement("""
                 select start_ts, status, commit_ts, participants from mvcc_txn
                 where tx_id = ? for update
@@ -1573,7 +1856,7 @@ public final class MysqlSegmentPublicationLedger {
                         || !terminal.equals(row.getString("status"))
                         || !participant.equals(row.getString("participants"))
                         || ("COMMITTED".equals(terminal)
-                            && (row.getObject("commit_ts") == null || row.getLong("commit_ts") != commitTs))
+                                && (row.getObject("commit_ts") == null || row.getLong("commit_ts") != commitTs))
                         || ("ABORTED".equals(terminal) && row.getObject("commit_ts") != null)) {
                     throw new MvccException(ErrorCode.ILLEGAL_STATE,
                             "local terminal replay differs from center decision", false, local.txId());
@@ -1582,9 +1865,19 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 已完成参与者 fencing 的事务将自身占位槽与中心记录原子改为 ABORTED。 */
-    public boolean abortReservedSlot(PublicationSegmentLease segment, long commitTs,
-                                     long txId, long deadlineMillis) {
+    /**
+     * Transaction, which has completed X-Fencing, replaces its own slot and centre record atomic with ABORTED.
+     *
+     * @param segment segment
+     * @param commitTs durable commit timestamp
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public boolean abortReservedSlot(final PublicationSegmentLease segment, final long commitTs,
+                                     final long txId, final long deadlineMillis) {
         Objects.requireNonNull(segment, "segment");
         if (commitTs < segment.firstTs() || commitTs > segment.lastTs() || deadlineMillis < 1) {
             throw new IllegalArgumentException("invalid segmented abort request");
@@ -1692,14 +1985,21 @@ public final class MysqlSegmentPublicationLedger {
                 }
                 return true;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "segmented abort outcome requires durable lookup", false, txId, ex);
         }
     }
 
-    /** 重复中止只接受同一笔已持久化的中心 ABORTED 决议。 */
-    private void requireAbortedMetadata(Connection connection, long txId) throws SQLException {
+    /**
+     * Repeat abort to accept only the same centre ABORTED decision as durable storage.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void requireAbortedMetadata(final Connection connection, final long txId) throws SQLException {
         try (PreparedStatement metadata = connection.prepareStatement("""
                 select status, commit_ts from mvcc_txn where tx_id = ? for update
                 """)) {
@@ -1714,10 +2014,23 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 响应丢失后只接受完全相同的已持久中心决议。 */
-    private long verifyCommittedReplay(Connection connection, long txId, long commitTs,
-                                       long deadlineMillis, String participants,
-                                       Long slotTxId, Long slotDeadline) throws SQLException {
+    /**
+     * Only identical durable centers will be accepted when the response is lost.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param deadlineMillis deadline millis
+     * @param participants participants
+     * @param slotTxId slot tx id
+     * @param slotDeadline slot deadline
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private long verifyCommittedReplay(final Connection connection, final long txId, final long commitTs,
+                                       final long deadlineMillis, final String participants,
+                                       final Long slotTxId, final Long slotDeadline) throws SQLException {
         if (!Objects.equals(slotTxId, txId) || !Objects.equals(slotDeadline, deadlineMillis)) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "segmented slot replay differs from durable identity", false, txId);
@@ -1740,9 +2053,16 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 用主键锁读取持久 owner 范围，调用方在同一数据库事务内继续校验代数。 */
-    private LockedSegment lockSegment(Connection connection, long firstTs, boolean exclusive)
-            throws SQLException {
+    /**
+     * Locks the durable owner range and calls to continue the validate algebra in the same database transaction.
+     *
+     * @param connection connection
+     * @param firstTs first ts
+     * @param exclusive exclusive
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private LockedSegment lockSegment(final Connection connection, final long firstTs, final boolean exclusive) throws SQLException {
         String sql = "select segment_end, owner_id, generation, expires_at, status"
                 + " from mvcc_publication_segment_v1 where segment_start = ?"
                 + (exclusive ? " for update" : " for share");
@@ -1758,8 +2078,15 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 当前代数、owner 和未到期条件必须同时成立，过期后不可重新续命。 */
-    private void requireCurrentOwner(PublicationSegmentLease expected, LockedSegment locked, long now) {
+    /**
+     * Current algebras, downer and unexpired conditions must be established at the same time and cannot be renewed after expiry.
+     *
+     * @param expected expected
+     * @param locked locked
+     * @param now now
+     * @throws MvccException if the operation cannot complete
+     */
+    private void requireCurrentOwner(final PublicationSegmentLease expected, final LockedSegment locked, final long now) {
         if (locked == null || !"ACTIVE".equals(locked.status())
                 || locked.lease().lastTs() != expected.lastTs()
                 || !locked.lease().ownerId().equals(expected.ownerId())
@@ -1770,22 +2097,32 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** owner 排他锁已取得时增加代数并原子中止尚无终态的时间槽。 */
-    private int sealLockedSegment(Connection connection, long firstTs, long lastTs) throws SQLException {
-        try (PreparedStatement fence = connection.prepareStatement("""
-                update mvcc_publication_segment_v1
-                set status = 'SEALED', generation = generation + 1
-                where segment_start = ? and status = 'ACTIVE'
-                  and generation < 9223372036854775807
-                """);
-             PreparedStatement abort = connection.prepareStatement("""
-                update mvcc_publication_segment_slot_v1 force index(primary)
-                set status = 'ABORTED',
-                    expires_at = coalesce(expires_at,
-                      cast(unix_timestamp(current_timestamp(3))*1000 as signed))
-                where commit_ts >= ? and commit_ts <= ?
-                  and segment_start = ? and status = 'PENDING' and tx_id is null
-                """)) {
+    /**
+     * Add algebra when the owner's exclusion lock has been obtained and atomic aborts a slot without terminal state.
+     *
+     * @param connection connection
+     * @param firstTs first ts
+     * @param lastTs last ts
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private int sealLockedSegment(final Connection connection, final long firstTs, final long lastTs) throws SQLException {
+        try (
+                PreparedStatement fence = connection.prepareStatement("""
+                        update mvcc_publication_segment_v1
+                        set status = 'SEALED', generation = generation + 1
+                        where segment_start = ? and status = 'ACTIVE'
+                          and generation < 9223372036854775807
+                        """);
+                PreparedStatement abort = connection.prepareStatement("""
+                        update mvcc_publication_segment_slot_v1 force index(primary)
+                        set status = 'ABORTED',
+                            expires_at = coalesce(expires_at,
+                              cast(unix_timestamp(current_timestamp(3))*1000 as signed))
+                        where commit_ts >= ? and commit_ts <= ?
+                          and segment_start = ? and status = 'PENDING' and tx_id is null
+                        """)) {
             fence.setLong(1, firstTs);
             if (fence.executeUpdate() != 1) {
                 throw new MvccException(ErrorCode.TRANSACTION_ABORTED,
@@ -1798,12 +2135,19 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** 读取数据库时钟，避免跨主机本地时钟参与持久租约判定。 */
-    private long databaseNow(Connection connection) throws SQLException {
-        try (PreparedStatement clock = connection.prepareStatement("""
-                select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                """);
-             ResultSet row = clock.executeQuery()) {
+    /**
+     * Read database clocks to avoid cross-host local clocks participating in durable lease determinations.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private long databaseNow(final Connection connection) throws SQLException {
+        try (
+                PreparedStatement clock = connection.prepareStatement("""
+                        select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                        """);
+                ResultSet row = clock.executeQuery()) {
             if (!row.next()) {
                 throw new SQLException("database clock returned no timestamp");
             }
@@ -1811,15 +2155,145 @@ public final class MysqlSegmentPublicationLedger {
         }
     }
 
-    /** owner 身份必须稳定且在数据库列预算内。 */
-    private void requireOwner(String ownerId) {
+    /**
+     * Own identity must be stable and within database column budget.
+     *
+     * @param ownerId owner id
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private void requireOwner(final String ownerId) {
         if (ownerId == null || !ownerId.matches("[A-Za-z0-9._:-]{1,128}")) {
             throw new IllegalArgumentException("invalid segment owner identity");
         }
     }
 
-    /** 保留数据库异常链供调用方区分不可用与未知结果。 */
-    private MvccException storageError(String message, SQLException cause) {
+    /**
+     * Keeps the database abnormal chain for callers to distinguish between unknown results.
+     *
+     * @param message message
+     * @param cause cause
+     * @return the operation result
+     */
+    private MvccException storageError(final String message, final SQLException cause) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, null, cause);
+    }
+
+    /**
+     * Creates only a successful commit Center transaction account book, which is used to avoid repeating the same decision query.
+     */
+    public static final class CommittedProof {
+
+        private final long txId;
+
+        private final long startTs;
+
+        private final long commitTs;
+
+        private final Set<String> participants;
+
+        private final DataSource authority;
+
+        /**
+         * Limit the construction entrance to avoid unset timestamp being used as durable decision.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param participants participants
+         * @param authority authority
+         */
+        private CommittedProof(final long txId, final long startTs, final long commitTs, final Set<String> participants,
+                               final DataSource authority) {
+            this.txId = txId;
+            this.startTs = startTs;
+            this.commitTs = commitTs;
+            this.participants = Set.copyOf(participants);
+            this.authority = authority;
+        }
+
+        /**
+         * Returns commit transaction identifier.
+         *
+         * @return the operation result
+         */
+        public long txId() {
+            return txId;
+        }
+
+        /**
+         * Returns decision verified start watermark.
+         *
+         * @return the operation result
+         */
+        public long startTs() {
+            return startTs;
+        }
+
+        /**
+         * Returns an commit slot.
+         *
+         * @return the operation result
+         */
+        public long commitTs() {
+            return commitTs;
+        }
+
+        /**
+         * Returns a fixed complete participation in the shard collection at decision.
+         *
+         * @return the operation result
+         */
+        public Set<String> participants() {
+            return participants;
+        }
+
+        /**
+         * Only the original foreground control authority bound shard is allowed to use this receipt.
+         *
+         * @param store store
+         * @return the operation result
+         */
+        public boolean belongsTo(final TransactionMetadataStore store) {
+            return store instanceof MysqlTransactionMetadataStore mysql && mysql.usesDataSource(authority);
+        }
+    }
+
+    /**
+     * Lock the owner receipt and durable terminal state read at a time.
+     *
+     * @param lease lease
+     * @param status status
+     */
+    private record LockedSegment(PublicationSegmentLease lease, String status) {
+    }
+
+    /**
+     * Batch locks on a read item snapshot lease.
+     *
+     * @param readTs snapshot read timestamp
+     * @param expiresAtMillis expires at millis
+     */
+    private record BatchLease(long readTs, long expiresAtMillis) {
+    }
+
+    /**
+     * Batch locks a read-out pending center transaction.
+     *
+     * @param startTs transaction start timestamp
+     * @param status status
+     * @param commitTs durable commit timestamp
+     * @param participants participants
+     */
+    private record BatchMetadata(long startTs, String status, Long commitTs, String participants) {
+    }
+
+    /**
+     * Batch locks a readable slot identity.
+     *
+     * @param segmentStart segment start
+     * @param status status
+     * @param txId transaction identifier
+     */
+    private record BatchSlot(long segmentStart, String status, Long txId) {
     }
 }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -18,27 +34,43 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 每个分片独立合并跨事务预写，前台仍逐笔等待自己的持久保留证明。 */
+/**
+ * Each shard independent merge cross transaction prewrite, and foreground is still waiting for its durable reservation.
+ */
 final class MysqlVectorCrossPrewriteBatcher implements AutoCloseable {
+
     private final MysqlStorageAdapter adapter;
+
     private final ArrayBlockingQueue<Pending> queue;
+
     private final int maxBatchSize;
+
     private final long maxWaitNanos;
+
     private final ExecutorService workers;
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private final LongAdder batches = new LongAdder();
+
     private final LongAdder grouped = new LongAdder();
+
     private final LongAdder fallbackMembers = new LongAdder();
+
     private final AtomicReference<Throwable> lastFailure = new AtomicReference<>();
 
-    /** 事务自己的 Future 只接收该事务同分片的持久预写凭据。 */
-    private record Pending(MysqlStorageAdapter.VectorPrewriteRequest request,
-                           CompletableFuture<MysqlStorageAdapter.PrewriteProof> result) {
-    }
-
-    /** 固定分片并发、单批上限、收集窗口和内存积压预算。 */
-    MysqlVectorCrossPrewriteBatcher(MysqlStorageAdapter adapter, int lanes,
-                                    int maxBatchSize, long maxWaitMicros, int capacity) {
+    /**
+     * Fixed shard concurrent, single batch caps, collection windows and memory backlog budget.
+     *
+     * @param adapter adapter
+     * @param lanes lanes
+     * @param maxBatchSize max batch size
+     * @param maxWaitMicros max wait micros
+     * @param capacity capacity
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    MysqlVectorCrossPrewriteBatcher(final MysqlStorageAdapter adapter, final int lanes,
+                                    final int maxBatchSize, final long maxWaitMicros, final int capacity) {
         this.adapter = Objects.requireNonNull(adapter, "adapter");
         if (lanes < 1 || lanes > 64 || maxBatchSize < 1 || maxBatchSize > 64
                 || maxWaitMicros < 0 || maxWaitMicros > 10_000
@@ -48,16 +80,23 @@ final class MysqlVectorCrossPrewriteBatcher implements AutoCloseable {
         queue = new ArrayBlockingQueue<>(capacity);
         this.maxBatchSize = maxBatchSize;
         maxWaitNanos = TimeUnit.MICROSECONDS.toNanos(maxWaitMicros);
-        workers = Executors.newFixedThreadPool(lanes, task ->
-                Thread.ofPlatform().daemon().name("azir-vector-cross-prewrite-" + adapter.shardId()).unstarted(task));
+        workers = Executors.newFixedThreadPool(lanes, task -> Thread.ofPlatform().daemon().name("azir-vector-cross-prewrite-" + adapter.shardId()).unstarted(task));
         for (int index = 0; index < lanes; index++) {
             workers.submit(this::runLoop);
         }
     }
 
-    /** 排队前复制载荷，超出队列预算时不给前台虚假预写成功凭据。 */
+    /**
+     * Copy payload in front of queue and do not give foreground false prewrite success receipt when exceeding the queue budget.
+     *
+     * @param request request
+     * @param timeoutMillis timeout millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
     CompletableFuture<MysqlStorageAdapter.PrewriteProof> submit(
-            MysqlStorageAdapter.VectorPrewriteRequest request, long timeoutMillis) {
+                                                                final MysqlStorageAdapter.VectorPrewriteRequest request, final long timeoutMillis) {
         Objects.requireNonNull(request, "request");
         if (timeoutMillis < 1 || closed.get()) {
             throw new IllegalArgumentException("closed vector prewrite batcher or invalid timeout");
@@ -79,14 +118,16 @@ final class MysqlVectorCrossPrewriteBatcher implements AutoCloseable {
                 result.completeExceptionally(unavailable(request.txId()));
             }
             return result;
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                     "vector cross prewrite enqueue interrupted", true, request.txId(), ex);
         }
     }
 
-    /** 不让同键或同事务出现在同一物理批次，避免相互覆盖身份。 */
+    /**
+     * Do not allow the same key or transaction to appear in the same physical batch and avoid overlaying each other identity.
+     */
     private void runLoop() {
         Pending deferred = null;
         try {
@@ -117,11 +158,11 @@ final class MysqlVectorCrossPrewriteBatcher implements AutoCloseable {
                 }
                 flush(pending);
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             closed.set(true);
             lastFailure.set(ex);
-        } catch (Throwable ex) {
+        } catch (final Throwable ex) {
             closed.set(true);
             lastFailure.set(ex);
         } finally {
@@ -135,8 +176,12 @@ final class MysqlVectorCrossPrewriteBatcher implements AutoCloseable {
         }
     }
 
-    /** 整批故障逐笔重放单键例程，既能核对未知提交也隔离确定冲突。 */
-    private void flush(List<Pending> pending) {
+    /**
+     * The whole series of failure -by-line replay single-key routines that check the unknown commit and isolate to determine conflict.
+     *
+     * @param pending pending
+     */
+    private void flush(final List<Pending> pending) {
         batches.increment();
         grouped.add(pending.size());
         try {
@@ -145,7 +190,7 @@ final class MysqlVectorCrossPrewriteBatcher implements AutoCloseable {
             for (int index = 0; index < pending.size(); index++) {
                 pending.get(index).result().complete(proofs.get(index));
             }
-        } catch (RuntimeException batchFailure) {
+        } catch (final RuntimeException batchFailure) {
             lastFailure.set(batchFailure);
             fallbackMembers.add(pending.size());
             for (Pending item : pending) {
@@ -154,40 +199,63 @@ final class MysqlVectorCrossPrewriteBatcher implements AutoCloseable {
                     item.result().complete(adapter.prewriteWithVectorProof(request.txId(),
                             request.startTs(), request.mutation(), request.stripe(),
                             request.startSequence()));
-                } catch (RuntimeException memberFailure) {
+                } catch (final RuntimeException memberFailure) {
                     item.result().completeExceptionally(memberFailure);
                 }
             }
         }
     }
 
-    /** 返回已经执行过的物理批次数。 */
+    /**
+     * Returns the physical batch number that has been executed.
+     *
+     * @return the operation result
+     */
     long batchCount() {
         return batches.sum();
     }
 
-    /** 返回参与批量尝试的逻辑事务数。 */
+    /**
+     * Returns the number of logic transaction that participates in the batch attempt.
+     *
+     * @return the operation result
+     */
     long groupedCount() {
         return grouped.sum();
     }
 
-    /** 物理批次失败后逐笔重放的事务数。 */
+    /**
+     * Transaction numbers for replay after physical batch failed.
+     *
+     * @return the operation result
+     */
     long fallbackCount() {
         return fallbackMembers.sum();
     }
 
-    /** 暴露最近原始异常，已成功回退的批次也保留诊断证据。 */
+    /**
+     * The batch that exposed the recent original anomaly and successfully retreated also retains diagnostic evidence.
+     *
+     * @return the operation result
+     */
     Throwable lastFailure() {
         return lastFailure.get();
     }
 
-    /** 停机期间未知结果必须让调用方复核真实参与者，不得推断已回滚。 */
-    private static MvccException unavailable(long txId) {
+    /**
+     * The unknown result during the stoppage must allow the caller to review the real participant and cannot be inferred from rollback.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    private static MvccException unavailable(final long txId) {
         return new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 "vector cross prewrite batcher stopped before proving this participant", true, txId);
     }
 
-    /** 消费已入队请求后停止，不再接纳新跨片预写。 */
+    /**
+     * Consumption stopped after entry request and no new cross-shard prewrite is accepted.
+     */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -198,9 +266,19 @@ final class MysqlVectorCrossPrewriteBatcher implements AutoCloseable {
             if (!workers.awaitTermination(15, TimeUnit.SECONDS)) {
                 workers.shutdownNow();
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             workers.shutdownNow();
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * Transaction own Future only receives durable prewrite receipt of the transaction and shard.
+     *
+     * @param request request
+     * @param result result
+     */
+    private record Pending(MysqlStorageAdapter.VectorPrewriteRequest request,
+            CompletableFuture<MysqlStorageAdapter.PrewriteProof> result) {
     }
 }

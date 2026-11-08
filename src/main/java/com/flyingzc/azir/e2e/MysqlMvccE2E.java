@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.flyingzc.azir.api.Transaction;
@@ -33,19 +49,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 /**
- * MySQL MVCC 端到端验证入口。
+ * MySQL MVCC end to end verify entrance.
  */
 public final class MysqlMvccE2E {
+
     /**
-     * 构造 MysqlMvccE2E 实例。
+     * Construct a MysqlMvccE2E instance.
      */
     private MysqlMvccE2E() {
     }
 
     /**
-     * 程序入口方法。
+     * Run the application entry point.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
      */
-    public static void main(String[] args) throws Exception {
+    public static void main(final String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource controlDataSource = MysqlDataSourceFactory.create(config.controlJdbcUrl(), config.username(), config.password());
         DataSource shard1DataSource = MysqlDataSourceFactory.create(config.shard1JdbcUrl(), config.username(), config.password());
@@ -79,20 +99,16 @@ public final class MysqlMvccE2E {
 
             TransactionManager transactionManager = new TransactionManager(tso, metadataStore, safePointStore, Map.of(
                     shard1.shardId(), shard1,
-                    shard2.shardId(), shard2
-            ));
+                    shard2.shardId(), shard2));
             RecoveryManager recoveryManager = new RecoveryManager(metadataStore, Map.of(
                     shard1.shardId(), shard1,
-                    shard2.shardId(), shard2
-            ));
+                    shard2.shardId(), shard2));
             BackgroundRecoveryRunner recoveryRunner = new BackgroundRecoveryRunner(recoveryManager, Map.of(
                     shard1.shardId(), shard1,
-                    shard2.shardId(), shard2
-            ));
+                    shard2.shardId(), shard2));
             GcManager gcManager = new GcManager(metadataStore, tso, safePointStore, Map.of(
                     shard1.shardId(), shard1,
-                    shard2.shardId(), shard2
-            ));
+                    shard2.shardId(), shard2));
 
             scenarioRcRr(transactionManager);
             scenarioScan(transactionManager);
@@ -111,9 +127,11 @@ public final class MysqlMvccE2E {
     }
 
     /**
-     * 执行读已提交和可重复读隔离级别验证场景。
+     * Execute commit read and repeatable isolation level verify scenes.
+     *
+     * @param transactionManager transaction manager
      */
-    private static void scenarioRcRr(TransactionManager transactionManager) {
+    private static void scenarioRcRr(final TransactionManager transactionManager) {
         seed(transactionManager, "shard-1", "e2e:acct:1", "v1");
 
         Transaction rrReader = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
@@ -134,9 +152,11 @@ public final class MysqlMvccE2E {
     }
 
     /**
-     * 执行范围扫描可见性验证场景。
+     * Executing range scan for visibility verify scenes.
+     *
+     * @param transactionManager transaction manager
      */
-    private static void scenarioScan(TransactionManager transactionManager) {
+    private static void scenarioScan(final TransactionManager transactionManager) {
         seed(transactionManager, "shard-1", "e2e:scan:001", "a");
         seed(transactionManager, "shard-1", "e2e:scan:002", "b");
 
@@ -153,9 +173,11 @@ public final class MysqlMvccE2E {
     }
 
     /**
-     * 执行跨分片提交验证场景。
+     * Execute the cross-shard commit verify scene.
+     *
+     * @param transactionManager transaction manager
      */
-    private static void scenarioCrossShard(TransactionManager transactionManager) {
+    private static void scenarioCrossShard(final TransactionManager transactionManager) {
         Transaction tx = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
         transactionManager.put(tx, "shard-1", "e2e:order:1", bytes("created"));
         transactionManager.put(tx, "shard-2", "e2e:stock:1", bytes("reserved"));
@@ -170,22 +192,28 @@ public final class MysqlMvccE2E {
     }
 
     /**
-     * 执行事务恢复验证场景。
+     * Execute the transaction recovery verify scene.
+     *
+     * @param tso tso
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param shard1 shard1
+     * @param shard2 shard2
+     * @param recoveryRunner recovery runner
+     * @throws IllegalStateException if the operation cannot complete
      */
-    private static void scenarioRecovery(MysqlTimestampOracle tso,
-                                         TransactionMetadataStore metadataStore,
-                                         SafePointStore safePointStore,
-                                         StorageAdapter shard1,
-                                         StorageAdapter shard2,
-                                         BackgroundRecoveryRunner recoveryRunner) {
+    private static void scenarioRecovery(final MysqlTimestampOracle tso,
+                                         final TransactionMetadataStore metadataStore,
+                                         final SafePointStore safePointStore,
+                                         final StorageAdapter shard1,
+                                         final StorageAdapter shard2,
+                                         final BackgroundRecoveryRunner recoveryRunner) {
         TransactionManager flakyManager = new TransactionManager(tso, metadataStore, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)
-        ));
+                shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)));
         TransactionManager readerManager = new TransactionManager(tso, metadataStore, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
 
         Transaction tx = flakyManager.begin(IsolationLevel.REPEATABLE_READ);
         flakyManager.put(tx, "shard-1", "e2e:recover:1", bytes("left"));
@@ -193,7 +221,7 @@ public final class MysqlMvccE2E {
         try {
             flakyManager.commit(tx);
             throw new IllegalStateException("expected commit failure");
-        } catch (MvccException expected) {
+        } catch (final MvccException expected) {
             recoveryRunner.recoverOnce(100);
         }
 
@@ -210,12 +238,19 @@ public final class MysqlMvccE2E {
     }
 
     /**
-     * 执行历史版本 GC 验证场景。
+     * Execute history version GC verify scene.
+     *
+     * @param transactionManager transaction manager
+     * @param gcManager gc manager
+     * @param safePointStore safe point store
+     * @param shard1DataSource shard1 data source
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
      */
-    private static void scenarioGc(TransactionManager transactionManager,
-                                   GcManager gcManager,
-                                   SafePointStore safePointStore,
-                                   DataSource shard1DataSource) throws Exception {
+    private static void scenarioGc(final TransactionManager transactionManager,
+                                   final GcManager gcManager,
+                                   final SafePointStore safePointStore,
+                                   final DataSource shard1DataSource) throws Exception {
         Transaction seed1 = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         transactionManager.put(seed1, "shard-1", "e2e:gc:001", bytes("alive"));
         transactionManager.commit(seed1);
@@ -246,41 +281,64 @@ public final class MysqlMvccE2E {
     }
 
     /**
-     * 写入端到端场景的初始数据。
+     * Writes the initial data of the end-to-end scene.
+     *
+     * @param transactionManager transaction manager
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param value value to write
      */
-    private static void seed(TransactionManager transactionManager, String shardId, String key, String value) {
+    private static void seed(final TransactionManager transactionManager, final String shardId, final String key, final String value) {
         Transaction tx = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         transactionManager.put(tx, shardId, key, bytes(value));
         transactionManager.commit(tx);
     }
 
     /**
-     * 读取端到端场景中的指定键值。
+     * Reads the specified key value from the end to the end scene.
+     *
+     * @param transactionManager transaction manager
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @return the operation result
      */
-    private static String read(TransactionManager transactionManager, Transaction tx, String shardId, String key) {
+    private static String read(final TransactionManager transactionManager, final Transaction tx, final String shardId, final String key) {
         return transactionManager.get(tx, shardId, key).map(String::new).orElse(null);
     }
 
     /**
-     * 将字符串转换为字节数组。
+     * Encode the string as a byte array.
+     *
+     * @param value value to write
+     * @return the operation result
      */
-    private static byte[] bytes(String value) {
+    private static byte[] bytes(final String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**
-     * 断言实际值与期望值一致。
+     * The assertion of real values is consistent with expectations.
+     *
+     * @param expected expected
+     * @param actual actual
+     * @param message message
+     * @throws IllegalStateException if the operation cannot complete
      */
-    private static void requireEquals(Object expected, Object actual, String message) {
+    private static void requireEquals(final Object expected, final Object actual, final String message) {
         if (!java.util.Objects.equals(expected, actual)) {
             throw new IllegalStateException(message + ", expected=" + expected + ", actual=" + actual);
         }
     }
 
     /**
-     * 重置基准测试表数据。
+     * Reset the benchmark tables.
+     *
+     * @param dataSource database connection source
+     * @param tables tables
+     * @throws Exception if the operation cannot complete
      */
-    private static void reset(DataSource dataSource, String... tables) throws Exception {
+    private static void reset(final DataSource dataSource, final String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
                 statement.execute("delete from " + table);
@@ -289,11 +347,17 @@ public final class MysqlMvccE2E {
     }
 
     /**
-     * 统计指定键的历史版本数量。
+     * Statistics the history of the key version.
+     *
+     * @param dataSource database connection source
+     * @param key business key
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
-    private static long countVersionsForKey(DataSource dataSource, String key) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             var statement = connection.prepareStatement("select count(*) from mvcc_data where user_key = ?")) {
+    private static long countVersionsForKey(final DataSource dataSource, final String key) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                var statement = connection.prepareStatement("select count(*) from mvcc_data where user_key = ?")) {
             statement.setBytes(1, key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             try (var resultSet = statement.executeQuery()) {
                 resultSet.next();
@@ -303,25 +367,50 @@ public final class MysqlMvccE2E {
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void close(DataSource dataSource) throws Exception {
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
     /**
-     * 基准测试配置对象。
+     * Read a string-valued environment variable.
+     *
+     * @param key business key
+     * @param defaultValue default value
+     * @return the operation result
+     */
+    private static String env(final String key, final String defaultValue) {
+        String value = System.getenv(key);
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    /**
+     * Benchmark configuration.
+     *
+     * @param controlJdbcUrl control jdbc url
+     * @param shard1JdbcUrl shard1 jdbc url
+     * @param shard2JdbcUrl shard2 jdbc url
+     * @param username username
+     * @param password password
+     * @param resetTables reset tables
      */
     private record Config(String controlJdbcUrl,
-                          String shard1JdbcUrl,
-                          String shard2JdbcUrl,
-                          String username,
-                          String password,
-                          boolean resetTables) {
+            String shard1JdbcUrl,
+            String shard2JdbcUrl,
+            String username,
+            String password,
+            boolean resetTables) {
+
         /**
-         * 从环境变量读取配置对象。
+         * Read configuration from environment variables.
+         *
+         * @return the operation result
          */
         private static Config fromEnv() {
             return new Config(
@@ -330,65 +419,83 @@ public final class MysqlMvccE2E {
                     env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_2"),
                     env("AZIR_TX_USERNAME", "root"),
                     env("AZIR_TX_PASSWORD", "root"),
-                    Boolean.parseBoolean(env("AZIR_TX_RESET", "true"))
-            );
+                    Boolean.parseBoolean(env("AZIR_TX_RESET", "true")));
         }
     }
 
     /**
-     * 读取字符串环境变量配置。
-     */
-    private static String env(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value == null || value.isBlank() ? defaultValue : value;
-    }
-
-    /**
-     * 提交时故障注入的存储适配器包装器。
+     * Storage adapter packagingers injected into commit hours.
      */
     private static final class FailOnceOnCommitStorageAdapter implements StorageAdapter {
+
         private final StorageAdapter delegate;
+
         private final AtomicBoolean shouldFail = new AtomicBoolean(true);
 
         /**
-         * 构造 FailOnceOnCommitStorageAdapter 实例。
+         * Construct a FailOnceOnCommitStorageAdapter instance.
+         *
+         * @param delegate delegate
          */
-        private FailOnceOnCommitStorageAdapter(StorageAdapter delegate) {
+        private FailOnceOnCommitStorageAdapter(final StorageAdapter delegate) {
             this.delegate = delegate;
         }
 
-        /** 转发事务中心绑定，保留同一适配器禁止复绑不同权威的约束。 */
+        /**
+         * Transmit transaction Center bound to keep the same adaptor from binding different authority.
+         *
+         * @param store store
+         */
         @Override
-        public void configureMetadataStore(TransactionMetadataStore store) {
+        public void configureMetadataStore(final TransactionMetadataStore store) {
             delegate.configureMetadataStore(store);
         }
 
-        /** 返回真实适配器的已提交意向解析能力。 */
+        /**
+         * Returns the commit intent resolution capability of a real adapter.
+         *
+         * @return the operation result
+         */
         @Override
         public boolean supportsCommittedIntentResolution() {
             return delegate.supportsCommittedIntentResolution();
         }
 
-        /** 返回真实适配器的原子直接提交能力。 */
+        /**
+         * Returns the atomic direct commit capability of a real adapter.
+         *
+         * @return the operation result
+         */
         @Override
         public boolean supportsAtomicDirectCommit() {
             return delegate.supportsAtomicDirectCommit();
         }
 
-        /** 查询真实参与者记录，保留本地提交结果未知时的恢复证据。 */
+        /**
+         * Search for real participant records and keep recovery evidence when local commit unknown outcome.
+         *
+         * @param txId transaction identifier
+         * @return the operation result
+         */
         @Override
-        public Optional<ParticipantRecord> participantRecord(long txId) {
+        public Optional<ParticipantRecord> participantRecord(final long txId) {
             return delegate.participantRecord(txId);
         }
 
-        /** 转发真实适配器的显式准备要求。 */
+        /**
+         * Forwards the visible preparation requirements for a genuine adapter.
+         *
+         * @return the operation result
+         */
         @Override
         public boolean requiresExplicitPreparePhase() {
             return delegate.requiresExplicitPreparePhase();
         }
 
         /**
-         * 返回当前存储适配器所属分片编号。
+         * Return the storage adapter shard identifier.
+         *
+         * @return the operation result
          */
         @Override
         public String shardId() {
@@ -396,7 +503,7 @@ public final class MysqlMvccE2E {
         }
 
         /**
-         * 初始化所需的数据库表结构或运行环境。
+         * Initialize the required database tables or runtime environment.
          */
         @Override
         public void initialize() {
@@ -404,86 +511,144 @@ public final class MysqlMvccE2E {
         }
 
         /**
-         * 读取指定键或事务的当前可见数据。
+         * Read the currently visible data for the key or transaction.
+         *
+         * @param context context
+         * @param key business key
+         * @return the operation result
          */
         @Override
-        public Optional<VersionedValue> get(ReadContext context, String key) {
+        public Optional<VersionedValue> get(final ReadContext context, final String key) {
             return delegate.get(context, key);
         }
 
         /**
-         * 按键范围扫描当前快照可见的数据。
+         * Scan the key range using the current snapshot.
+         *
+         * @param context context
+         * @param keyRange key range
+         * @return the operation result
          */
         @Override
-        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+        public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
             return delegate.scan(context, keyRange);
         }
 
-        /** 转发真实分页扫描，保留游标和有界查询语义。 */
+        /**
+         * Forwards a real page scanned, keeping the syntax of cursor and bounded queries.
+         *
+         * @param context context
+         * @param keyRange key range
+         * @param afterKeyExclusive after key exclusive
+         * @param limit maximum number of items
+         * @return the operation result
+         */
         @Override
-        public ScanPage scanPage(ReadContext context, KeyRange keyRange, String afterKeyExclusive, int limit) {
+        public ScanPage scanPage(final ReadContext context, final KeyRange keyRange, final String afterKeyExclusive, final int limit) {
             return delegate.scanPage(context, keyRange, afterKeyExclusive, limit);
         }
 
         /**
-         * 执行原型事务预写。
+         * Prewrite the prototype transaction.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
          */
         @Override
-        public void prewrite(long txId, long startTs, List<com.flyingzc.azir.storage.Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<com.flyingzc.azir.storage.Mutation> mutations) {
             delegate.prewrite(txId, startTs, mutations);
         }
 
         /**
-         * 检查事务意向是否存在并进入准备阶段。
+         * Verify transaction intents and enter the prepare phase.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
             delegate.prepare(txId);
         }
 
         /**
-         * 提交事务意向并生成已提交版本。
+         * Finalize transaction intents as committed versions.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
          */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
             failOnce();
             delegate.commit(txId, commitTs);
         }
 
-        /** 按写集合提交时同样注入故障，避免提交重载绕过演示场景。 */
+        /**
+         * Press write set commit to inject failure as well, avoiding the reloading of commit around the presentation scene.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations) {
             failOnce();
             delegate.commit(txId, commitTs, mutations);
         }
 
-        /** 保留真实清理策略并注入一次提交故障。 */
+        /**
+         * Keeps the real cleanup policy and injects it once.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
+         */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
             failOnce();
             delegate.commit(txId, commitTs, mutations, cleanupIntents);
         }
 
-        /** 直接提交调用真实原子实现，不以普通提交代替本地终态落盘。 */
+        /**
+         * Direct commit call for real atomic, not a normal commit instead of local terminal state sets.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
             failOnce();
             delegate.directCommit(txId, startTs, commitTs, mutations);
         }
 
-        /** 按写集合转发意向清理。 */
+        /**
+         * Press write set to forward intent cleanup.
+         *
+         * @param txId transaction identifier
+         * @param mutations transaction write set
+         */
         @Override
-        public void cleanupIntents(long txId, List<Mutation> mutations) {
+        public void cleanupIntents(final long txId, final List<Mutation> mutations) {
             delegate.cleanupIntents(txId, mutations);
         }
 
-        /** 按事务编号转发意向清理。 */
+        /**
+         * Press transaction identifier to forward intent cleanup.
+         *
+         * @param txId transaction identifier
+         */
         @Override
-        public void cleanupIntents(long txId) {
+        public void cleanupIntents(final long txId) {
             delegate.cleanupIntents(txId);
         }
 
-        /** 所有提交重载共享一次性故障，且故障发生在真实存储调用前。 */
+        /**
+         * All commit reloads share a one-time failure, and failure occurs before the real storage calls.
+         *
+         * @throws IllegalStateException if the operation cannot complete
+         */
         private void failOnce() {
             if (shouldFail.compareAndSet(true, false)) {
                 throw new IllegalStateException("simulated commit failure");
@@ -491,26 +656,35 @@ public final class MysqlMvccE2E {
         }
 
         /**
-         * 回滚事务并清理写意向。
+         * Roll back the transaction and remove its intents.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void abort(long txId) {
+        public void abort(final long txId) {
             delegate.abort(txId);
         }
 
         /**
-         * 查找仍有待处理意向的事务编号。
+         * Find transaction identifiers with pending intents.
+         *
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public Set<Long> findPendingTransactionIds(int limit) {
+        public Set<Long> findPendingTransactionIds(final int limit) {
             return delegate.findPendingTransactionIds(limit);
         }
 
         /**
-         * 清理安全点之前的历史版本。
+         * Collect obsolete versions before the safe point.
+         *
+         * @param safePoint oldest retained snapshot timestamp
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public int gc(long safePoint, int limit) {
+        public int gc(final long safePoint, final int limit) {
             return delegate.gc(safePoint, limit);
         }
     }

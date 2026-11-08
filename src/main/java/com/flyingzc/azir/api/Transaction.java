@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.api;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -16,33 +32,59 @@ import java.util.Set;
 import java.util.TreeMap;
 
 /**
- * 事务上下文对象，保存事务运行期状态和缓冲写集合。
+ * Transaction context object, save transaction run-time state and buffered write set combination.
  */
 public final class Transaction {
+
     private final long txId;
+
     private final long startTs;
+
     private final IsolationLevel isolationLevel;
+
     private final Set<String> participants = new LinkedHashSet<>();
+
     private final Map<String, NavigableMap<String, Mutation>> bufferedMutationsByShard = new LinkedHashMap<>();
+
     private boolean metadataPersisted;
+
     private TxStatus status = TxStatus.ACTIVE;
+
     private final long deadlineMillis;
+
     private final Object owner;
+
     private boolean rollbackOnly;
+
     private boolean decisionStarted;
+
     private final Map<String, Map<String, Integer>> writeSizes = new LinkedHashMap<>();
+
     private int writeKeyCount;
+
     private long writeBytes;
 
     /**
-     * 构造 Transaction 实例。
+     * Construct a Transaction instance.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
      */
-    public Transaction(long txId, long startTs, IsolationLevel isolationLevel) {
+    public Transaction(final long txId, final long startTs, final IsolationLevel isolationLevel) {
         this(txId, startTs, isolationLevel, Long.MAX_VALUE, null);
     }
 
-    /** 构造拥有固定租约和管理器私有归属标识的事务。 */
-    public Transaction(long txId, long startTs, IsolationLevel isolationLevel, long deadlineMillis, Object owner) {
+    /**
+     * Construct an transaction with a fixed lease and a private ownership identifier for the manager.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param deadlineMillis deadline millis
+     * @param owner owner
+     */
+    public Transaction(final long txId, final long startTs, final IsolationLevel isolationLevel, final long deadlineMillis, final Object owner) {
         this.txId = txId;
         this.startTs = startTs;
         this.isolationLevel = isolationLevel;
@@ -51,44 +93,57 @@ public final class Transaction {
     }
 
     /**
-     * 返回事务编号。
+     * Return the transaction identifier.
+     *
+     * @return the operation result
      */
     public long txId() {
         return txId;
     }
 
     /**
-     * 返回事务开始时间戳。
+     * Return the transaction start timestamp.
+     *
+     * @return the operation result
      */
     public long startTs() {
         return startTs;
     }
 
     /**
-     * 返回事务隔离级别。
+     * Return the transaction isolation level.
+     *
+     * @return the operation result
      */
     public IsolationLevel isolationLevel() {
         return isolationLevel;
     }
 
     /**
-     * 返回事务参与分片集合。
+     * Return the participating shards.
+     *
+     * @return the operation result
      */
     public Set<String> participants() {
         return Collections.unmodifiableSet(participants);
     }
 
     /**
-     * 标记事务参与分片。
+     * Register a participating shard.
+     *
+     * @param shardId logical shard identifier
      */
-    public void addParticipant(String shardId) {
+    public void addParticipant(final String shardId) {
         participants.add(shardId);
     }
 
     /**
-     * 写入事务本地缓冲。
+     * Write transaction local buffer.
+     *
+     * @param shardId logical shard identifier
+     * @param mutation mutation
      */
-    public void bufferMutation(String shardId, Mutation mutation) {
+    public void bufferMutation(final String shardId, final Mutation mutation) {
         participants.add(shardId);
         bufferedMutationsByShard
                 .computeIfAbsent(shardId, ignored -> new TreeMap<>(com.flyingzc.azir.storage.Utf8KeyOrder::compare))
@@ -96,9 +151,13 @@ public final class Transaction {
     }
 
     /**
-     * 查询本地缓冲中的指定键变更。
+     * Ask for a change of the specified key in local buffer.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @return the operation result
      */
-    public Optional<Mutation> bufferedMutation(String shardId, String key) {
+    public Optional<Mutation> bufferedMutation(final String shardId, final String key) {
         NavigableMap<String, Mutation> mutations = bufferedMutationsByShard.get(shardId);
         if (mutations == null) {
             return Optional.empty();
@@ -107,9 +166,12 @@ public final class Transaction {
     }
 
     /**
-     * 返回指定分片的本地缓冲写集合。
+     * Returns the local buffered write set combination of specified shard.
+     *
+     * @param shardId logical shard identifier
+     * @return the operation result
      */
-    public List<Mutation> bufferedMutations(String shardId) {
+    public List<Mutation> bufferedMutations(final String shardId) {
         NavigableMap<String, Mutation> mutations = bufferedMutationsByShard.get(shardId);
         if (mutations == null || mutations.isEmpty()) {
             return List.of();
@@ -118,9 +180,14 @@ public final class Transaction {
     }
 
     /**
-     * 返回指定键范围内的本地缓冲写集合。
+     * Returns the local buffered write set combination within the specified key range.
+     *
+     * @param shardId logical shard identifier
+     * @param startKeyInclusive start key inclusive
+     * @param endKeyExclusive end key exclusive
+     * @return the operation result
      */
-    public List<Mutation> bufferedMutationsInRange(String shardId, String startKeyInclusive, String endKeyExclusive) {
+    public List<Mutation> bufferedMutationsInRange(final String shardId, final String startKeyInclusive, final String endKeyExclusive) {
         NavigableMap<String, Mutation> mutations = bufferedMutationsByShard.get(shardId);
         if (mutations == null || mutations.isEmpty()) {
             return List.of();
@@ -128,9 +195,19 @@ public final class Transaction {
         return new ArrayList<>(mutations.subMap(startKeyInclusive, true, endKeyExclusive, false).values());
     }
 
-    /** 按游标取得有限缓冲键，避免逐页复制或遍历整份事务写集合。 */
-    public List<Mutation> bufferedMutationsPage(String shardId, String startKeyInclusive, String endKeyExclusive,
-                                                String afterKeyExclusive, int limit) {
+    /**
+     * Press cursor to get a limited buffer key and avoid copying or going through the entire transaction write set page by page.
+     *
+     * @param shardId logical shard identifier
+     * @param startKeyInclusive start key inclusive
+     * @param endKeyExclusive end key exclusive
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<Mutation> bufferedMutationsPage(final String shardId, final String startKeyInclusive, final String endKeyExclusive,
+                                                final String afterKeyExclusive, final int limit) {
         if (limit < 1) {
             throw new IllegalArgumentException("buffer page limit must be positive");
         }
@@ -155,65 +232,104 @@ public final class Transaction {
     }
 
     /**
-     * 返回事务状态。
+     * Return the transaction state.
+     *
+     * @return the operation result
      */
     public TxStatus status() {
         return status;
     }
 
     /**
-     * 返回事务状态。
+     * Return the transaction state.
+     *
+     * @param status status
      */
-    public void status(TxStatus status) {
+    public void status(final TxStatus status) {
         this.status = status;
     }
 
     /**
-     * 读写事务元数据是否已经持久化的标记。
+     * Read and write to transaction metadata already marked with durable storage.
+     *
+     * @return the operation result
      */
     public boolean metadataPersisted() {
         return metadataPersisted;
     }
 
     /**
-     * 读写事务元数据是否已经持久化的标记。
+     * Read and write to transaction metadata already marked with durable storage.
+     *
+     * @param metadataPersisted metadata persisted
      */
-    public void metadataPersisted(boolean metadataPersisted) {
+    public void metadataPersisted(final boolean metadataPersisted) {
         this.metadataPersisted = metadataPersisted;
     }
 
-    /** 返回事务固定租约的到期时间。 */
+    /**
+     * Returns transaction fixed lease due date.
+     *
+     * @return the operation result
+     */
     public long deadlineMillis() {
         return deadlineMillis;
     }
 
-    /** 核对私有归属标识，不暴露标识值供调用方伪造。 */
-    public boolean ownedBy(Object owner) {
+    /**
+     * Check for private ownership markings and do not expose identification values for forgery by the caller.
+     *
+     * @param owner owner
+     * @return the operation result
+     */
+    public boolean ownedBy(final Object owner) {
         return this.owner != null && this.owner == owner;
     }
 
-    /** 预写结果异常后只允许回滚，防止提交不完整参与者集合。 */
+    /**
+     * The prewrite result allows only rollback after an anomaly to prevent the commit incomplete participant assembly.
+     */
     public void markRollbackOnly() {
         rollbackOnly = true;
     }
 
-    /** 返回事务是否仅允许回滚。 */
+    /**
+     * Returns whether transaction is only allowed for rollback.
+     *
+     * @return the operation result
+     */
     public boolean rollbackOnly() {
         return rollbackOnly;
     }
 
-    /** 标记提交已进入可能产生持久化副作用的决议阶段。 */
-    public void decisionStarted(boolean decisionStarted) {
+    /**
+     * Mark commit has entered the decision phase that may cause durable storage side effects.
+     *
+     * @param decisionStarted decision started
+     */
+    public void decisionStarted(final boolean decisionStarted) {
         this.decisionStarted = decisionStarted;
     }
 
-    /** 判断是否必须解析提交决议才能处理异常。 */
+    /**
+     * Determines whether commit decision must be analyzed to deal with anomalies.
+     *
+     * @return the operation result
+     */
     public boolean decisionStarted() {
         return decisionStarted;
     }
 
-    /** 按覆盖后的写集合计费，在变更缓冲前拒绝超限事务。 */
-    public void reserveWrite(String shardId, Mutation mutation, int maxKeys, long maxBytes) {
+    /**
+     * The write set fee after the coverage is charged and the transaction limit is rejected before the buffer change.
+     *
+     * @param shardId logical shard identifier
+     * @param mutation mutation
+     * @param maxKeys max keys
+     * @param maxBytes max bytes
+     * @throws com.flyingzc.azir.common.MvccException if the operation cannot complete
+     */
+    public void reserveWrite(final String shardId, final Mutation mutation, final int maxKeys, final long maxBytes) {
         Map<String, Integer> sizes = writeSizes.computeIfAbsent(shardId, ignored -> new LinkedHashMap<>());
         Integer oldSize = sizes.get(mutation.key());
         long newSize = mutation.key().getBytes(java.nio.charset.StandardCharsets.UTF_8).length

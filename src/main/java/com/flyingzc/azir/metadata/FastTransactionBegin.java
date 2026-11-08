@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metadata;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -5,9 +21,21 @@ import com.flyingzc.azir.tso.TimestampOracle;
 
 import java.util.Optional;
 
-/** 可选择使用同一控制面权威合并时间戳和快照登记的事务开始能力。 */
+/**
+ * You can choose to use the transaction start capability for the same control authority merge timestamp and snapshot registrations.
+ */
 public interface FastTransactionBegin {
-    /** 权威不匹配时返回空结果；执行已开始后发生错误必须抛出，禁止退回路径重复开始。 */
+
+    /**
+     * Authority returns the empty result when it does not match; an error after execution has commenced must be thrown out and return paths are prohibited to start again.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param isolationLevel global transaction isolation level
+     * @param timeoutMillis timeout millis
+     * @param persistMetadata persist metadata
+     * @param beforePublish before publish
+     * @return the operation result
+     */
     Optional<BeginReservation> tryBegin(TimestampOracle timestampOracle, IsolationLevel isolationLevel,
                                         long timeoutMillis, boolean persistMetadata, Runnable beforePublish);
 }

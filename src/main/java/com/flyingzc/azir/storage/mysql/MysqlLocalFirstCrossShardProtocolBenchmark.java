@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -38,14 +54,26 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
-/** 三库隔离容量实验，计入跨分片预写、中心批量决议、发布确认和并行后台物化。 */
+/**
+ * Tri-Court Isolation Capacity Experiment, with cross-shard prewrite, Center batch decision, release confirmation and parallel background materialization.
+ */
 public final class MysqlLocalFirstCrossShardProtocolBenchmark {
-    /** 基准入口不保存全局可变状态。 */
+
+    /**
+     * The benchmark entry point keeps no global mutable state.
+     */
     private MysqlLocalFirstCrossShardProtocolBenchmark() {
     }
 
-    /** 仅在显式重置下运行真实两分片事务并报告后台物化积压。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Runs a real two shard transaction with only visible reset and reports an background materialization backlog.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("cross-shard protocol benchmark requires AZIR_TX_RESET=true");
         }
@@ -75,12 +103,13 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
         String leftUrl = env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_1");
         String rightUrl = env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_2");
         long retentionMillis = Long.parseLong(env("AZIR_TX_INTENT_RETENTION_MS", "5000"));
-        try (HikariDataSource controlData = pool(controlUrl, username, password);
-             HikariDataSource leftData = pool(leftUrl, username, password);
-             HikariDataSource rightData = pool(rightUrl, username, password);
-             HikariDataSource backgroundControlData = backgroundPool(controlUrl, username, password);
-             HikariDataSource backgroundLeftData = backgroundPool(leftUrl, username, password);
-             HikariDataSource backgroundRightData = backgroundPool(rightUrl, username, password)) {
+        try (
+                HikariDataSource controlData = pool(controlUrl, username, password);
+                HikariDataSource leftData = pool(leftUrl, username, password);
+                HikariDataSource rightData = pool(rightUrl, username, password);
+                HikariDataSource backgroundControlData = backgroundPool(controlUrl, username, password);
+                HikariDataSource backgroundLeftData = backgroundPool(leftUrl, username, password);
+                HikariDataSource backgroundRightData = backgroundPool(rightUrl, username, password)) {
             MysqlDatabaseAuthority.requireIndependentSameDatabase(controlData, backgroundControlData, "control");
             MysqlDatabaseAuthority.requireIndependentSameDatabase(leftData, backgroundLeftData, "s1");
             MysqlDatabaseAuthority.requireIndependentSameDatabase(rightData, backgroundRightData, "s2");
@@ -122,30 +151,34 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                     Map.of("s1", backgroundLeftFence, "s2", backgroundRightFence));
             Map<String, DataSource> routes = Map.of("s1", leftData, "s2", rightData);
             var vectorLeases = vectorMode
-                    ? MysqlVectorCutLeaderLease.forProduct(controlData, routes, stripes) : null;
+                    ? MysqlVectorCutLeaderLease.forProduct(controlData, routes, stripes)
+                    : null;
             if (vectorLeases != null) {
                 vectorLeases.initializeProduct();
             }
-            try (var fanout = Executors.newVirtualThreadPerTaskExecutor();
-                 var vectorPublisher = vectorMode
-                         ? MysqlVectorCutLeaderRuntime.forProduct(controlData, routes, stripes,
-                         ledger::currentPublished, vectorLeases, "cross-benchmark-owner", 5_000, 200)
-                         : null;
-                 var snapshots = new LocalFirstCoordinatorSnapshots(ledger, 20_000, 60_000, 1_000);
-                 var maintenance = new LocalFirstPublicationMaintenanceScheduler(backgroundLedger,
-                         Map.of("s1", backgroundLeftFence, "s2", backgroundRightFence),
-                         Map.of("s1", backgroundLeft, "s2", backgroundRight),
-                         16, 16, 128, 100, 1_000, retentionMillis);
-                 var owner = new LocalFirstIntentSegmentOwnerRegistry(ledger, backgroundLedger,
-                         snapshots::floorForReservation, 512, 5_000, 1_000, 100);
-                 var registrations = new RegistrationBatcher(ledger, 4, vectorMode);
-                 var leftPrewrites = prewriteGroupSize > 0
-                         ? new MysqlVectorCrossPrewriteBatcher(left, prewriteLanes,
-                         prewriteGroupSize, prewriteWaitMicros, 4096) : null;
-                 var rightPrewrites = prewriteGroupSize > 0
-                         ? new MysqlVectorCrossPrewriteBatcher(right, prewriteLanes,
-                         prewriteGroupSize, prewriteWaitMicros, 4096) : null;
-                 var batcher = new IntentBatcher(ledger, 4, vectorMode)) {
+            try (
+                    var fanout = Executors.newVirtualThreadPerTaskExecutor();
+                    var vectorPublisher = vectorMode
+                            ? MysqlVectorCutLeaderRuntime.forProduct(controlData, routes, stripes,
+                                    ledger::currentPublished, vectorLeases, "cross-benchmark-owner", 5_000, 200)
+                            : null;
+                    var snapshots = new LocalFirstCoordinatorSnapshots(ledger, 20_000, 60_000, 1_000);
+                    var maintenance = new LocalFirstPublicationMaintenanceScheduler(backgroundLedger,
+                            Map.of("s1", backgroundLeftFence, "s2", backgroundRightFence),
+                            Map.of("s1", backgroundLeft, "s2", backgroundRight),
+                            16, 16, 128, 100, 1_000, retentionMillis);
+                    var owner = new LocalFirstIntentSegmentOwnerRegistry(ledger, backgroundLedger,
+                            snapshots::floorForReservation, 512, 5_000, 1_000, 100);
+                    var registrations = new RegistrationBatcher(ledger, 4, vectorMode);
+                    var leftPrewrites = prewriteGroupSize > 0
+                            ? new MysqlVectorCrossPrewriteBatcher(left, prewriteLanes,
+                                    prewriteGroupSize, prewriteWaitMicros, 4096)
+                            : null;
+                    var rightPrewrites = prewriteGroupSize > 0
+                            ? new MysqlVectorCrossPrewriteBatcher(right, prewriteLanes,
+                                    prewriteGroupSize, prewriteWaitMicros, 4096)
+                            : null;
+                    var batcher = new IntentBatcher(ledger, 4, vectorMode)) {
                 if (vectorPublisher != null && !vectorPublisher.start()) {
                     throw new IllegalStateException("vector cross benchmark has another active publisher");
                 }
@@ -158,19 +191,39 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
         }
     }
 
-    /** 外部数据库 URL 可以指向不同实例，但必须显式使用各自独立库。 */
-    private static HikariDataSource pool(String url, String username, String password) {
+    /**
+     * External database URLs can point to different examples, but have to use their own separate libraries in a visible manner.
+     *
+     * @param url url
+     * @param username username
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String url, final String username, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.create(url, username, password);
     }
 
-    /** 独立小连接池让 GC 不占用前台等待预算。 */
-    private static HikariDataSource backgroundPool(String url, String username, String password) {
+    /**
+     * A small independent connection pool allows GC not to take foreground and wait for budget.
+     *
+     * @param url url
+     * @param username username
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource backgroundPool(final String url, final String username, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.createBackground(url, username, password);
     }
 
-    /** 基准只清除明确选择的隔离控制表与两个分片 MVCC 数据。 */
-    private static void reset(HikariDataSource control, HikariDataSource left, HikariDataSource right)
-            throws Exception {
+    /**
+     * Benchmark clears only the clearly selected quarantine control table and two shard MVCC data.
+     *
+     * @param control control
+     * @param left left
+     * @param right right
+     * @throws Exception if the operation cannot complete
+     */
+    private static void reset(final HikariDataSource control, final HikariDataSource left, final HikariDataSource right) throws Exception {
         try (Connection connection = control.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("drop table if exists mvcc_local_first_slot_v1");
             statement.execute("drop table if exists mvcc_local_first_txn_v1");
@@ -185,8 +238,14 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
         resetShard(right, "s2");
     }
 
-    /** 先建分片标准表，再清除上次实验留下的版本与锁。 */
-    private static void resetShard(HikariDataSource dataSource, String shardId) throws Exception {
+    /**
+     * Create a standard shard table before removing the version and lock left over from the previous experiment.
+     *
+     * @param dataSource database connection source
+     * @param shardId logical shard identifier
+     * @throws Exception if the operation cannot complete
+     */
+    private static void resetShard(final HikariDataSource dataSource, final String shardId) throws Exception {
         new MysqlStorageAdapter(shardId, dataSource).initialize();
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("drop table if exists mvcc_local_segment_candidate_v1");
@@ -206,226 +265,50 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
         }
     }
 
-    /** 全新事务先在中心合并持久 ACTIVE 身份，确认后才允许分片预写。 */
-    private static final class RegistrationBatcher implements AutoCloseable {
-        private final MysqlLocalFirstPublicationLedger ledger;
-        private final ArrayBlockingQueue<Request> queue = new ArrayBlockingQueue<>(4096);
-        private final List<Thread> workers;
-        private final AtomicBoolean closed = new AtomicBoolean();
-        private final LongAdder groups = new LongAdder();
-        private final LongAdder requests = new LongAdder();
-        private final boolean vectorMode;
-
-        /** 每笔注册等待自己所在中心事务持久完成。 */
-        private record Request(IntentRegistrationRequest registration, CompletableFuture<Void> result) {
-        }
-
-        /** 有界工作线程并行处理互不相交的新事务批次。 */
-        private RegistrationBatcher(MysqlLocalFirstPublicationLedger ledger,
-                                    int workerCount, boolean vectorMode) {
-            this.ledger = ledger;
-            this.vectorMode = vectorMode;
-            List<Thread> running = new ArrayList<>();
-            for (int index = 0; index < workerCount; index++) {
-                running.add(Thread.ofVirtual().name("mvcc-intent-register-" + index).start(this::work));
-            }
-            workers = List.copyOf(running);
-        }
-
-        /** 前台收到持久确认后才能在任一分片创建意向。 */
-        private void register(IntentRegistrationRequest registration) {
-            var result = new CompletableFuture<Void>();
-            if (closed.get() || !queue.offer(new Request(registration, result))) {
-                throw new IllegalStateException("cross-shard registration queue is unavailable");
-            }
-            try {
-                result.join();
-            } catch (CompletionException ex) {
-                if (ex.getCause() instanceof RuntimeException cause) {
-                    throw cause;
-                }
-                throw ex;
-            }
-        }
-
-        /** 一个批次全部插入或全部失败，不把排队误当作中心 ACTIVE。 */
-        private void work() {
-            while (!closed.get() || !queue.isEmpty()) {
-                try {
-                    Request first = queue.poll(10, TimeUnit.MILLISECONDS);
-                    if (first == null) {
-                        continue;
-                    }
-                    List<Request> batch = new ArrayList<>(64);
-                    batch.add(first);
-                    queue.drainTo(batch, 63);
-                    groups.increment();
-                    requests.add(batch.size());
-                    try {
-                        List<IntentRegistrationRequest> identities = batch.stream()
-                                .map(Request::registration).toList();
-                        if (vectorMode) {
-                            ledger.registerVectorIntentBatch(identities);
-                        } else {
-                            ledger.registerIntentBatch(identities);
-                        }
-                        batch.forEach(request -> request.result().complete(null));
-                    } catch (RuntimeException ex) {
-                        batch.forEach(request -> request.result().completeExceptionally(ex));
-                    }
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
-        }
-
-        /** 已入队请求完成后再停止注册线程。 */
-        @Override
-        public void close() throws Exception {
-            closed.set(true);
-            for (Thread worker : workers) {
-                worker.join(10_000);
-            }
-        }
-    }
-
-    /** 多个已完成双分片预写的事务在同一段内合并中心决议和发布。 */
-    private static final class IntentBatcher implements AutoCloseable {
-        private final MysqlLocalFirstPublicationLedger ledger;
-        private final ArrayBlockingQueue<Request> queue = new ArrayBlockingQueue<>(4096);
-        private final List<Thread> workers;
-        private final ScheduledExecutorService publisher;
-        private final AtomicLong published;
-        private final AtomicBoolean closed = new AtomicBoolean();
-        private final LongAdder groups = new LongAdder();
-        private final LongAdder requests = new LongAdder();
-        private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
-        private final boolean vectorMode;
-
-        /** 每个等待者只接收自己的持久中心批次结果。 */
-        private record Request(IntentCommitRequest decision, CompletableFuture<Void> result) {
-        }
-
-        /** 固定虚拟工作线程并缓存已由中心事务持久发布的水位。 */
-        private IntentBatcher(MysqlLocalFirstPublicationLedger ledger,
-                              int workerCount, boolean vectorMode) {
-            this.ledger = ledger;
-            this.vectorMode = vectorMode;
-            this.published = new AtomicLong(ledger.currentPublished());
-            List<Thread> running = new ArrayList<>();
-            for (int index = 0; index < workerCount; index++) {
-                running.add(Thread.ofVirtual().name("mvcc-intent-batch-" + index).start(this::work));
-            }
-            workers = List.copyOf(running);
-            publisher = Executors.newSingleThreadScheduledExecutor(task ->
-                    Thread.ofPlatform().daemon().name("mvcc-intent-publisher").unstarted(task));
-            publisher.scheduleWithFixedDelay(this::publishSafely, 0, 100, TimeUnit.MILLISECONDS);
-        }
-
-        /** 前台阻塞到自己的决议批次完成，不能把排队当作持久提交。 */
-        private void complete(IntentCommitRequest decision) {
-            var result = new CompletableFuture<Void>();
-            if (closed.get() || !queue.offer(new Request(decision, result))) {
-                throw new IllegalStateException("cross-shard decision queue is unavailable");
-            }
-            try {
-                result.join();
-            } catch (CompletionException ex) {
-                if (ex.getCause() instanceof RuntimeException cause) {
-                    throw cause;
-                }
-                throw ex;
-            }
-        }
-
-        /** 前台只等自身提交时间进入同一中心持久发布前缀。 */
-        private void awaitPublished(long commitTs, long deadlineMillis) {
-            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(deadlineMillis);
-            while (published.get() < commitTs) {
-                if (System.nanoTime() >= deadline) {
-                    throw new IllegalStateException("cross-shard publication confirmation timed out");
-                }
-                LockSupport.parkNanos(100_000);
-            }
-        }
-
-        /** 每段不超过 64 笔，以同一控制事务完成元数据、槽与连续发布。 */
-        private void work() {
-            while (!closed.get() || !queue.isEmpty()) {
-                try {
-                    Request first = queue.poll(10, TimeUnit.MILLISECONDS);
-                    if (first == null) {
-                        continue;
-                    }
-                    List<Request> batch = new ArrayList<>(64);
-                    batch.add(first);
-                    queue.drainTo(batch, 63);
-                    Map<Long, List<Request>> bySegment = new HashMap<>();
-                    for (Request request : batch) {
-                        bySegment.computeIfAbsent(request.decision().segment().lease().firstTs(),
-                                ignored -> new ArrayList<>()).add(request);
-                    }
-                    bySegment.values().forEach(this::completeGroup);
-                } catch (InterruptedException ex) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
-        }
-
-        /** 中心决议失败时仅通知本组，持久 ACTIVE 交给到期恢复。 */
-        private void completeGroup(List<Request> batch) {
-            groups.increment();
-            requests.add(batch.size());
-            try {
-                List<IntentCommitRequest> decisions = batch.stream().map(Request::decision).toList();
-                var result = vectorMode ? ledger.completeVectorIntentBatchAndPublish(decisions)
-                        : ledger.completeIntentBatchAndPublish(decisions);
-                published.accumulateAndGet(result.publishedTs(), Math::max);
-                batch.forEach(request -> request.result().complete(null));
-            } catch (RuntimeException ex) {
-                failure.set(ex);
-                batch.forEach(request -> request.result().completeExceptionally(ex));
-            }
-        }
-
-        /** owner 封尾或失联恢复推进水位后也要唤醒等待中的前台。 */
-        private void publishSafely() {
-            try {
-                published.accumulateAndGet(ledger.advancePublishedFast(4096), Math::max);
-            } catch (RuntimeException ex) {
-                failure.set(ex);
-            }
-        }
-
-        /** 结束新请求并让已入队请求完成或报告异常。 */
-        @Override
-        public void close() throws Exception {
-            closed.set(true);
-            publisher.shutdownNow();
-            for (Thread worker : workers) {
-                worker.join(10_000);
-            }
-        }
-    }
-
-    /** 并发真实业务路径，同时后台补物化并分别计时各阶段。 */
-    private static void run(MysqlLocalFirstPublicationLedger ledger, MysqlStorageAdapter left,
-                            MysqlStorageAdapter right, LocalFirstIntentRecoveryManager recovery,
-                            LocalFirstPublicationRecoveryManager segmentRecovery,
-                            LocalFirstIntentSegmentOwnerRegistry owner, IntentBatcher batcher,
-                            RegistrationBatcher registrations,
-                            MysqlVectorCrossPrewriteBatcher leftPrewrites,
-                            MysqlVectorCrossPrewriteBatcher rightPrewrites,
-                            LocalFirstCoordinatorSnapshots snapshots,
-                            LocalFirstPublicationMaintenanceScheduler maintenance,
-                            HikariDataSource controlData, HikariDataSource leftData,
-                            HikariDataSource rightData, ExecutorService fanout,
-                            MysqlVectorCutLeaderRuntime vectorPublisher,
-                            boolean vectorMode, boolean vectorJavaPrewrite, int stripes,
-                            int concurrency, int seconds, long maxBacklog,
-                            long recoveryParkMicros) throws Exception {
+    /**
+     * Concurrent Real Business Paths, with background plus materialization and respective time phases.
+     *
+     * @param ledger ledger
+     * @param left left
+     * @param right right
+     * @param recovery recovery
+     * @param segmentRecovery segment recovery
+     * @param owner owner
+     * @param batcher batcher
+     * @param registrations registrations
+     * @param leftPrewrites left prewrites
+     * @param rightPrewrites right prewrites
+     * @param snapshots snapshots
+     * @param maintenance maintenance
+     * @param controlData control data
+     * @param leftData left data
+     * @param rightData right data
+     * @param fanout fanout
+     * @param vectorPublisher vector publisher
+     * @param vectorMode vector mode
+     * @param vectorJavaPrewrite vector java prewrite
+     * @param stripes stripes
+     * @param concurrency concurrency
+     * @param seconds seconds
+     * @param maxBacklog max backlog
+     * @param recoveryParkMicros recovery park micros
+     * @throws Exception if the operation cannot complete
+     */
+    private static void run(final MysqlLocalFirstPublicationLedger ledger, final MysqlStorageAdapter left,
+                            final MysqlStorageAdapter right, final LocalFirstIntentRecoveryManager recovery,
+                            final LocalFirstPublicationRecoveryManager segmentRecovery,
+                            final LocalFirstIntentSegmentOwnerRegistry owner, final IntentBatcher batcher,
+                            final RegistrationBatcher registrations,
+                            final MysqlVectorCrossPrewriteBatcher leftPrewrites,
+                            final MysqlVectorCrossPrewriteBatcher rightPrewrites,
+                            final LocalFirstCoordinatorSnapshots snapshots,
+                            final LocalFirstPublicationMaintenanceScheduler maintenance,
+                            final HikariDataSource controlData, final HikariDataSource leftData,
+                            final HikariDataSource rightData, final ExecutorService fanout,
+                            final MysqlVectorCutLeaderRuntime vectorPublisher,
+                            final boolean vectorMode, final boolean vectorJavaPrewrite, final int stripes,
+                            final int concurrency, final int seconds, final long maxBacklog,
+                            final long recoveryParkMicros) throws Exception {
         LongAdder committed = new LongAdder();
         LongAdder failures = new LongAdder();
         LongAdder materialized = new LongAdder();
@@ -446,7 +329,7 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                     var result = recovery.recoverOnce(64);
                     materialized.add(result.finalized());
                     recoveryFailures.add(result.failures());
-                } catch (RuntimeException ex) {
+                } catch (final RuntimeException ex) {
                     firstFailure.compareAndSet(null, "recovery:" + ex.getMessage());
                 }
                 LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(recoveryParkMicros));
@@ -461,7 +344,7 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                     if (result.failures() > 0) {
                         firstFailure.compareAndSet(null, "segment:" + segmentRecovery.lastFailure());
                     }
-                } catch (RuntimeException ex) {
+                } catch (final RuntimeException ex) {
                     segmentFailures.increment();
                     firstFailure.compareAndSet(null, "segment:" + ex.getMessage());
                 }
@@ -474,7 +357,7 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                     if (!vectorMode) {
                         maintenance.gcOnce();
                     }
-                } catch (RuntimeException ex) {
+                } catch (final RuntimeException ex) {
                     firstFailure.compareAndSet(null, "gc:" + ex.getMessage());
                 }
                 LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(1));
@@ -491,7 +374,7 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                         start.await();
                         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
                         while (System.nanoTime() < end) {
-                            // 只测后台可持续速率时，协调器在积压上限前暂停新事务。
+                            // When only the background sustainability rate is measured, coordinator suspends the new transaction before the backlog ceiling.
                             while (maxBacklog > 0 && committed.sum() - materialized.sum() >= maxBacklog
                                     && System.nanoTime() < end) {
                                 LockSupport.parkNanos(100_000);
@@ -534,9 +417,9 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                                         }
                                         return vectorJavaPrewrite
                                                 ? left.prewriteWithVectorProofJavaForProbe(current.txId(),
-                                                current.startTs(), leftWrite, stripe, 0)
+                                                        current.startTs(), leftWrite, stripe, 0)
                                                 : left.prewriteWithVectorProof(current.txId(),
-                                                current.startTs(), leftWrite, stripe, 0);
+                                                        current.startTs(), leftWrite, stripe, 0);
                                     }, fanout);
                                     second = CompletableFuture.supplyAsync(() -> {
                                         if (!vectorMode) {
@@ -545,9 +428,9 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                                         }
                                         return vectorJavaPrewrite
                                                 ? right.prewriteWithVectorProofJavaForProbe(current.txId(),
-                                                current.startTs(), rightWrite, stripe, 0)
+                                                        current.startTs(), rightWrite, stripe, 0)
                                                 : right.prewriteWithVectorProof(current.txId(),
-                                                current.startTs(), rightWrite, stripe, 0);
+                                                        current.startTs(), rightWrite, stripe, 0);
                                     }, fanout);
                                 }
                                 var firstProof = first.join();
@@ -575,7 +458,7 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                                 }
                                 publishNanos.add(System.nanoTime() - stage);
                                 committed.increment();
-                            } catch (RuntimeException ex) {
+                            } catch (final RuntimeException ex) {
                                 if (owned != null) {
                                     owner.unknown(owned);
                                 }
@@ -584,8 +467,8 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                                 if (tx != null) {
                                     try {
                                         ledger.abortIntentTransaction(tx.txId());
-                                    } catch (RuntimeException ignored) {
-                                        // 中心可能已经 COMMITTED，统一交给持久恢复扫描。
+                                    } catch (final RuntimeException ignored) {
+                                        // The center may have been COMMITTED, unified to durable recovery scan.
                                     }
                                 }
                             } finally {
@@ -594,7 +477,7 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                                 }
                             }
                         }
-                    } catch (InterruptedException ex) {
+                    } catch (final InterruptedException ex) {
                         Thread.currentThread().interrupt();
                     } finally {
                         done.countDown();
@@ -613,12 +496,12 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                     long count = committed.sum();
                     try {
                         System.out.printf("LOCAL_FIRST_CROSS_WINDOW index=%d tps=%.2f committed=%d "
-                                        + "materialized=%d backlog=%d safe_point=%d slots=%d txn=%d%n",
+                                + "materialized=%d backlog=%d safe_point=%d slots=%d txn=%d%n",
                                 index, (count - previous) / 10.0, count, materialized.sum(),
                                 ledger.countUnfinalizedIntentDecisions(), ledger.currentSafePoint(),
                                 countRows(controlData, "mvcc_local_first_slot_v1"),
                                 countRows(controlData, "mvcc_local_first_txn_v1"));
-                    } catch (SQLException ex) {
+                    } catch (final SQLException ex) {
                         firstFailure.compareAndSet(null, "window:" + ex.getMessage());
                     }
                     previous = count;
@@ -648,19 +531,19 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                 maintenance.gcOnce();
             }
             System.out.printf("LOCAL_FIRST_CROSS_BENCH mode=%s concurrency=%d duration_s=%.2f committed=%d "
-                            + "failures=%d tps=%.2f first_failure=%s groups=%d avg_batch=%.2f "
-                            + "published=%d pending_materialization=%d materialized=%d "
-                            + "recovery_failures=%d recovery_failure=%s "
-                            + "registration_groups=%d registration_avg_batch=%.2f "
-                            + "backlog_at_stop=%d drain_seconds=%.2f max_backlog=%d recovery_park_us=%d "
-                            + "owner_segments=%d owner_failures=%d owner_error=%s "
-                            + "recovered_segments=%d segment_failures=%d segment_error=%s "
-                            + "safe_point=%d slot_rows=%d txn_rows=%d segment_rows=%d "
-                            + "gc_runs=%d gc_failures=%d gc_error=%s "
-                            + "vector_left=%d vector_right=%d vector_pending_left=%d vector_pending_right=%d "
-                            + "prewrite_groups_left=%d prewrite_groups_right=%d "
-                            + "prewrite_avg_batch_left=%.2f prewrite_avg_batch_right=%.2f "
-                            + "prewrite_fallback_left=%d prewrite_fallback_right=%d%n",
+                    + "failures=%d tps=%.2f first_failure=%s groups=%d avg_batch=%.2f "
+                    + "published=%d pending_materialization=%d materialized=%d "
+                    + "recovery_failures=%d recovery_failure=%s "
+                    + "registration_groups=%d registration_avg_batch=%.2f "
+                    + "backlog_at_stop=%d drain_seconds=%.2f max_backlog=%d recovery_park_us=%d "
+                    + "owner_segments=%d owner_failures=%d owner_error=%s "
+                    + "recovered_segments=%d segment_failures=%d segment_error=%s "
+                    + "safe_point=%d slot_rows=%d txn_rows=%d segment_rows=%d "
+                    + "gc_runs=%d gc_failures=%d gc_error=%s "
+                    + "vector_left=%d vector_right=%d vector_pending_left=%d vector_pending_right=%d "
+                    + "prewrite_groups_left=%d prewrite_groups_right=%d "
+                    + "prewrite_avg_batch_left=%.2f prewrite_avg_batch_right=%.2f "
+                    + "prewrite_fallback_left=%d prewrite_fallback_right=%d%n",
                     vectorMode ? "VECTOR" : "SCALAR",
                     concurrency, elapsed, committed.sum(), failures.sum(), committed.sum() / elapsed,
                     firstFailure.get(), batcher.groups.sum(),
@@ -693,7 +576,7 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
                     rightPrewrites == null ? 0 : rightPrewrites.fallbackCount());
             long count = Math.max(1, committed.sum());
             System.out.printf("LOCAL_FIRST_CROSS_STAGE begin_avg_ms=%.3f register_avg_ms=%.3f "
-                            + "prewrite_avg_ms=%.3f center_avg_ms=%.3f publish_avg_ms=%.3f%n",
+                    + "prewrite_avg_ms=%.3f center_avg_ms=%.3f publish_avg_ms=%.3f%n",
                     beginNanos.sum() / count / 1_000_000.0, registerNanos.sum() / count / 1_000_000.0,
                     prewriteNanos.sum() / count / 1_000_000.0, centerNanos.sum() / count / 1_000_000.0,
                     publishNanos.sum() / count / 1_000_000.0);
@@ -706,10 +589,18 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
         }
     }
 
-    /** 只接收本程序固定表名，用于确认长跑历史行数没有线性堆积。 */
-    private static long countRows(HikariDataSource dataSource, String table) throws SQLException {
-        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
-             ResultSet row = statement.executeQuery("select count(*) from " + table)) {
+    /**
+     * Only the fixed table name of this program is accepted to confirm that there are no linear piles of long run historical lines.
+     *
+     * @param dataSource database connection source
+     * @param table table
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long countRows(final HikariDataSource dataSource, final String table) throws SQLException {
+        try (
+                Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
+                ResultSet row = statement.executeQuery("select count(*) from " + table)) {
             if (!row.next()) {
                 throw new SQLException("cross-shard benchmark table count returned no row");
             }
@@ -717,9 +608,295 @@ public final class MysqlLocalFirstCrossShardProtocolBenchmark {
         }
     }
 
-    /** 只读取本次实验显式配置，不用系统配置猜测其他数据库。 */
-    private static String env(String name, String fallback) {
+    /**
+     * Read-only Takes the active configuration of this experiment and guesses other database without system configuration.
+     *
+     * @param name name
+     * @param fallback fallback
+     * @return the operation result
+     */
+    private static String env(final String name, final String fallback) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    /**
+     * A new transaction merge durable ACTIVE identity at the center, confirming before allowing shard prewrite.
+     */
+    private static final class RegistrationBatcher implements AutoCloseable {
+
+        private final MysqlLocalFirstPublicationLedger ledger;
+
+        private final ArrayBlockingQueue<Request> queue = new ArrayBlockingQueue<>(4096);
+
+        private final List<Thread> workers;
+
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private final LongAdder groups = new LongAdder();
+
+        private final LongAdder requests = new LongAdder();
+
+        private final boolean vectorMode;
+
+        /**
+         * Bounded Workspace parallels non-interactive new transaction batch.
+         *
+         * @param ledger ledger
+         * @param workerCount worker count
+         * @param vectorMode vector mode
+         */
+        private RegistrationBatcher(final MysqlLocalFirstPublicationLedger ledger,
+                                    final int workerCount, final boolean vectorMode) {
+            this.ledger = ledger;
+            this.vectorMode = vectorMode;
+            List<Thread> running = new ArrayList<>();
+            for (int index = 0; index < workerCount; index++) {
+                running.add(Thread.ofVirtual().name("mvcc-intent-register-" + index).start(this::work));
+            }
+            workers = List.copyOf(running);
+        }
+
+        /**
+         * Foreground Only create intent in any shard after receiving durable confirmation.
+         *
+         * @param registration registration
+         * @throws IllegalStateException if the operation cannot complete
+         */
+        private void register(final IntentRegistrationRequest registration) {
+            var result = new CompletableFuture<Void>();
+            if (closed.get() || !queue.offer(new Request(registration, result))) {
+                throw new IllegalStateException("cross-shard registration queue is unavailable");
+            }
+            try {
+                result.join();
+            } catch (final CompletionException ex) {
+                if (ex.getCause() instanceof RuntimeException cause) {
+                    throw cause;
+                }
+                throw ex;
+            }
+        }
+
+        /**
+         * An batch fully inserted or all failed, without queuing as central ACTIVE.
+         */
+        private void work() {
+            while (!closed.get() || !queue.isEmpty()) {
+                try {
+                    Request first = queue.poll(10, TimeUnit.MILLISECONDS);
+                    if (first == null) {
+                        continue;
+                    }
+                    List<Request> batch = new ArrayList<>(64);
+                    batch.add(first);
+                    queue.drainTo(batch, 63);
+                    groups.increment();
+                    requests.add(batch.size());
+                    try {
+                        List<IntentRegistrationRequest> identities = batch.stream()
+                                .map(Request::registration).toList();
+                        if (vectorMode) {
+                            ledger.registerVectorIntentBatch(identities);
+                        } else {
+                            ledger.registerIntentBatch(identities);
+                        }
+                        batch.forEach(request -> request.result().complete(null));
+                    } catch (final RuntimeException ex) {
+                        batch.forEach(request -> request.result().completeExceptionally(ex));
+                    }
+                } catch (final InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+
+        /**
+         * The registration line will not be stopped until the request for entry has been completed.
+         *
+         * @throws Exception if the operation cannot complete
+         */
+        @Override
+        public void close() throws Exception {
+            closed.set(true);
+            for (Thread worker : workers) {
+                worker.join(10_000);
+            }
+        }
+
+        /**
+         * Each registration awaits completion of transaction durable at its centre.
+         *
+         * @param registration registration
+         * @param result result
+         */
+        private record Request(IntentRegistrationRequest registration, CompletableFuture<Void> result) {
+        }
+    }
+
+    /**
+     * Multiple transaction s of double shard prewrite completed merge centre decision and release in the same paragraph.
+     */
+    private static final class IntentBatcher implements AutoCloseable {
+
+        private final MysqlLocalFirstPublicationLedger ledger;
+
+        private final ArrayBlockingQueue<Request> queue = new ArrayBlockingQueue<>(4096);
+
+        private final List<Thread> workers;
+
+        private final ScheduledExecutorService publisher;
+
+        private final AtomicLong published;
+
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private final LongAdder groups = new LongAdder();
+
+        private final LongAdder requests = new LongAdder();
+
+        private final AtomicReference<RuntimeException> failure = new AtomicReference<>();
+
+        private final boolean vectorMode;
+
+        /**
+         * Fixed virtual workspace and cache already released by center transaction durable.
+         *
+         * @param ledger ledger
+         * @param workerCount worker count
+         * @param vectorMode vector mode
+         */
+        private IntentBatcher(final MysqlLocalFirstPublicationLedger ledger,
+                              final int workerCount, final boolean vectorMode) {
+            this.ledger = ledger;
+            this.vectorMode = vectorMode;
+            this.published = new AtomicLong(ledger.currentPublished());
+            List<Thread> running = new ArrayList<>();
+            for (int index = 0; index < workerCount; index++) {
+                running.add(Thread.ofVirtual().name("mvcc-intent-batch-" + index).start(this::work));
+            }
+            workers = List.copyOf(running);
+            publisher = Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform().daemon().name("mvcc-intent-publisher").unstarted(task));
+            publisher.scheduleWithFixedDelay(this::publishSafely, 0, 100, TimeUnit.MILLISECONDS);
+        }
+
+        /**
+         * Foreground blocked to its own decision batch completion and cannot be queued as durable commit.
+         *
+         * @param decision decision
+         * @throws IllegalStateException if the operation cannot complete
+         */
+        private void complete(final IntentCommitRequest decision) {
+            var result = new CompletableFuture<Void>();
+            if (closed.get() || !queue.offer(new Request(decision, result))) {
+                throw new IllegalStateException("cross-shard decision queue is unavailable");
+            }
+            try {
+                result.join();
+            } catch (final CompletionException ex) {
+                if (ex.getCause() instanceof RuntimeException cause) {
+                    throw cause;
+                }
+                throw ex;
+            }
+        }
+
+        /**
+         * Foreground Waits for its own commit time to enter the same center durable distribution prefix.
+         *
+         * @param commitTs durable commit timestamp
+         * @param deadlineMillis deadline millis
+         * @throws IllegalStateException if the operation cannot complete
+         */
+        private void awaitPublished(final long commitTs, final long deadlineMillis) {
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(deadlineMillis);
+            while (published.get() < commitTs) {
+                if (System.nanoTime() >= deadline) {
+                    throw new IllegalStateException("cross-shard publication confirmation timed out");
+                }
+                LockSupport.parkNanos(100_000);
+            }
+        }
+
+        /**
+         * Each paragraph does not exceed 64 to complete metadata, slots and continuous distribution with the same control transaction.
+         */
+        private void work() {
+            while (!closed.get() || !queue.isEmpty()) {
+                try {
+                    Request first = queue.poll(10, TimeUnit.MILLISECONDS);
+                    if (first == null) {
+                        continue;
+                    }
+                    List<Request> batch = new ArrayList<>(64);
+                    batch.add(first);
+                    queue.drainTo(batch, 63);
+                    Map<Long, List<Request>> bySegment = new HashMap<>();
+                    for (Request request : batch) {
+                        bySegment.computeIfAbsent(request.decision().segment().lease().firstTs(),
+                                ignored -> new ArrayList<>()).add(request);
+                    }
+                    bySegment.values().forEach(this::completeGroup);
+                } catch (final InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+
+        /**
+         * Center decision failed by notifying only this group, durable ACTIVE to the due recovery.
+         *
+         * @param batch batch
+         */
+        private void completeGroup(final List<Request> batch) {
+            groups.increment();
+            requests.add(batch.size());
+            try {
+                List<IntentCommitRequest> decisions = batch.stream().map(Request::decision).toList();
+                var result = vectorMode ? ledger.completeVectorIntentBatchAndPublish(decisions)
+                        : ledger.completeIntentBatchAndPublish(decisions);
+                published.accumulateAndGet(result.publishedTs(), Math::max);
+                batch.forEach(request -> request.result().complete(null));
+            } catch (final RuntimeException ex) {
+                failure.set(ex);
+                batch.forEach(request -> request.result().completeExceptionally(ex));
+            }
+        }
+
+        /**
+         * The homeer closes or loses connection recovery advance watermark and wakes up the waiting foreground.
+         */
+        private void publishSafely() {
+            try {
+                published.accumulateAndGet(ledger.advancePublishedFast(4096), Math::max);
+            } catch (final RuntimeException ex) {
+                failure.set(ex);
+            }
+        }
+
+        /**
+         * The new request is closed and the incoming request is completed or unusual reported.
+         *
+         * @throws Exception if the operation cannot complete
+         */
+        @Override
+        public void close() throws Exception {
+            closed.set(true);
+            publisher.shutdownNow();
+            for (Thread worker : workers) {
+                worker.join(10_000);
+            }
+        }
+
+        /**
+         * Each waiter only receives its own durable Center batch result.
+         *
+         * @param decision decision
+         * @param result result
+         */
+        private record Request(IntentCommitRequest decision, CompletableFuture<Void> result) {
+        }
     }
 }

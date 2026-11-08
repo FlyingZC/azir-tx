@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -23,78 +39,78 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
-/** 分条本地版本的隔离快照原型，两次采集验证跨分片水位形成同一稳定切面。 */
+/**
+ * A separate snapshot prototype of local version with two collections of verify cross-shard watermark to form the same stable cut.
+ */
 public final class MysqlStripedSnapshotOracle implements AutoCloseable {
-    /** 实验水位与正式参与者水位使用不同表，查询语句固定不接受外部表名。 */
-    private enum StateSource { BENCH, PRODUCT }
 
     private final Map<String, DataSource> shards;
+
     private final List<String> routes;
+
     private final int stripes;
+
     private final int maxRetries;
+
     private final ExecutorService readers;
+
     private final StateSource stateSource;
+
     private final AtomicLong collectionAttempts = new AtomicLong();
 
-    /** 意向决议查询必须从持久中心返回已提交时间，ACTIVE 或 ABORTED 返回空。 */
-    @FunctionalInterface
-    public interface CrossDecisionResolver {
-        /** 中心状态未知或不可达时必须抛错，不能把未知意向当作未提交。 */
-        OptionalLong committedEpoch(long txId);
-    }
-
-    /** 固定控制决议水位与每个分片每条本地序号，不允许外部修改已捕获快照。 */
-    public record Snapshot(long decisionEpoch, Map<String, List<Long>> localSequences) {
-        /** 每个分量必须是不可变、非负的持久提交序号。 */
-        public Snapshot {
-            if (decisionEpoch < 0 || localSequences == null || localSequences.isEmpty()) {
-                throw new IllegalArgumentException("invalid striped snapshot epoch or routes");
-            }
-            Map<String, List<Long>> copied = new LinkedHashMap<>();
-            localSequences.forEach((route, sequences) -> {
-                List<Long> fixed = List.copyOf(sequences);
-                if (route == null || route.isBlank() || fixed.isEmpty()
-                        || fixed.stream().anyMatch(value -> value == null || value < 0)) {
-                    throw new IllegalArgumentException("invalid striped snapshot component");
-                }
-                copied.put(route, fixed);
-            });
-            localSequences = Map.copyOf(copied);
-        }
-
-        /** 返回目标分片某条水位在快照时已持久完成的最大序号。 */
-        public long sequence(String shardId, int stripe) {
-            List<Long> values = localSequences.get(shardId);
-            if (values == null || stripe < 0 || stripe >= values.size()) {
-                throw new IllegalArgumentException("striped snapshot has no such shard component");
-            }
-            return values.get(stripe);
-        }
-    }
-
-    /** 每个被读分片都要有完整分条，失败不能猜测缺失分片的快照。 */
-    public MysqlStripedSnapshotOracle(Map<String, DataSource> shards, int stripes, int maxRetries) {
+    /**
+     * Each read shard must have a complete split, and failure cannot guess the missing shard snapshot.
+     *
+     * @param shards shards
+     * @param stripes stripes
+     * @param maxRetries max retries
+     */
+    public MysqlStripedSnapshotOracle(final Map<String, DataSource> shards, final int stripes, final int maxRetries) {
         this(shards, stripes, maxRetries, false);
     }
 
-    /** 可选并行采集每个分片，以缩短两次完整向量读取的竞争窗口。 */
-    public MysqlStripedSnapshotOracle(Map<String, DataSource> shards, int stripes,
-                                      int maxRetries, boolean parallelReads) {
+    /**
+     * Optionally, you can collect each shard in parallel to shorten the two full vector-readable competition windows.
+     *
+     * @param shards shards
+     * @param stripes stripes
+     * @param maxRetries max retries
+     * @param parallelReads parallel reads
+     */
+    public MysqlStripedSnapshotOracle(final Map<String, DataSource> shards, final int stripes,
+                                      final int maxRetries, final boolean parallelReads) {
         this(shards, stripes, maxRetries, parallelReads, StateSource.BENCH);
     }
 
-    /** 正式参与者切面从真实 `mvcc_vector_stripe_state_v1` 读取，不能复用容量探针表。 */
-    public static MysqlStripedSnapshotOracle forProduct(Map<String, DataSource> shards,
-                                                         int stripes, int maxRetries,
-                                                         boolean parallelReads) {
+    /**
+     * The official participant aspect is read from the real `mvcc_vector_stripe_state_v1 ' and cannot be reused in probe Table.
+     *
+     * @param shards shards
+     * @param stripes stripes
+     * @param maxRetries max retries
+     * @param parallelReads parallel reads
+     * @return the operation result
+     */
+    public static MysqlStripedSnapshotOracle forProduct(final Map<String, DataSource> shards,
+                                                        final int stripes, final int maxRetries,
+                                                        final boolean parallelReads) {
         return new MysqlStripedSnapshotOracle(shards, stripes, maxRetries,
                 parallelReads, StateSource.PRODUCT);
     }
 
-    /** 所有构造入口共用完整布局与轮次边界校验。 */
-    private MysqlStripedSnapshotOracle(Map<String, DataSource> shards, int stripes,
-                                       int maxRetries, boolean parallelReads,
-                                       StateSource stateSource) {
+    /**
+     * All tectonic entrances share the complete layout with the wheeled sub-border validate.
+     *
+     * @param shards shards
+     * @param stripes stripes
+     * @param maxRetries max retries
+     * @param parallelReads parallel reads
+     * @param stateSource state source
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private MysqlStripedSnapshotOracle(final Map<String, DataSource> shards, final int stripes,
+                                       final int maxRetries, final boolean parallelReads,
+                                       final StateSource stateSource) {
         this.shards = Map.copyOf(shards);
         if (this.shards.isEmpty() || stripes < 1 || stripes > 256
                 || maxRetries < 1 || maxRetries > 4096) {
@@ -107,8 +123,14 @@ public final class MysqlStripedSnapshotOracle implements AutoCloseable {
         this.stateSource = stateSource;
     }
 
-    /** 控制决议水位夹在两轮分片读取中；分量变化则重试而不返回割裂快照。 */
-    public Snapshot capture(LongSupplier centerDecisionEpoch) {
+    /**
+     * Control decision watermark in two-wheel shard readings; fraction changes retry without returning split snapshot.
+     *
+     * @param centerDecisionEpoch center decision epoch
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public Snapshot capture(final LongSupplier centerDecisionEpoch) {
         Objects.requireNonNull(centerDecisionEpoch, "centerDecisionEpoch");
         for (int attempt = 0; attempt < maxRetries; attempt++) {
             collectionAttempts.incrementAndGet();
@@ -123,18 +145,36 @@ public final class MysqlStripedSnapshotOracle implements AutoCloseable {
                 "striped snapshot did not find a stable cross-shard cut", true, null);
     }
 
-    /** 返回实际双采集轮数，便于识别高写入压力下隐藏的快照重试成本。 */
+    /**
+     * Returns the number of actual double-collector wheels that allows you to identify snapshot retry costs hidden under high writing pressure.
+     *
+     * @return the operation result
+     */
     public long collectionAttempts() {
         return collectionAttempts.get();
     }
 
-    /** 仅供持久发布器采样；单轮原始向量不能直接充当客户端 RC/RR 快照。 */
+    /**
+     * Only for sample by durable publisher; single-wheel source vector cannot directly serve as the client RC/ RR snapshot.
+     *
+     * @return the operation result
+     */
     Map<String, List<Long>> sampleForPublication() {
         return readAll();
     }
 
-    /** 按固定 RR 快照分量读取版本；RC 调用方每条语句重新 capture。 */
-    public Optional<byte[]> read(Snapshot snapshot, String shardId, String key, int stripe) {
+    /**
+     * Read version by a fixed RR snapshot; RC caller recapture for each statement.
+     *
+     * @param snapshot snapshot
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param stripe stripe
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public Optional<byte[]> read(final Snapshot snapshot, final String shardId, final String key, final int stripe) {
         requireBenchDataReader();
         Objects.requireNonNull(snapshot, "snapshot");
         Objects.requireNonNull(key, "key");
@@ -153,15 +193,26 @@ public final class MysqlStripedSnapshotOracle implements AutoCloseable {
             try (ResultSet row = query.executeQuery()) {
                 return row.next() ? Optional.of(row.getBytes(1)) : Optional.empty();
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                     "read striped MVCC prototype version failed", false, null, ex);
         }
     }
 
-    /** 单条 MySQL 读视图合并本地版本、跨片意向及物化版本，避免物化瞬间漏读。 */
-    public Optional<byte[]> readMixed(Snapshot snapshot, String shardId, String key,
-                                      int stripe, CrossDecisionResolver decisions) {
+    /**
+     * A single MySQL reading view merges local version, cross-shard intent and materialization version, avoiding an instant missed materialization.
+     *
+     * @param snapshot snapshot
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param stripe stripe
+     * @param decisions decisions
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public Optional<byte[]> readMixed(final Snapshot snapshot, final String shardId, final String key,
+                                      final int stripe, final CrossDecisionResolver decisions) {
         requireBenchDataReader();
         Objects.requireNonNull(snapshot, "snapshot");
         Objects.requireNonNull(key, "key");
@@ -211,13 +262,17 @@ public final class MysqlStripedSnapshotOracle implements AutoCloseable {
                 }
                 return Optional.empty();
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                     "read striped mixed MVCC prototype version failed", false, null, ex);
         }
     }
 
-    /** 依固定路由顺序采集所有分片，单个分片的一次查询使用同一 MySQL 读视图。 */
+    /**
+     * Collects all shard s in fixed routing order, using the same MySQL reading view for a single shard query.
+     *
+     * @return the operation result
+     */
     private Map<String, List<Long>> readAll() {
         Map<String, List<Long>> found = new LinkedHashMap<>();
         if (readers != null) {
@@ -228,7 +283,7 @@ public final class MysqlStripedSnapshotOracle implements AutoCloseable {
             for (String shardId : routes) {
                 try {
                     found.put(shardId, pending.get(shardId).join());
-                } catch (CompletionException ex) {
+                } catch (final CompletionException ex) {
                     if (ex.getCause() instanceof RuntimeException cause) {
                         throw cause;
                     }
@@ -243,15 +298,22 @@ public final class MysqlStripedSnapshotOracle implements AutoCloseable {
         return Map.copyOf(found);
     }
 
-    /** 一个分片的全部分条必须由同一 MySQL 语句视图原子读取。 */
-    private List<Long> readOne(String shardId) {
+    /**
+     * All subsections of an shard must be read from the same MySQL statement view atomic.
+     *
+     * @param shardId logical shard identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private List<Long> readOne(final String shardId) {
         List<Long> values = new ArrayList<>(stripes);
         String querySql = stateSource == StateSource.PRODUCT
                 ? "select stripe_id, committed_seq from mvcc_vector_stripe_state_v1 order by stripe_id"
                 : "select stripe_id, committed_seq from bench_striped_mvcc_state order by stripe_id";
-        try (Connection connection = shards.get(shardId).getConnection();
-             PreparedStatement query = connection.prepareStatement(querySql);
-             ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = shards.get(shardId).getConnection();
+                PreparedStatement query = connection.prepareStatement(querySql);
+                ResultSet row = query.executeQuery()) {
             while (row.next()) {
                 if (row.getInt("stripe_id") != values.size()) {
                     throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -259,7 +321,7 @@ public final class MysqlStripedSnapshotOracle implements AutoCloseable {
                 }
                 values.add(row.getLong("committed_seq"));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                     "read striped MVCC prototype watermark failed", false, null, ex);
         }
@@ -270,18 +332,94 @@ public final class MysqlStripedSnapshotOracle implements AutoCloseable {
         return List.copyOf(values);
     }
 
-    /** 正式切面不允许误用实验版本表的单键读取入口。 */
+    /**
+     * The official cut does not allow the error to read the entry with a single key of the version table.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     private void requireBenchDataReader() {
         if (stateSource != StateSource.BENCH) {
             throw new IllegalStateException("product vector versions require MysqlStorageAdapter vector read");
         }
     }
 
-    /** 结束并行分片读取线程，避免容量探针退出后继续占用连接。 */
+    /**
+     * Ends the parallel shard reading thread and avoids taking connection after probe exits.
+     */
     @Override
     public void close() {
         if (readers != null) {
             readers.close();
+        }
+    }
+
+    /**
+     * Experiment watermark uses a different form than the official participant watermark, and the query statement is fixed as not accepting external watch names.
+     */
+    private enum StateSource {
+        BENCH, PRODUCT
+    }
+
+    /**
+     * Intent decision Query must return from the durable center after commit time, ACTIVE or ABORTED returns empty.
+     */
+    @FunctionalInterface
+    public interface CrossDecisionResolver {
+
+        /**
+         * Center status unknown or unattainable must be thrown in error. Unknown intent cannot be treated as missing commit.
+         *
+         * @param txId transaction identifier
+         * @return the operation result
+         */
+        OptionalLong committedEpoch(long txId);
+    }
+
+    /**
+     * Fixed control decision watermark with each shard local serial number does not allow external changes to capture snapshot.
+     *
+     * @param decisionEpoch decision epoch
+     * @param localSequences local sequences
+     */
+    public record Snapshot(long decisionEpoch, Map<String, List<Long>> localSequences) {
+
+        /**
+         * Every component must be an immutable, nonnegative durable commit sequence.
+         *
+         * @param decisionEpoch decision epoch
+         * @param localSequences local sequences
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public Snapshot {
+            if (decisionEpoch < 0 || localSequences == null || localSequences.isEmpty()) {
+                throw new IllegalArgumentException("invalid striped snapshot epoch or routes");
+            }
+            Map<String, List<Long>> copied = new LinkedHashMap<>();
+            localSequences.forEach((route, sequences) -> {
+                List<Long> fixed = List.copyOf(sequences);
+                if (route == null || route.isBlank() || fixed.isEmpty()
+                        || fixed.stream().anyMatch(value -> value == null || value < 0)) {
+                    throw new IllegalArgumentException("invalid striped snapshot component");
+                }
+                copied.put(route, fixed);
+            });
+            localSequences = Map.copyOf(copied);
+        }
+
+        /**
+         * Returns the maximum serial number of a target shard watermark completed by durable at snapshot.
+         *
+         * @param shardId logical shard identifier
+         * @param stripe stripe
+         * @return the operation result
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public long sequence(final String shardId, final int stripe) {
+            List<Long> values = localSequences.get(shardId);
+            if (values == null || stripe < 0 || stripe >= values.size()) {
+                throw new IllegalArgumentException("striped snapshot has no such shard component");
+            }
+            return values.get(stripe);
         }
     }
 }

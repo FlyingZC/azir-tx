@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -13,59 +29,101 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.LongSupplier;
 
-/** 单领导者向量切面的后台续租与发布实验运行时，故障时立即关闭读和 ACK。 */
+/**
+ * Single leader background renewals and release experiments are immediately closed for reading and ACK at failure.
+ */
 final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
+
     private final DataSource center;
+
     private final Map<String, DataSource> shards;
+
     private final int stripes;
+
     private final LongSupplier decisionEpoch;
+
     private final MysqlVectorCutLeaderLease leases;
+
     private final String ownerId;
+
     private final long leaseMillis;
+
     private final long publishIntervalNanos;
+
     private final boolean productState;
+
     private final AtomicBoolean active = new AtomicBoolean();
+
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
+
     private volatile MysqlVectorCutLeaderLease.LeaseGuard guard;
+
     private volatile MysqlPublishedVectorCut cut;
+
     private volatile Thread worker;
+
     private volatile boolean closed;
 
-    /** 返回给读者的切面必须携带领导者代数，供外层路由拒绝旧代数响应。 */
-    record PublishedView(long generation, MysqlStripedSnapshotOracle.Snapshot snapshot) {
-        /** 不允许未初始化代数或缺失切面的成功响应。 */
-        PublishedView {
-            Objects.requireNonNull(snapshot, "snapshot");
-            if (generation < 1) {
-                throw new IllegalArgumentException("invalid vector leader generation");
-            }
-        }
-    }
-
-    /** 绑定固定分片拓扑、持久租约和后台发布周期。 */
-    MysqlVectorCutLeaderRuntime(DataSource center, Map<String, DataSource> shards, int stripes,
-                                LongSupplier decisionEpoch, MysqlVectorCutLeaderLease leases,
-                                String ownerId, long leaseMillis, long publishIntervalMicros) {
+    /**
+     * Staples fixed shard scale, durable lease and background distribution cycles.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     * @param leases leases
+     * @param ownerId owner id
+     * @param leaseMillis lease millis
+     * @param publishIntervalMicros publish interval micros
+     */
+    MysqlVectorCutLeaderRuntime(final DataSource center, final Map<String, DataSource> shards, final int stripes,
+                                final LongSupplier decisionEpoch, final MysqlVectorCutLeaderLease leases,
+                                final String ownerId, final long leaseMillis, final long publishIntervalMicros) {
         this(center, shards, stripes, decisionEpoch, leases,
                 ownerId, leaseMillis, publishIntervalMicros, false);
     }
 
-    /** 正式参与者运行时只读取真实分条表，并须绑定正式中心领导者租约。 */
-    static MysqlVectorCutLeaderRuntime forProduct(DataSource center,
-                                                   Map<String, DataSource> shards, int stripes,
-                                                   LongSupplier decisionEpoch,
-                                                   MysqlVectorCutLeaderLease leases,
-                                                   String ownerId, long leaseMillis,
-                                                   long publishIntervalMicros) {
+    /**
+     * Formal participant Runtime read-only takes a true tabulation and must bind the official centre leader to lease.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     * @param leases leases
+     * @param ownerId owner id
+     * @param leaseMillis lease millis
+     * @param publishIntervalMicros publish interval micros
+     * @return the operation result
+     */
+    static MysqlVectorCutLeaderRuntime forProduct(final DataSource center,
+                                                  final Map<String, DataSource> shards, final int stripes,
+                                                  final LongSupplier decisionEpoch,
+                                                  final MysqlVectorCutLeaderLease leases,
+                                                  final String ownerId, final long leaseMillis,
+                                                  final long publishIntervalMicros) {
         return new MysqlVectorCutLeaderRuntime(center, shards, stripes, decisionEpoch,
                 leases, ownerId, leaseMillis, publishIntervalMicros, true);
     }
 
-    /** 两种固定水位来源共用续租、故障关闭及客户端响应逻辑。 */
-    private MysqlVectorCutLeaderRuntime(DataSource center, Map<String, DataSource> shards, int stripes,
-                                        LongSupplier decisionEpoch, MysqlVectorCutLeaderLease leases,
-                                        String ownerId, long leaseMillis, long publishIntervalMicros,
-                                        boolean productState) {
+    /**
+     * Two fixed watermark sources share the lease renewal, failure closure and client response logic.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     * @param leases leases
+     * @param ownerId owner id
+     * @param leaseMillis lease millis
+     * @param publishIntervalMicros publish interval micros
+     * @param productState product state
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private MysqlVectorCutLeaderRuntime(final DataSource center, final Map<String, DataSource> shards, final int stripes,
+                                        final LongSupplier decisionEpoch, final MysqlVectorCutLeaderLease leases,
+                                        final String ownerId, final long leaseMillis, final long publishIntervalMicros,
+                                        final boolean productState) {
         this.center = Objects.requireNonNull(center, "center");
         this.shards = Map.copyOf(shards);
         this.stripes = stripes;
@@ -84,33 +142,58 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
         this.productState = productState;
     }
 
-    /** GC 调度器只读实际前台控制库连接身份。 */
+    /**
+     * GC Scheduler read-only Actual foreground Control Library connection identity.
+     *
+     * @return the operation result
+     */
     DataSource centerDataSource() {
         return center;
     }
 
-    /** 后台分片必须与当前发布者的固定路由一一对应。 */
+    /**
+     * Background shard must correspond to the current publisher 's fixed route.
+     *
+     * @return the operation result
+     */
     Map<String, DataSource> shardSources() {
         return shards;
     }
 
-    /** 只有正式向量数据源可以驱动产品本地版本 GC。 */
+    /**
+     * Only official vector data sources can drive the product local version GC.
+     *
+     * @return the operation result
+     */
     boolean productMode() {
         return productState;
     }
 
-    /** 读者租约与发布者必须使用相同分片集合及分条数。 */
+    /**
+     * Reader lease and the publisher must use the same shard collection and splits.
+     *
+     * @return the operation result
+     */
     String layoutHash() {
         return MysqlPublishedVectorCut.layoutFingerprint(
                 shards.keySet().stream().sorted().toList(), stripes);
     }
 
-    /** 回收器分条数与发布者持久布局必须一致。 */
+    /**
+     * The collection segment number must be consistent with the publisher 's durable layout.
+     *
+     * @return the operation result
+     */
     int stripeCount() {
         return stripes;
     }
 
-    /** 先取得中心代数再重建切面；已有领导者时返回 false 且不启动线程。 */
+    /**
+     * A central algebra is obtained before re-establishing the cut; returns false when you have a leader and does not start the thread.
+     *
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
     synchronized boolean start() {
         if (closed || worker != null) {
             throw new IllegalStateException("vector publisher runtime was already started or closed");
@@ -129,7 +212,7 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
             worker = Thread.ofVirtual().name("azir-vector-cut-leader-" + guard.generation())
                     .start(this::runLoop);
             return true;
-        } catch (RuntimeException | Error ex) {
+        } catch (final RuntimeException | Error ex) {
             failClosed(ex);
             closed = true;
             if (cut != null) {
@@ -139,7 +222,11 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
         }
     }
 
-    /** 后台按本地租约余量续租，任何发布或续租失败都撤销本代数。 */
+    /**
+     * The background lease is renewed at the local lease surplus, and any failure to issue or renew a lease cancels this algebra.
+     *
+     * @throws InterruptedException if the operation cannot complete
+     */
     private void runLoop() {
         try {
             long renewalBoundary = TimeUnit.MILLISECONDS.toNanos(leaseMillis / 2);
@@ -154,14 +241,18 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
                     throw new InterruptedException("vector publisher thread was interrupted");
                 }
             }
-        } catch (Throwable ex) {
+        } catch (final Throwable ex) {
             if (active.get()) {
                 failClosed(ex);
             }
         }
     }
 
-    /** 前台每次取 RC 切面都要验证当前运行时仍持有可用租约。 */
+    /**
+     * Foreground verify is still available at the current running time for each RC cut.
+     *
+     * @return the operation result
+     */
     PublishedView currentView() {
         requireServing();
         MysqlStripedSnapshotOracle.Snapshot snapshot = cut.currentCut();
@@ -169,15 +260,27 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
         return new PublishedView(guard.generation(), snapshot);
     }
 
-    /** 已完成物理提交的事务在自己的序号被当前代数发布后才能 ACK。 */
-    void awaitPublished(String shardId, int stripe, long sequence,
-                        long minimumDecisionEpoch, long timeoutMillis) {
+    /**
+     * Transaction of the completed physical commit can only be ACK after its own serial number has been published by the current algebra.
+     *
+     * @param shardId logical shard identifier
+     * @param stripe stripe
+     * @param sequence sequence
+     * @param minimumDecisionEpoch minimum decision epoch
+     * @param timeoutMillis timeout millis
+     */
+    void awaitPublished(final String shardId, final int stripe, final long sequence,
+                        final long minimumDecisionEpoch, final long timeoutMillis) {
         requireServing();
         cut.awaitLocallyPublished(shardId, stripe, sequence, minimumDecisionEpoch, timeoutMillis);
         requireServing();
     }
 
-    /** 只返回已证实运行的状态，不把旧线程存活等同于仍有服务资格。 */
+    /**
+     * Only returns to a proven state of operation and does not equate the survival of old threads with continued service eligibility.
+     *
+     * @return the operation result
+     */
     boolean isServing() {
         if (!active.get() || guard == null) {
             return false;
@@ -185,25 +288,37 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
         try {
             guard.requireActive();
             return true;
-        } catch (MvccException ex) {
+        } catch (final MvccException ex) {
             return false;
         }
     }
 
-    /** 发布失败证据供测试与运行监控读取。 */
+    /**
+     * Releases evidence of failure for testing and running surveillance reading.
+     *
+     * @return the operation result
+     */
     Optional<Throwable> failure() {
         return Optional.ofNullable(failure.get());
     }
 
-    /** 切面网络入口失效即撤销发布资格，禁止只有本地 ACK 而远端读不到新切面。 */
-    void endpointUnavailable(Throwable cause) {
+    /**
+     * Declines the posting of a cut-off network portal when it is disabled and prohibits only local ACK, while no new side can be read at a remote end.
+     *
+     * @param cause cause
+     */
+    void endpointUnavailable(final Throwable cause) {
         Objects.requireNonNull(cause, "cause");
         if (active.get()) {
             failClosed(cause);
         }
     }
 
-    /** 非当前代数、后台故障或显式关闭都拒绝成功读与确认。 */
+    /**
+     * Non-current algebra, background failure or visible closes all refuse to read and confirm successfully.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     private void requireServing() {
         if (!active.get() || guard == null) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -212,8 +327,12 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
         guard.requireActive();
     }
 
-    /** 错误只记录一次，并先撤销本地资格再唤醒等待者。 */
-    private void failClosed(Throwable cause) {
+    /**
+     * Errors are recorded only once and the local qualification is revoked before the waiting person is awakened.
+     *
+     * @param cause cause
+     */
+    private void failClosed(final Throwable cause) {
         failure.compareAndSet(null, cause);
         active.set(false);
         if (guard != null) {
@@ -224,7 +343,9 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
         }
     }
 
-    /** 停止本地读与 ACK，等待发布线程退出；中心租约自然到期后方可接任。 */
+    /**
+     * Stop local reading with ACK, pending the release of threads; centre lease automatically expires before taking over.
+     */
     @Override
     public synchronized void close() {
         if (closed) {
@@ -243,12 +364,35 @@ final class MysqlVectorCutLeaderRuntime implements AutoCloseable {
             running.interrupt();
             try {
                 running.join(5_000);
-            } catch (InterruptedException ex) {
+            } catch (final InterruptedException ex) {
                 Thread.currentThread().interrupt();
             }
         }
         if (cut != null) {
             cut.close();
+        }
+    }
+
+    /**
+     * Returns to reader tangents must carry the leader algebra for external routers to reject old algebra responses.
+     *
+     * @param generation generation
+     * @param snapshot snapshot
+     */
+    record PublishedView(long generation, MysqlStripedSnapshotOracle.Snapshot snapshot) {
+
+        /**
+         * Successful responses to algebras or missing cut-off are not allowed.
+         *
+         * @param generation generation
+         * @param snapshot snapshot
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        PublishedView {
+            Objects.requireNonNull(snapshot, "snapshot");
+            if (generation < 1) {
+                throw new IllegalArgumentException("invalid vector leader generation");
+            }
         }
     }
 }

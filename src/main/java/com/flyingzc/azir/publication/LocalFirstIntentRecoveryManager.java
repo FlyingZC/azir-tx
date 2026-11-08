@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -23,34 +39,44 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongPredicate;
 
-/** 按中心持久决议有界恢复跨分片意向，并在全部分片落盘后释放中心 GC 锚点。 */
+/**
+ * Durable decision bounded recovery cross-shard intent by centre and release GC anchor after all shard sets.
+ */
 public final class LocalFirstIntentRecoveryManager {
+
     private final MysqlLocalFirstPublicationLedger ledger;
+
     private final Map<String, StorageAdapter> shards;
+
     private final int maxInFlight;
+
     private final AtomicReference<RuntimeException> lastFailure = new AtomicReference<>();
+
     private long committedAfterTxId = Long.MIN_VALUE;
+
     private long abortAfterTxId = Long.MIN_VALUE;
 
-    /** 一轮分别统计物化、回滚和失败的跨分片事务。 */
-    public record RecoveryResult(int finalized, int aborted, int failures) {
-        /** 恢复统计不得出现负数。 */
-        public RecoveryResult {
-            if (finalized < 0 || aborted < 0 || failures < 0) {
-                throw new IllegalArgumentException("invalid cross-shard intent recovery result");
-            }
-        }
-    }
-
-    /** 每条路由必须与分片适配器的持久身份一致。 */
-    public LocalFirstIntentRecoveryManager(MysqlLocalFirstPublicationLedger ledger,
-                                           Map<String, StorageAdapter> shards) {
+    /**
+     * Each route must correspond to the durable identity of the shard adapter.
+     *
+     * @param ledger ledger
+     * @param shards shards
+     */
+    public LocalFirstIntentRecoveryManager(final MysqlLocalFirstPublicationLedger ledger,
+                                           final Map<String, StorageAdapter> shards) {
         this(ledger, shards, 16);
     }
 
-    /** 并行窗口由调用方显式约束，不能无限借用分片或控制库连接。 */
-    public LocalFirstIntentRecoveryManager(MysqlLocalFirstPublicationLedger ledger,
-                                           Map<String, StorageAdapter> shards, int maxInFlight) {
+    /**
+     * Parallel windows are subject to the caller 's visible form and cannot be borrowed indefinitely by shard or the control library connection.
+     *
+     * @param ledger ledger
+     * @param shards shards
+     * @param maxInFlight max in flight
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public LocalFirstIntentRecoveryManager(final MysqlLocalFirstPublicationLedger ledger,
+                                           final Map<String, StorageAdapter> shards, final int maxInFlight) {
         if (maxInFlight < 1 || maxInFlight > 64) {
             throw new IllegalArgumentException("invalid cross-shard recovery concurrency");
         }
@@ -64,8 +90,14 @@ public final class LocalFirstIntentRecoveryManager {
         });
     }
 
-    /** 按有符号事务号轮转，单笔失败保留中心锚点且不阻塞同批其他事务。 */
-    public synchronized RecoveryResult recoverOnce(int limit) {
+    /**
+     * Press a symbol transaction ID rotation, and the single pen fails to keep its central anchor without blocking other transaction s in the same batch.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public synchronized RecoveryResult recoverOnce(final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("invalid cross-shard recovery batch limit");
         }
@@ -79,17 +111,22 @@ public final class LocalFirstIntentRecoveryManager {
                 committedResult.failed() + abortResult.failed());
     }
 
-    /** 单笔中心 COMMITTED 决议可独立补齐各参与者并形成最终化批次输入。 */
-    private IntentFinalizationRequest materializeCommitted(long txId, ExecutorService fanout) {
+    /**
+     * The single pen center COMMITTED decision can independently complete each participant and form the finalised batch input.
+     *
+     * @param txId transaction identifier
+     * @param fanout fanout
+     * @return the operation result
+     */
+    private IntentFinalizationRequest materializeCommitted(final long txId, final ExecutorService fanout) {
         CommittedIntentProof centerProof = ledger.committedIntentProof(txId);
         TxRecord decision = centerProof.record();
         boolean vector = ledger.isVectorIntentTransaction(txId);
         List<IntentTerminalProof> proofs = new ArrayList<>(decision.participants().size());
         List<CompletableFuture<IntentTerminalProof>> participants = new ArrayList<>(decision.participants().size());
         for (String shardId : decision.participants().stream().sorted().toList()) {
-            participants.add(CompletableFuture.supplyAsync(() ->
-                    vector ? requireShard(shardId).commitVectorIntentWithProof(centerProof)
-                            : requireShard(shardId).commitIntentWithProof(centerProof), fanout));
+            participants.add(CompletableFuture.supplyAsync(() -> vector ? requireShard(shardId).commitVectorIntentWithProof(centerProof)
+                    : requireShard(shardId).commitIntentWithProof(centerProof), fanout));
         }
         for (CompletableFuture<IntentTerminalProof> participant : participants) {
             IntentTerminalProof proof = participant.join();
@@ -101,8 +138,13 @@ public final class LocalFirstIntentRecoveryManager {
         return new IntentFinalizationRequest(txId, proofs);
     }
 
-    /** 分片物化可并行，中心 GC 锚点必须等完整证明后才整批最终化。 */
-    private RecoveryCounts recoverCommittedBatch(List<Long> txIds) {
+    /**
+     * Shard - materialization can go in parallel, and the center GC anchor must wait for complete proof before the whole batch is finalised.
+     *
+     * @param txIds tx ids
+     * @return the operation result
+     */
+    private RecoveryCounts recoverCommittedBatch(final List<Long> txIds) {
         if (txIds.isEmpty()) {
             return new RecoveryCounts(0, 0);
         }
@@ -116,7 +158,7 @@ public final class LocalFirstIntentRecoveryManager {
                     budget.acquireUninterruptibly();
                     try {
                         ready.add(materializeCommitted(txId, workers));
-                    } catch (RuntimeException ex) {
+                    } catch (final RuntimeException ex) {
                         lastFailure.set(ex);
                         failed.incrementAndGet();
                     } finally {
@@ -132,8 +174,8 @@ public final class LocalFirstIntentRecoveryManager {
         List<IntentFinalizationRequest> batch = List.copyOf(ready);
         try {
             return new RecoveryCounts(ledger.markIntentFinalizedBatch(batch), failed.get());
-        } catch (RuntimeException batchFailure) {
-            // 一笔异常不能让同批其他已物化事务长期占用中心 GC 锚点。
+        } catch (final RuntimeException batchFailure) {
+            // An anomaly does not allow other already materialization transaction long-term occupancy centres GC anchor points in the same batch.
             lastFailure.set(batchFailure);
             int finalized = 0;
             for (IntentFinalizationRequest request : batch) {
@@ -141,7 +183,7 @@ public final class LocalFirstIntentRecoveryManager {
                     if (ledger.markIntentFinalized(request.txId(), request.proofs())) {
                         finalized++;
                     }
-                } catch (RuntimeException ex) {
+                } catch (final RuntimeException ex) {
                     lastFailure.set(ex);
                     failed.incrementAndGet();
                 }
@@ -150,9 +192,14 @@ public final class LocalFirstIntentRecoveryManager {
         }
     }
 
-    /** 单笔中心 ABORTED 决议在所有分片回滚后才能解除 GC 锚点。 */
-    private boolean recoverAborted(long txId) {
-        // 中心先作 ABORTED 决议，使迟到的提交凭据不能再获批。
+    /**
+     * The single pen center ABORTED decision will not release the GC anchor until all shard rollback.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    private boolean recoverAborted(final long txId) {
+        // The centre starts with ABORTED decision, so that late commit receipt can no longer be approved.
         TxRecord decision = ledger.abortIntentTransaction(txId);
         List<IntentTerminalProof> proofs = new ArrayList<>(decision.participants().size());
         for (String shardId : decision.participants().stream().sorted().toList()) {
@@ -165,8 +212,14 @@ public final class LocalFirstIntentRecoveryManager {
         return ledger.markIntentAbortFinalized(txId, proofs);
     }
 
-    /** 有界窗口并行不同事务，单笔失败仅保留该事务的持久恢复记录。 */
-    private RecoveryCounts recoverParallel(List<Long> txIds, LongPredicate action) {
+    /**
+     * Bounded windows are different in parallel to transaction, and only the durable recovery record of this transaction has been saved by a single pen failure.
+     *
+     * @param txIds tx ids
+     * @param action action
+     * @return the operation result
+     */
+    private RecoveryCounts recoverParallel(final List<Long> txIds, final LongPredicate action) {
         if (txIds.isEmpty()) {
             return new RecoveryCounts(0, 0);
         }
@@ -182,7 +235,7 @@ public final class LocalFirstIntentRecoveryManager {
                         if (action.test(txId)) {
                             succeeded.incrementAndGet();
                         }
-                    } catch (RuntimeException ex) {
+                    } catch (final RuntimeException ex) {
                         lastFailure.set(ex);
                         failed.incrementAndGet();
                     } finally {
@@ -195,12 +248,14 @@ public final class LocalFirstIntentRecoveryManager {
         return new RecoveryCounts(succeeded.get(), failed.get());
     }
 
-    /** 并行完成数与失败数都只在本轮局部汇总。 */
-    private record RecoveryCounts(int succeeded, int failed) {
-    }
-
-    /** 缺失路由必须保留中心记录以等待恢复。 */
-    private MysqlStorageAdapter requireShard(String shardId) {
+    /**
+     * Missing routers must keep centre records to wait for recovery.
+     *
+     * @param shardId logical shard identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private MysqlStorageAdapter requireShard(final String shardId) {
         StorageAdapter adapter = shards.get(shardId);
         if (!(adapter instanceof MysqlStorageAdapter mysql)) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -209,13 +264,56 @@ public final class LocalFirstIntentRecoveryManager {
         return mysql;
     }
 
-    /** 构造需要停止最终化的持久身份错误。 */
-    private MvccException illegal(long txId, String message) {
+    /**
+     * The construction needs to stop the finalisation durable identity error.
+     *
+     * @param txId transaction identifier
+     * @param message message
+     * @return the operation result
+     */
+    private MvccException illegal(final long txId, final String message) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, txId);
     }
 
-    /** 返回最近一次失败，供后台调度器展示和告警。 */
+    /**
+     * Returns the latest failure for background Scheduler display and alarm.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastFailure() {
         return lastFailure.get();
+    }
+
+    /**
+     * The materialization, rollback and failed cross-shard transaction rounds.
+     *
+     * @param finalized finalized
+     * @param aborted aborted
+     * @param failures failures
+     */
+    public record RecoveryResult(int finalized, int aborted, int failures) {
+
+        /**
+         * Recovery Statistics should not be negative.
+         *
+         * @param finalized finalized
+         * @param aborted aborted
+         * @param failures failures
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public RecoveryResult {
+            if (finalized < 0 || aborted < 0 || failures < 0) {
+                throw new IllegalArgumentException("invalid cross-shard intent recovery result");
+            }
+        }
+    }
+
+    /**
+     * The number of parallel completions and the number of failures were only partially aggregated during the current round.
+     *
+     * @param succeeded succeeded
+     * @param failed failed
+     */
+    private record RecoveryCounts(int succeeded, int failed) {
     }
 }

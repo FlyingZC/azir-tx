@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.flyingzc.azir.common.MvccException;
@@ -6,15 +22,29 @@ import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * 事务重试策略，定义重试次数和退避规则。
+ * Transaction retry policy, defining the retry frequency and avoidance rule.
+ *
+ * @param maxAttempts max attempts
+ * @param initialBackoffMs initial backoff ms
+ * @param maxBackoffMs max backoff ms
+ * @param backoffMultiplier backoff multiplier
+ * @param jitter jitter
  */
 public record TransactionRetryPolicy(int maxAttempts,
-                                     long initialBackoffMs,
-                                     long maxBackoffMs,
-                                     double backoffMultiplier,
-                                     boolean jitter) {
+        long initialBackoffMs,
+        long maxBackoffMs,
+        double backoffMultiplier,
+        boolean jitter) {
+
     /**
-     * 构造 TransactionRetryPolicy 实例。
+     * Construct a TransactionRetryPolicy instance.
+     *
+     * @param maxAttempts max attempts
+     * @param initialBackoffMs initial backoff ms
+     * @param maxBackoffMs max backoff ms
+     * @param backoffMultiplier backoff multiplier
+     * @param jitter jitter
+     * @throws IllegalArgumentException if the operation cannot complete
      */
     public TransactionRetryPolicy {
         if (maxAttempts < 1) {
@@ -32,23 +62,31 @@ public record TransactionRetryPolicy(int maxAttempts,
     }
 
     /**
-     * 返回不重试策略。
+     * Returns no retry policy.
+     *
+     * @return the operation result
      */
     public static TransactionRetryPolicy noRetry() {
         return new TransactionRetryPolicy(1, 0L, 0L, 1.0d, false);
     }
 
     /**
-     * 返回接近 MySQL 行为的默认配置。
+     * Return defaults approximating MySQL conflict handling.
+     *
+     * @return the operation result
      */
     public static TransactionRetryPolicy mysqlLikeDefaults() {
         return new TransactionRetryPolicy(8, 5L, 100L, 2.0d, true);
     }
 
     /**
-     * 判断指定异常和尝试次数是否允许重试。
+     * Determines whether to specify an anomaly and the number of attempts that allow retry.
+     *
+     * @param exception exception
+     * @param attempt attempt
+     * @return the operation result
      */
-    public boolean shouldRetry(MvccException exception, int attempt) {
+    public boolean shouldRetry(final MvccException exception, final int attempt) {
         Objects.requireNonNull(exception, "exception");
         if (attempt >= maxAttempts) {
             return false;
@@ -57,9 +95,12 @@ public record TransactionRetryPolicy(int maxAttempts,
     }
 
     /**
-     * 计算下一次重试前的等待时间。
+     * Compute the delay before the next retry.
+     *
+     * @param attempt attempt
+     * @return the operation result
      */
-    long nextDelayMillis(int attempt) {
+    long nextDelayMillis(final int attempt) {
         if (maxBackoffMs == 0L) {
             return 0L;
         }

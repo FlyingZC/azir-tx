@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage;
 
 import com.flyingzc.azir.metadata.TransactionMetadataStore;
@@ -7,67 +23,96 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 分片存储适配器接口，封装 MVCC 读写和清理操作。
+ * Shard Storage Adapter interface, encapsulating MVCC reading, writing and cleaning operations.
  */
 public interface StorageAdapter {
+
     /**
-     * 查询参与者的持久化本地决议；不支持此能力的适配器返回空值。
+     * Query participant 's durable storage local decision; adapter does not support this ability to return empty values.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
      */
-    default Optional<ParticipantRecord> participantRecord(long txId) {
+    default Optional<ParticipantRecord> participantRecord(final long txId) {
         return Optional.empty();
     }
 
     /**
-     * 判断适配器是否能够原子保存单分片提交决议和版本。
+     * Determines whether adapters can save atomic sheets shard commit decision and version.
+     *
+     * @return the operation result
      */
     default boolean supportsAtomicDirectCommit() {
         return false;
     }
 
     /**
-     * 绑定事务中心权威，供读侧解析已提交意向及物化时核对决议。
+     * Tie transaction Center authority to read side resolution commit intent and materialization to check decision.
+     *
+     * @param store store
      */
-    default void configureMetadataStore(TransactionMetadataStore store) {
+    default void configureMetadataStore(final TransactionMetadataStore store) {
     }
 
     /**
-     * 判断适配器是否能够解析其他事务的已提交意向。
+     * Determines whether the adapter is capable of parsing other transaction already commit intent.
+     *
+     * @return the operation result
      */
     default boolean supportsCommittedIntentResolution() {
         return false;
     }
 
     /**
-     * 返回当前存储适配器所属分片编号。
+     * Return the storage adapter shard identifier.
+     *
+     * @return the operation result
      */
     String shardId();
 
     /**
-     * 初始化所需的数据库表结构或运行环境。
+     * Initialize the required database tables or runtime environment.
      */
     void initialize();
 
     /**
-     * 判断参与分片是否需要显式 prepare 阶段。
+     * Determine whether participants require an explicit prepare phase.
+     *
+     * @return the operation result
      */
     default boolean requiresExplicitPreparePhase() {
         return false;
     }
 
     /**
-     * 读取指定键或事务的当前可见数据。
+     * Read the currently visible data for the key or transaction.
+     *
+     * @param context context
+     * @param key business key
+     * @return the operation result
      */
     Optional<VersionedValue> get(ReadContext context, String key);
 
     /**
-     * 按键范围扫描当前快照可见的数据。
+     * Scan the key range using the current snapshot.
+     *
+     * @param context context
+     * @param keyRange key range
+     * @return the operation result
      */
     List<VersionedValue> scan(ReadContext context, KeyRange keyRange);
 
     /**
-     * 按 UTF-8 二进制键顺序读取一页；兼容实现会装载完整扫描结果，存储可覆盖为流式分页。
+     * Read a page in the order of the UTF-8 binary; compatibility will load the full scan result and store it overwhelms to flow pages.
+     *
+     * @param context context
+     * @param keyRange key range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
      */
-    default ScanPage scanPage(ReadContext context, KeyRange keyRange, String afterKeyExclusive, int limit) {
+    default ScanPage scanPage(final ReadContext context, final KeyRange keyRange, final String afterKeyExclusive, final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("limit must be in 1..4096");
         }
@@ -82,66 +127,103 @@ public interface StorageAdapter {
     }
 
     /**
-     * 写入事务意向并检测写冲突。
+     * Write transaction intent and detect write conflict.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutations transaction write set
      */
     void prewrite(long txId, long startTs, List<Mutation> mutations);
 
     /**
-     * 检查事务意向是否存在并进入准备阶段。
+     * Verify transaction intents and enter the prepare phase.
+     *
+     * @param txId transaction identifier
      */
     void prepare(long txId);
 
     /**
-     * 提交事务意向并生成已提交版本。
+     * Finalize transaction intents as committed versions.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
      */
     void commit(long txId, long commitTs);
 
     /**
-     * 提交事务意向并生成已提交版本。
+     * Finalize transaction intents as committed versions.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
      */
-    default void commit(long txId, long commitTs, List<Mutation> mutations) {
+    default void commit(final long txId, final long commitTs, final List<Mutation> mutations) {
         commit(txId, commitTs);
     }
 
     /**
-     * 提交事务意向并生成已提交版本。
+     * Finalize transaction intents as committed versions.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
+     * @param cleanupIntents cleanup intents
      */
-    default void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+    default void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
         commit(txId, commitTs, mutations);
     }
 
     /**
-     * 直接写入已提交版本，跳过显式 prepare 阶段。
+     * Writes directly to commit version, skips the visible prepare phase.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
      */
-    default void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+    default void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
         commit(txId, commitTs, mutations, false);
     }
 
     /**
-     * 清理事务残留的写意向。
+     * Clean up remaining transaction intents.
+     *
+     * @param txId transaction identifier
+     * @param mutations transaction write set
      */
-    default void cleanupIntents(long txId, List<Mutation> mutations) {
+    default void cleanupIntents(final long txId, final List<Mutation> mutations) {
     }
 
     /**
-     * 清理事务残留的写意向。
+     * Clean up remaining transaction intents.
+     *
+     * @param txId transaction identifier
      */
-    default void cleanupIntents(long txId) {
+    default void cleanupIntents(final long txId) {
         cleanupIntents(txId, List.of());
     }
 
     /**
-     * 回滚事务并清理写意向。
+     * Roll back the transaction and remove its intents.
+     *
+     * @param txId transaction identifier
      */
     void abort(long txId);
 
     /**
-     * 查找仍有待处理意向的事务编号。
+     * Find transaction identifiers with pending intents.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
      */
     Set<Long> findPendingTransactionIds(int limit);
 
     /**
-     * 清理安全点之前的历史版本。
+     * Collect obsolete versions before the safe point.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param limit maximum number of items
+     * @return the operation result
      */
     int gc(long safePoint, int limit);
 }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -15,29 +31,40 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 将同一协调器已预写的事务合并到有界控制库提交批次。 */
+/**
+ * Merge transaction of the same coordinator already prewrite to bounded control library commit batch.
+ */
 final class PublicationCommitBatcher {
+
     private final MysqlPublicationLedger ledger;
+
     private final ArrayBlockingQueue<Request> queue;
+
     private final int maxBatchSize;
+
     private final List<Thread> workers;
+
     private final LongAdder groups = new LongAdder();
+
     private final LongAdder requests = new LongAdder();
+
     private final LongAdder singletons = new LongAdder();
+
     private final LongAdder fallbacks = new LongAdder();
+
     private boolean closed;
 
-    /** 保存一次提交请求及其独立的完成结果。 */
-    private record Request(PublicationIntentCommit commit, CompletableFuture<PublicationCommitResult> result) {
-    }
-
-    /** 汇报实际聚合程度与批次失败回退次数。 */
-    record Stats(long groups, long requests, long singletons, long fallbacks) {
-    }
-
-    /** 建立有界队列和指定数量的虚拟线程，避免排队请求占用控制库连接。 */
-    PublicationCommitBatcher(MysqlPublicationLedger ledger, int queueCapacity, int maxBatchSize,
-                             int workerCount) {
+    /**
+     * Creates a virtual line of bounded queue and specified numbers to avoid queuing requests for access to the control library connection.
+     *
+     * @param ledger ledger
+     * @param queueCapacity queue capacity
+     * @param maxBatchSize max batch size
+     * @param workerCount worker count
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    PublicationCommitBatcher(final MysqlPublicationLedger ledger, final int queueCapacity, final int maxBatchSize,
+                             final int workerCount) {
         if (queueCapacity < 1 || maxBatchSize < 2 || maxBatchSize > 64
                 || workerCount < 1 || workerCount > 8) {
             throw new IllegalArgumentException("invalid publication batch limits");
@@ -52,8 +79,16 @@ final class PublicationCommitBatcher {
         this.workers = List.copyOf(started);
     }
 
-    /** 等待自身持久化决议，批次失败时仍按事务身份返回独立结果。 */
-    PublicationCommitResult commit(long txId, long expiresAtMillis, Set<String> participants) {
+    /**
+     * Waiting for your durable storage decision, batch to return the independent result by pressing transaction identity if it fails.
+     *
+     * @param txId transaction identifier
+     * @param expiresAtMillis expires at millis
+     * @param participants participants
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    PublicationCommitResult commit(final long txId, final long expiresAtMillis, final Set<String> participants) {
         var result = new CompletableFuture<PublicationCommitResult>();
         var request = new Request(new PublicationIntentCommit(txId, expiresAtMillis, participants), result);
         synchronized (queue) {
@@ -68,7 +103,7 @@ final class PublicationCommitBatcher {
         }
         try {
             return result.join();
-        } catch (CompletionException ex) {
+        } catch (final CompletionException ex) {
             if (ex.getCause() instanceof RuntimeException cause) {
                 throw cause;
             }
@@ -76,8 +111,12 @@ final class PublicationCommitBatcher {
         }
     }
 
-    /** 处理完已接受的请求后关闭工作线程，未决事务仍由持久恢复接管。 */
-    void close(long timeoutMillis) {
+    /**
+     * Pending transaction is still taken over by durable recovery after processing accepted requests.
+     *
+     * @param timeoutMillis timeout millis
+     */
+    void close(final long timeoutMillis) {
         synchronized (queue) {
             closed = true;
         }
@@ -86,17 +125,23 @@ final class PublicationCommitBatcher {
             for (Thread worker : workers) {
                 worker.join(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
         }
     }
 
-    /** 返回只读累计统计，供隔离压测观察批次形态。 */
+    /**
+     * Returns read-only cumulative statistics for isolation pressure observation in batch form.
+     *
+     * @return the operation result
+     */
     Stats stats() {
         return new Stats(groups.sum(), requests.sum(), singletons.sum(), fallbacks.sum());
     }
 
-    /** 首笔请求到达后短暂汇集同批事务，控制每批上限与前台等待。 */
+    /**
+     * The first request is for a short period of time to assemble the same transaction and to control the upper limit per batch with the foreground waiting.
+     */
     private void run() {
         while (true) {
             try {
@@ -120,15 +165,19 @@ final class PublicationCommitBatcher {
                     }
                 }
                 process(batch);
-            } catch (InterruptedException ex) {
-                // 线程仅负责协调批次；清除中断标志后继续交付已接受的请求。
+            } catch (final InterruptedException ex) {
+                // Threads are only responsible for coordinating batch; requests accepted continue to be delivered after the cut marks have been removed.
                 Thread.interrupted();
             }
         }
     }
 
-    /** 批量失败或响应未知时逐笔重放，利用单笔接口的幂等决议校验隔离失败。 */
-    private void process(List<Request> batch) {
+    /**
+     * Batch failed or responded to unknown replay, using a single interface idempotent decision validate isolation failed.
+     *
+     * @param batch batch
+     */
+    private void process(final List<Request> batch) {
         groups.increment();
         requests.add(batch.size());
         if (batch.size() == 1) {
@@ -142,7 +191,7 @@ final class PublicationCommitBatcher {
             for (int index = 0; index < batch.size(); index++) {
                 batch.get(index).result().complete(decisions.get(index));
             }
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             fallbacks.increment();
             for (Request request : batch) {
                 resolveIndividually(request);
@@ -150,14 +199,38 @@ final class PublicationCommitBatcher {
         }
     }
 
-    /** 单笔重放既能解析已提交批次，也能隔离批次中的无效事务。 */
-    private void resolveIndividually(Request request) {
+    /**
+     * Single replay can parse already commit batch and isolate the invalid transaction in batch.
+     *
+     * @param request request
+     */
+    private void resolveIndividually(final Request request) {
         try {
             PublicationIntentCommit commit = request.commit();
             request.result().complete(ledger.commitPreparedIntents(
                     commit.txId(), commit.expiresAtMillis(), commit.participants()));
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             request.result().completeExceptionally(ex);
         }
+    }
+
+    /**
+     * Saves one commit request and its independent completion results.
+     *
+     * @param commit commit
+     * @param result result
+     */
+    private record Request(PublicationIntentCommit commit, CompletableFuture<PublicationCommitResult> result) {
+    }
+
+    /**
+     * Report actual aggregates and batch failure returns.
+     *
+     * @param groups groups
+     * @param requests requests
+     * @param singletons singletons
+     * @param fallbacks fallbacks
+     */
+    record Stats(long groups, long requests, long singletons, long fallbacks) {
     }
 }

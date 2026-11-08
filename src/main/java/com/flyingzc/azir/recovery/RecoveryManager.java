@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.recovery;
 
 import com.flyingzc.azir.common.TxStatus;
@@ -17,19 +33,24 @@ import java.util.Objects;
 import static com.flyingzc.azir.metadata.TransactionMetadataValidation.validateParticipant;
 
 /**
- * 事务恢复管理器，按事务元数据补偿未完成提交或回滚。
+ * Transaction recovery Manager, press transaction metadata to compensate for incomplete commit or rollback.
  */
 public final class RecoveryManager {
+
     private final TransactionMetadataStore metadataStore;
+
     private final Map<String, StorageAdapter> adapters;
 
     /**
-     * 构造 RecoveryManager 实例。
+     * Construct a RecoveryManager instance.
+     *
+     * @param metadataStore metadata store
+     * @param adapters adapters
      */
-    public RecoveryManager(TransactionMetadataStore metadataStore, Map<String, StorageAdapter> adapters) {
+    public RecoveryManager(final TransactionMetadataStore metadataStore, final Map<String, StorageAdapter> adapters) {
         this.metadataStore = Objects.requireNonNull(metadataStore, "metadataStore");
         this.adapters = Map.copyOf(adapters);
-        // 先校验所有路由，再绑定权威，避免非法映射造成部分适配器已被初始化。
+        // First all validate routes, then binding authority to avoid illegal mapping resulting in the initialization of some adaptors.
         this.adapters.forEach((shardId, adapter) -> {
             validateParticipant(0, shardId);
             if (!shardId.equals(adapter.shardId())) {
@@ -40,14 +61,23 @@ public final class RecoveryManager {
     }
 
     /**
-     * 恢复指定事务的未完成状态。
+     * Recovery Specifies the incomplete state of transaction.
+     *
+     * @param txId transaction identifier
      */
-    public void recover(long txId) {
+    public void recover(final long txId) {
         recover(txId, Set.of());
     }
 
-    /** 在屏障内决定真实终态，释放屏障后物化；返回是否完成了该事务。 */
-    public boolean recover(long txId, Set<String> discoveredParticipants) {
+    /**
+     * Determines the real terminal state in barrier; materialization after barrier is released; returns whether the transaction has been completed.
+     *
+     * @param txId transaction identifier
+     * @param discoveredParticipants discovered participants
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public boolean recover(final long txId, final Set<String> discoveredParticipants) {
         TxRecord decision = metadataStore.withPublicationLock(() -> decide(txId, discoveredParticipants));
         if (decision == null) {
             return false;
@@ -64,7 +94,7 @@ public final class RecoveryManager {
                 } else {
                     adapter.abort(txId);
                 }
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 if (failure == null) {
                     failure = ex;
                 } else if (failure != ex) {
@@ -83,11 +113,18 @@ public final class RecoveryManager {
         return true;
     }
 
-    /** 重新读取元数据及权威墙钟，禁止接管有效租约或误杀尚未登记元数据的事务。 */
-    private TxRecord decide(long txId, Set<String> discoveredParticipants) {
+    /**
+     * Rereading metadata and authority Wall clocks to prevent the taking over of valid lease or by mistake killing transaction that has not been registered.
+     *
+     * @param txId transaction identifier
+     * @param discoveredParticipants discovered participants
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private TxRecord decide(final long txId, final Set<String> discoveredParticipants) {
         TxRecord record = metadataStore.get(txId).orElse(null);
         if (record == null) {
-            // 缺失记录可能属于正在 lazy 登记的事务，intent 扫描不构成回滚授权。
+            // Missing records may belong to transaction which is being registered with Lazy, incent scan does not constitute an rollback authorization.
             return null;
         }
         Set<String> participants = new LinkedHashSet<>(record.participants());
@@ -102,11 +139,10 @@ public final class RecoveryManager {
                 String participant = participants.iterator().next();
                 StorageAdapter adapter = requireAdapter(participant, txId);
                 if (adapter.supportsAtomicDirectCommit() || record.commitTs() != null) {
-                    // 本地事务记录锁会等待 directCommit；原子提交参与者必须先提供匹配的持久化终态。
+                    // Local transaction record lock will wait for directcommittee; atomic commit participant must first provide a matching durable storage terminal state.
                     adapter.abort(txId);
-                    ParticipantRecord local = adapter.participantRecord(txId).orElseThrow(() ->
-                            new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                                    "local publication fence has no durable participant decision", false, txId));
+                    ParticipantRecord local = adapter.participantRecord(txId).orElseThrow(() -> new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                            "local publication fence has no durable participant decision", false, txId));
                     if (local.txId() != txId || local.startTs() != record.startTs()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE, "participant fence record mismatch", false, txId);
                     }
@@ -128,13 +164,26 @@ public final class RecoveryManager {
         return record.withParticipants(participants);
     }
 
-    /** 按权威时钟返回一个恢复候选批次，调用者仍须在恢复屏障内重新判断租约。 */
-    public List<TxRecord> findRecoveryCandidates(long afterTxId, int limit) {
+    /**
+     * Press authority clock to return an recovery candidate batch, and the caller must re-evaluate lease within recovery barrier.
+     *
+     * @param afterTxId after tx id
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    public List<TxRecord> findRecoveryCandidates(final long afterTxId, final int limit) {
         return metadataStore.findRecoveryCandidates(metadataStore.currentTimeMillis(), afterTxId, limit);
     }
 
-    /** 缺失参与者配置时明确失败，禁止提前标记完成物化。 */
-    private StorageAdapter requireAdapter(String participant, long txId) {
+    /**
+     * The absence of participant configuration failed explicitly, and the pre-marking of materialization was forbidden.
+     *
+     * @param participant participant
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private StorageAdapter requireAdapter(final String participant, final long txId) {
         StorageAdapter adapter = adapters.get(participant);
         if (adapter == null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "recovery participant unavailable: " + participant, false, txId);

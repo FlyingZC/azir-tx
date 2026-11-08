@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -16,14 +32,25 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 分条本地提交序号与 MVCC 版本同事务写入的隔离容量上界，不包含全局读协议。 */
+/**
+ * Subsection local commit Serial numbers and MVCC version are written in the upper isolation capacity with transaction and do not contain an global reading protocol.
+ */
 public final class MysqlStripedMvccCapacityProbe {
-    /** 基准入口不保存全局可变状态。 */
+
+    /**
+     * The benchmark entry point keeps no global mutable state.
+     */
     private MysqlStripedMvccCapacityProbe() {
     }
 
-    /** 只有明确重置的隔离分片数据库才允许创建容量实验表和存储过程。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Only a clearly reset isolation shard database allows the creation of a capacity test sheet and storage process.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("striped MVCC capacity probe requires AZIR_TX_RESET=true");
         }
@@ -36,8 +63,9 @@ public final class MysqlStripedMvccCapacityProbe {
             throw new IllegalArgumentException("invalid striped MVCC capacity limits");
         }
         String url = env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_1");
-        try (HikariDataSource dataSource = (HikariDataSource) MysqlDataSourceFactory.create(url,
-                env("AZIR_TX_USERNAME", "root"), env("AZIR_TX_PASSWORD", "root"))) {
+        try (
+                HikariDataSource dataSource = (HikariDataSource) MysqlDataSourceFactory.create(url,
+                        env("AZIR_TX_USERNAME", "root"), env("AZIR_TX_PASSWORD", "root"))) {
             if (checked) {
                 initializeCheckedIsolated(dataSource, stripes);
             } else {
@@ -47,8 +75,14 @@ public final class MysqlStripedMvccCapacityProbe {
         }
     }
 
-    /** 分条行和版本行完全属于本容量探针，不触碰生产 MVCC 表。 */
-    static void initializeIsolated(HikariDataSource dataSource, int stripes) throws Exception {
+    /**
+     * Sub-lines and version rows are fully probe capacity, without touching the production of MVCC tables.
+     *
+     * @param dataSource database connection source
+     * @param stripes stripes
+     * @throws Exception if the operation cannot complete
+     */
+    static void initializeIsolated(final HikariDataSource dataSource, final int stripes) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("""
                     create table if not exists bench_striped_mvcc_state (
@@ -80,8 +114,14 @@ public final class MysqlStripedMvccCapacityProbe {
         }
     }
 
-    /** 已检查模式增加持久键锁和跨分片意向表，保留原无检查容量基线。 */
-    static void initializeCheckedIsolated(HikariDataSource dataSource, int stripes) throws Exception {
+    /**
+     * Checked mode adds durable key locks and cross-shard intent table to maintain the original non-check capacity baseline.
+     *
+     * @param dataSource database connection source
+     * @param stripes stripes
+     * @throws Exception if the operation cannot complete
+     */
+    static void initializeCheckedIsolated(final HikariDataSource dataSource, final int stripes) throws Exception {
         initializeIsolated(dataSource, stripes);
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("""
@@ -95,7 +135,7 @@ public final class MysqlStripedMvccCapacityProbe {
                       owner_tx_id bigint not null
                     ) engine=InnoDB
                     """);
-            // 实验表允许在显式重置时重建，确保新例程不会误用旧列定义。
+            // The test sheet allows for reconstruction during a visible reset to ensure that the old column definition is not misused in the new routine.
             statement.execute("drop table if exists bench_striped_mvcc_cross_data");
             statement.execute("""
                     create table if not exists bench_striped_mvcc_cross_data (
@@ -117,8 +157,13 @@ public final class MysqlStripedMvccCapacityProbe {
         }
     }
 
-    /** 键锁先于一致读建立，确保冲突检查能看到同键前驱的最新提交。 */
-    private static void ensureCheckedCommitProcedure(Connection connection) throws SQLException {
+    /**
+     * Key lock is created before unanimous reading to ensure that the conflict check can see the latest commit in front of the same key.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void ensureCheckedCommitProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database()
@@ -174,15 +219,20 @@ public final class MysqlStripedMvccCapacityProbe {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 一次分片事务取得分条提交序号并以该序号保存同一业务键版本。 */
-    private static void ensureCommitProcedure(Connection connection) throws SQLException {
+    /**
+     * At a time shard transaction obtains a sub-section commit number and saves the same key version with that serial number.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void ensureCommitProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'bench_striped_mvcc_commit_v1' limit 1
@@ -213,16 +263,26 @@ public final class MysqlStripedMvccCapacityProbe {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 同一业务载荷下测量本地分条序号加版本的物理容量并核对持久行数。 */
-    private static void run(HikariDataSource dataSource, int concurrency, int durationSeconds,
-                            int stripes, boolean checked) throws Exception {
+    /**
+     * Measure the physical capacity of local subsection numbers plus version under the same operation payload and check durable rows.
+     *
+     * @param dataSource database connection source
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param stripes stripes
+     * @param checked checked
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static void run(final HikariDataSource dataSource, final int concurrency, final int durationSeconds,
+                            final int stripes, final boolean checked) throws Exception {
         AtomicLong sequence = new AtomicLong(100);
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
@@ -235,10 +295,11 @@ public final class MysqlStripedMvccCapacityProbe {
         try (var workers = Executors.newFixedThreadPool(concurrency)) {
             for (int index = 0; index < concurrency; index++) {
                 workers.submit(() -> {
-                    try (Connection connection = dataSource.getConnection();
-                         PreparedStatement call = connection.prepareStatement(checked
-                                 ? "call bench_striped_mvcc_commit_checked_v2(?, ?, ?, ?)"
-                                 : "call bench_striped_mvcc_commit_v1(?, ?, ?)")) {
+                    try (
+                            Connection connection = dataSource.getConnection();
+                            PreparedStatement call = connection.prepareStatement(checked
+                                    ? "call bench_striped_mvcc_commit_checked_v2(?, ?, ?, ?)"
+                                    : "call bench_striped_mvcc_commit_v1(?, ?, ?)")) {
                         ready.countDown();
                         start.await();
                         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(durationSeconds);
@@ -251,7 +312,7 @@ public final class MysqlStripedMvccCapacityProbe {
                                 call.setBytes(2, ("v" + id).getBytes(StandardCharsets.UTF_8));
                                 call.setInt(3, (int) (id % stripes));
                                 if (checked) {
-                                    // 唯一业务键在事务开始时尚无版本，零水位仍执行真实冲突查询。
+                                    // The only key to perform a real conflict query is version, zero watermark at the start of transaction.
                                     call.setLong(4, 0);
                                 }
                                 try (ResultSet row = call.executeQuery()) {
@@ -261,13 +322,13 @@ public final class MysqlStripedMvccCapacityProbe {
                                 }
                                 committed.increment();
                                 latencies.add(System.nanoTime() - started);
-                            } catch (Exception ex) {
+                            } catch (final Exception ex) {
                                 failures.increment();
                                 firstFailure.compareAndSet(null,
                                         ex.getClass().getSimpleName() + ":" + ex.getMessage());
                             }
                         }
-                    } catch (Exception ex) {
+                    } catch (final Exception ex) {
                         failures.increment();
                         firstFailure.compareAndSet(null,
                                 ex.getClass().getSimpleName() + ":" + ex.getMessage());
@@ -290,24 +351,33 @@ public final class MysqlStripedMvccCapacityProbe {
                 throw new IllegalStateException("striped MVCC version or watermark count differs from commits");
             }
             System.out.printf("STRIPED_MVCC_CAPACITY checked=%s concurrency=%d duration_s=%.2f stripes=%d "
-                            + "attempts=%d committed=%d failures=%d commit_tps=%.2f p99_ms=%.2f "
-                            + "versions=%d watermark_total=%d first_failure=%s%n",
+                    + "attempts=%d committed=%d failures=%d commit_tps=%.2f p99_ms=%.2f "
+                    + "versions=%d watermark_total=%d first_failure=%s%n",
                     checked, concurrency, seconds, stripes, attempts.sum(), committed.sum(), failures.sum(),
                     committed.sum() / seconds, p99Millis, persisted[0], persisted[1],
                     firstFailure.get() == null ? "-" : firstFailure.get());
         }
     }
 
-    /** 版本行数和所有分条序号增量必须同时等于成功提交数。 */
-    private static long[] persistedCounts(HikariDataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
-             ResultSet versions = statement.executeQuery("select count(*) from bench_striped_mvcc_data")) {
+    /**
+     * Version rows and all serial number increments shall be equal to success commit.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long[] persistedCounts(final HikariDataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
+                ResultSet versions = statement.executeQuery("select count(*) from bench_striped_mvcc_data")) {
             if (!versions.next()) {
                 throw new SQLException("striped MVCC version count returned no row");
             }
             long versionCount = versions.getLong(1);
-            try (ResultSet state = statement.executeQuery(
-                    "select sum(committed_seq) from bench_striped_mvcc_state")) {
+            try (
+                    ResultSet state = statement.executeQuery(
+                            "select sum(committed_seq) from bench_striped_mvcc_state")) {
                 if (!state.next()) {
                     throw new SQLException("striped MVCC state count returned no row");
                 }
@@ -316,8 +386,14 @@ public final class MysqlStripedMvccCapacityProbe {
         }
     }
 
-    /** 只读取本探针明确配置的分片连接和容量参数。 */
-    private static String env(String name, String fallback) {
+    /**
+     * Read-only takes this probe explicitly configured shard connection and capacity parameters.
+     *
+     * @param name name
+     * @param fallback fallback
+     * @return the operation result
+     */
+    private static String env(final String name, final String fallback) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? fallback : value;
     }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -11,21 +27,25 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Objects;
 
-/** 跨分片意向预留本地序号并在物化时沿用该序号的隔离协议原型。 */
+/**
+ * Cross-shard intent presets the local serial number and follows the prototype of the isolation protocol for that serial number when materialization.
+ */
 final class MysqlStripedCrossVersionPrototype {
-    /** 恢复清理只能依据中心持久终态，无法读取时必须抛错。 */
-    @FunctionalInterface
-    interface CrossStatusResolver {
-        /** 返回目标跨片事务的中心终态或仍未决状态。 */
-        TxStatus status(long txId);
-    }
 
-    /** 原型只操作显式传入的隔离数据库，不保存全局状态。 */
+    /**
+     * The prototype only handles the isolated database, which is visible, and does not save the global status.
+     */
     private MysqlStripedCrossVersionPrototype() {
     }
 
-    /** 创建分条本地版本、键锁及跨分片意向与物化版本实验表。 */
-    static void initializeIsolated(HikariDataSource dataSource, int stripes) throws Exception {
+    /**
+     * Creates a subsection local version, key lock and cross-shard intent and materialization version sheet.
+     *
+     * @param dataSource database connection source
+     * @param stripes stripes
+     * @throws Exception if the operation cannot complete
+     */
+    static void initializeIsolated(final HikariDataSource dataSource, final int stripes) throws Exception {
         MysqlStripedMvccCapacityProbe.initializeCheckedIsolated(dataSource, stripes);
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("drop table if exists bench_striped_mvcc_cross_intent");
@@ -54,9 +74,20 @@ final class MysqlStripedCrossVersionPrototype {
         }
     }
 
-    /** 真实分片事务在同键锁内保留序号，并把意向与保留序号原子落盘。 */
-    static long prewrite(HikariDataSource dataSource, String key, byte[] value,
-                         int stripe, long txId, long startSeq) throws SQLException {
+    /**
+     * The real shard transaction keeps the serial number in the same key lock and drops the intent with the reserved atomic number.
+     *
+     * @param dataSource database connection source
+     * @param key business key
+     * @param value value to write
+     * @param stripe stripe
+     * @param txId transaction identifier
+     * @param startSeq start seq
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    static long prewrite(final HikariDataSource dataSource, final String key, final byte[] value,
+                         final int stripe, final long txId, final long startSeq) throws SQLException {
         try (Connection connection = dataSource.getConnection(); PreparedStatement call = connection.prepareStatement("""
                 call bench_striped_mvcc_prewrite_cross_v3(?, ?, ?, ?, ?)
                 """)) {
@@ -74,9 +105,19 @@ final class MysqlStripedCrossVersionPrototype {
         }
     }
 
-    /** 本地提交也经同一持久键锁，保证意向物化前不能越过跨分片写入。 */
-    static long localCommit(HikariDataSource dataSource, String key, byte[] value,
-                            int stripe, long startSeq) throws SQLException {
+    /**
+     * Local commit also passes the same durable key lock to ensure that intent materialization cannot be written over cross-shard before it is passed.
+     *
+     * @param dataSource database connection source
+     * @param key business key
+     * @param value value to write
+     * @param stripe stripe
+     * @param startSeq start seq
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    static long localCommit(final HikariDataSource dataSource, final String key, final byte[] value,
+                            final int stripe, final long startSeq) throws SQLException {
         try (Connection connection = dataSource.getConnection(); PreparedStatement call = connection.prepareStatement("""
                 call bench_striped_mvcc_commit_checked_v2(?, ?, ?, ?)
                 """)) {
@@ -93,10 +134,20 @@ final class MysqlStripedCrossVersionPrototype {
         }
     }
 
-    /** 中心已持久决议后才允许调用，物化沿用预写序号并释放同键意向。 */
-    static void materialize(HikariDataSource dataSource, String key, long txId,
-                            long decisionEpoch,
-                            MysqlStripedSnapshotOracle.CrossDecisionResolver decisions) throws SQLException {
+    /**
+     * Center is not allowed to call until durable decision, materialization follows the prewrite number and releases the same key intent.
+     *
+     * @param dataSource database connection source
+     * @param key business key
+     * @param txId transaction identifier
+     * @param decisionEpoch decision epoch
+     * @param decisions decisions
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    static void materialize(final HikariDataSource dataSource, final String key, final long txId,
+                            final long decisionEpoch,
+                            final MysqlStripedSnapshotOracle.CrossDecisionResolver decisions) throws SQLException {
         Objects.requireNonNull(decisions, "decisions");
         var committed = decisions.committedEpoch(txId);
         if (committed.isEmpty() || committed.getAsLong() != decisionEpoch) {
@@ -112,9 +163,18 @@ final class MysqlStripedCrossVersionPrototype {
         }
     }
 
-    /** 中心 ABORTED 决议后原子清除意向并留下墓碑，迟到预写不能复活事务。 */
-    static void abort(HikariDataSource dataSource, String key, long txId,
-                      CrossStatusResolver statuses) throws SQLException {
+    /**
+     * Center atomic clears intent after ABORTED decision and leaves tombstone behind, late for prewrite cannot revive transaction.
+     *
+     * @param dataSource database connection source
+     * @param key business key
+     * @param txId transaction identifier
+     * @param statuses statuses
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    static void abort(final HikariDataSource dataSource, final String key, final long txId,
+                      final CrossStatusResolver statuses) throws SQLException {
         Objects.requireNonNull(statuses, "statuses");
         if (statuses.status(txId) != TxStatus.ABORTED) {
             throw new IllegalStateException("cross abort has no durable center aborted decision");
@@ -128,8 +188,13 @@ final class MysqlStripedCrossVersionPrototype {
         }
     }
 
-    /** 跨片预写必须先锁住业务键，避免本地提交越过尚未决议的意向。 */
-    private static void ensurePrewriteProcedure(Connection connection) throws SQLException {
+    /**
+     * Cross-shard prewrite must lock the key first to avoid local commit crossing intent for pending.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void ensurePrewriteProcedure(final Connection connection) throws SQLException {
         if (routineExists(connection, "bench_striped_mvcc_prewrite_cross_v3")) {
             return;
         }
@@ -221,15 +286,20 @@ final class MysqlStripedCrossVersionPrototype {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 物化事务先锁键，再将意向原序号插入版本链并删除两个意向锚点。 */
-    private static void ensureMaterializeProcedure(Connection connection) throws SQLException {
+    /**
+     * Materialization transaction locks first, then inserts the original intent serial number into version chain and removes two intent anchor points.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void ensureMaterializeProcedure(final Connection connection) throws SQLException {
         if (routineExists(connection, "bench_striped_mvcc_materialize_cross_v2")) {
             return;
         }
@@ -279,15 +349,20 @@ final class MysqlStripedCrossVersionPrototype {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 持久中止墓碑和意向清理必须处于一个分片事务，重复恢复可安全重放。 */
-    private static void ensureAbortProcedure(Connection connection) throws SQLException {
+    /**
+     * Durable Abort tombstone and intent clean-up must be in one shard transaction, repeat recovery safe replay.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void ensureAbortProcedure(final Connection connection) throws SQLException {
         if (routineExists(connection, "bench_striped_mvcc_abort_cross_v1")) {
             return;
         }
@@ -323,15 +398,22 @@ final class MysqlStripedCrossVersionPrototype {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 只在隔离数据库内检查版本化例程是否已安装。 */
-    private static boolean routineExists(Connection connection, String name) throws SQLException {
+    /**
+     * Check if the version routine has been installed only in isolation database.
+     *
+     * @param connection connection
+     * @param name name
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static boolean routineExists(final Connection connection, final String name) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = ? limit 1
@@ -341,5 +423,20 @@ final class MysqlStripedCrossVersionPrototype {
                 return row.next();
             }
         }
+    }
+
+    /**
+     * Recovery clean-up can only be based on centre durable terminal state and must be thrown if it is not readable.
+     */
+    @FunctionalInterface
+    interface CrossStatusResolver {
+
+        /**
+         * Returns the center terminal state of target cross-shard transaction or is still pending status.
+         *
+         * @param txId transaction identifier
+         * @return the operation result
+         */
+        TxStatus status(long txId);
     }
 }

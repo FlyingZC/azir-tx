@@ -1,22 +1,45 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metrics;
 
 /**
- * 默认空事务指标实现，避免未启用指标时引入聚合成本。
+ * The default empty transaction indicator is achieved, avoiding the introduction of aggregate costs when the indicator is not enabled.
  */
 public enum NoOpTransactionMetrics implements TransactionMetrics {
+
     INSTANCE;
 
     /**
-     * 忽略阶段成功记录。
+     * Ignores the success of the phase.
+     *
+     * @param stage stage
+     * @param elapsedNanos elapsed nanos
      */
     @Override
-    public void recordSuccess(TransactionStage stage, long elapsedNanos) {
+    public void recordSuccess(final TransactionStage stage, final long elapsedNanos) {
     }
 
     /**
-     * 忽略阶段失败记录。
+     * Ignores the failure record of the phase.
+     *
+     * @param stage stage
+     * @param elapsedNanos elapsed nanos
      */
     @Override
-    public void recordFailure(TransactionStage stage, long elapsedNanos) {
+    public void recordFailure(final TransactionStage stage, final long elapsedNanos) {
     }
 }

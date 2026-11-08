@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication;
 
 import com.flyingzc.azir.common.BackgroundTaskStats;
@@ -10,36 +26,68 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 
-/** 有界轮转扫描分段到期 owner、未物化终态和无槽的过期事务。 */
+/**
+ * Bounded Rotation Scanning Division expired owner, transaction expired without materialization terminal state and no slot.
+ */
 public final class SegmentPublicationRecoveryRunner {
+
     private final MysqlSegmentPublicationLedger ledger;
+
     private final SegmentPublicationRecoveryManager recoveryManager;
+
     private final TransactionMetadataStore metadataStore;
+
     private final int maxTransactionsPerRun;
+
     private final long timeBudgetNanos;
+
     private final LongSupplier monotonicClock;
+
     private final BackgroundTaskStats transactionStats = new BackgroundTaskStats();
+
     private final BackgroundTaskStats scanStats = new BackgroundTaskStats();
+
     private final AtomicReference<RuntimeException> lastTransactionFailure = new AtomicReference<>();
+
     private final AtomicReference<RuntimeException> lastScanFailure = new AtomicReference<>();
+
     private long terminalAfterCommitTs;
+
     private long localPendingAfterCommitTs;
+
     private long undecidedAfterTxId = Long.MIN_VALUE;
+
     private int scanCursor;
 
-    /** 使用有界默认批次和一秒合作式轮次预算。 */
-    public SegmentPublicationRecoveryRunner(MysqlSegmentPublicationLedger ledger,
-                                            SegmentPublicationRecoveryManager recoveryManager,
-                                            TransactionMetadataStore metadataStore) {
+    /**
+     * Use bounded default batch and one second cooperative rotation budget.
+     *
+     * @param ledger ledger
+     * @param recoveryManager recovery manager
+     * @param metadataStore metadata store
+     */
+    public SegmentPublicationRecoveryRunner(final MysqlSegmentPublicationLedger ledger,
+                                            final SegmentPublicationRecoveryManager recoveryManager,
+                                            final TransactionMetadataStore metadataStore) {
         this(ledger, recoveryManager, metadataStore, 256, 1_000, System::nanoTime);
     }
 
-    /** 允许测试注入单轮数量、时间预算和单调时钟。 */
-    public SegmentPublicationRecoveryRunner(MysqlSegmentPublicationLedger ledger,
-                                            SegmentPublicationRecoveryManager recoveryManager,
-                                            TransactionMetadataStore metadataStore,
-                                            int maxTransactionsPerRun, long timeBudgetMillis,
-                                            LongSupplier monotonicClock) {
+    /**
+     * Allows testing for single-wheel injection, time budget and monotonic clock.
+     *
+     * @param ledger ledger
+     * @param recoveryManager recovery manager
+     * @param metadataStore metadata store
+     * @param maxTransactionsPerRun max transactions per run
+     * @param timeBudgetMillis time budget millis
+     * @param monotonicClock monotonic clock
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public SegmentPublicationRecoveryRunner(final MysqlSegmentPublicationLedger ledger,
+                                            final SegmentPublicationRecoveryManager recoveryManager,
+                                            final TransactionMetadataStore metadataStore,
+                                            final int maxTransactionsPerRun, final long timeBudgetMillis,
+                                            final LongSupplier monotonicClock) {
         if (maxTransactionsPerRun < 1 || maxTransactionsPerRun > 4096 || timeBudgetMillis < 1) {
             throw new IllegalArgumentException("invalid segmented recovery limits");
         }
@@ -51,8 +99,14 @@ public final class SegmentPublicationRecoveryRunner {
         this.monotonicClock = Objects.requireNonNull(monotonicClock, "monotonicClock");
     }
 
-    /** 先 fencing 到期分段，再轮转恢复终态和过期未决事务并发布连续前缀。 */
-    public synchronized int recoverOnce(int scanLimit) {
+    /**
+     * Fencing expires first, then rotates recovery terminal state and expired pending transaction concurrent prefixes.
+     *
+     * @param scanLimit scan limit
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public synchronized int recoverOnce(final int scanLimit) {
         if (scanLimit < 1 || scanLimit > 4096) {
             throw new IllegalArgumentException("invalid segmented recovery scan limit");
         }
@@ -61,7 +115,7 @@ public final class SegmentPublicationRecoveryRunner {
         try {
             completed += ledger.sealExpiredSegments(scanLimit);
             scanStats.recordSuccess(1);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             lastScanFailure.set(ex);
             scanStats.recordFailure();
         }
@@ -80,7 +134,7 @@ public final class SegmentPublicationRecoveryRunner {
                 };
                 candidates.addAll(found);
                 scanStats.recordSuccess(found.size());
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 lastScanFailure.set(ex);
                 scanStats.recordFailure();
             }
@@ -93,59 +147,97 @@ public final class SegmentPublicationRecoveryRunner {
                 boolean recovered = recoveryManager.recover(txId);
                 completed += recovered ? 1 : 0;
                 transactionStats.recordSuccess(recovered ? 1 : 0);
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 lastTransactionFailure.set(ex);
                 transactionStats.recordFailure();
             }
         }
-        // 未分配尾槽被封存后，即使没有事务编号也必须释放连续发布水位。
+        // Once the undistributed tailings slot has been sealed, even without transaction identifier, consecutive release watermark must be released.
         ledger.advancePublished(256);
         return completed;
     }
 
-    /** 已终态槽按提交时间戳分页，末尾回卷以重试暂时失败的参与者。 */
-    private List<Long> scanTerminal(int limit) {
+    /**
+     * Terminal state slot with commit timestamp tab, ending with retry temporarily failed participant.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    private List<Long> scanTerminal(final int limit) {
         List<PublicationEntry> entries = ledger.findUnfinalizedTerminal(terminalAfterCommitTs, limit);
         terminalAfterCommitTs = entries.size() < limit ? 0 : entries.getLast().commitTs();
         return entries.stream().map(PublicationEntry::txId).toList();
     }
 
-    /** 无槽元数据按带符号事务编号分页，覆盖协调者分配的负事务号。 */
-    private List<Long> scanExpiredUndecided(long nowMillis, int limit) {
+    /**
+     * No slot meta-data by sign transaction identifier page, overwrites the negative transaction ID assigned by the coordinator.
+     *
+     * @param nowMillis now millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    private List<Long> scanExpiredUndecided(final long nowMillis, final int limit) {
         List<Long> found = ledger.findExpiredUndecided(nowMillis, undecidedAfterTxId, limit);
         undecidedAfterTxId = found.size() < limit ? Long.MIN_VALUE : found.getLast();
         return found;
     }
 
-    /** 已认领本地候选按时间戳扫描，owner fencing 后即允许读取分片终态。 */
-    private List<Long> scanLocalPending(long nowMillis, int limit) {
+    /**
+     * Local candidate is accepted for reading shard terminal state after pressing timestamp scan, owner fencing.
+     *
+     * @param nowMillis now millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    private List<Long> scanLocalPending(final long nowMillis, final int limit) {
         List<PublicationEntry> entries = ledger.findRecoverableLocalPending(
                 nowMillis, localPendingAfterCommitTs, limit);
         localPendingAfterCommitTs = entries.size() < limit ? 0 : entries.getLast().commitTs();
         return entries.stream().map(PublicationEntry::txId).toList();
     }
 
-    /** 前后台数据库操作之间检查本轮合作式时间预算。 */
-    private boolean hasBudget(long started) {
+    /**
+     * Check this co-operation time for budget between the previous background database operation.
+     *
+     * @param started started
+     * @return the operation result
+     */
+    private boolean hasBudget(final long started) {
         return monotonicClock.getAsLong() - started < timeBudgetNanos;
     }
 
-    /** 返回成功事务数与失败轮次统计。 */
+    /**
+     * Returns successful transaction numbers and failed rounds.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats transactionStats() {
         return transactionStats;
     }
 
-    /** 返回扫描与 owner fencing 的成功失败统计。 */
+    /**
+     * Returns the success statistics of scans with owner fencing.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats scanStats() {
         return scanStats;
     }
 
-    /** 返回最近一次事务恢复异常供运维定位。 */
+    /**
+     * Returns the latest transaction recovery anomaly for deployment location.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastTransactionFailure() {
         return lastTransactionFailure.get();
     }
 
-    /** 返回最近一次扫描或 owner fencing 异常供运维定位。 */
+    /**
+     * Returns the latest scan or owning abnormally for transport-based positioning.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastScanFailure() {
         return lastScanFailure.get();
     }

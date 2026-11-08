@@ -1,4 +1,25 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication.mysql;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.zaxxer.hikari.HikariDataSource;
 import com.flyingzc.azir.common.ErrorCode;
@@ -21,29 +42,34 @@ import java.util.HashSet;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-/** 真实 MySQL 下验证本地先提交控制段的预留、物理安装和快照下界。 */
+/**
+ * The real MySQL verify local preset, physical installation and snapshot lower bounds of the commit control segment.
+ */
 @Testcontainers
 class MysqlLocalFirstPublicationLedgerTest {
+
     @Container
     private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4")
             .withDatabaseName("local_first_control").withUsername("test").withPassword("test");
+
     private static HikariDataSource dataSource;
+
     private MysqlLocalFirstPublicationLedger ledger;
+
     private MysqlShardSegmentFence physical;
 
-    /** 建立控制账本与隔离物理栅栏共用的真实 MySQL 测试池。 */
+    /**
+     * Creates a real MySQL test pool with control books shared with isolation physics fence.
+     */
     @BeforeAll
     static void openDatabase() {
         dataSource = (HikariDataSource) MysqlDataSourceFactory.create(MYSQL.getJdbcUrl(),
                 MYSQL.getUsername(), MYSQL.getPassword());
     }
 
-    /** 关闭本类独占的容器连接池。 */
+    /**
+     * Closes the exclusive container of this class connection pool.
+     */
     @AfterAll
     static void closeDatabase() {
         if (dataSource != null) {
@@ -51,7 +77,11 @@ class MysqlLocalFirstPublicationLedgerTest {
         }
     }
 
-    /** 每例建立从时间戳 100 开始的独立控制及分片栅栏时间线。 */
+    /**
+     * Initialize an independent control and shard-fence timeline starting at timestamp 100 for each test.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeEach
     void reset() throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
@@ -71,67 +101,79 @@ class MysqlLocalFirstPublicationLedgerTest {
         physical.initializeIsolated();
     }
 
-    /** 目标分片先安装物理栅栏，中心段才可激活；请求键重放不再取新号。 */
+    /**
+     * Target shard first install physics fence to activate the center segment; requested key replay does not take a new number.
+     */
     @Test
     void reservationMustActivateOnlyAfterMatchingPhysicalInstall() {
         var begun = ledger.begin(IsolationLevel.REPEATABLE_READ, 60_000);
-        assertEquals(100, begun.startTs());
+        Assertions.assertEquals(100, begun.startTs());
         var segment = ledger.reserveSegment("s1", "owner-a", "request-a", 4, 5_000, 100);
-        assertEquals(101, segment.lease().firstTs());
-        assertEquals(104, segment.lease().lastTs());
-        assertEquals(MysqlLocalFirstPublicationLedger.SegmentStatus.PREPARING, segment.status());
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(101, segment.lease().firstTs());
+        Assertions.assertEquals(104, segment.lease().lastTs());
+        Assertions.assertEquals(MysqlLocalFirstPublicationLedger.SegmentStatus.PREPARING, segment.status());
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> ledger.activateSegment(segment, physical)).errorCode());
         physical.install(segment.lease(), 5_000);
         var active = ledger.activateSegment(segment, physical);
-        assertEquals(MysqlLocalFirstPublicationLedger.SegmentStatus.ACTIVE, active.status());
-        assertEquals(active, ledger.activateSegment(segment, physical));
-        assertEquals(active, ledger.reserveSegment("s1", "owner-a", "request-a", 4, 5_000, 100));
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(MysqlLocalFirstPublicationLedger.SegmentStatus.ACTIVE, active.status());
+        Assertions.assertEquals(active, ledger.activateSegment(segment, physical));
+        Assertions.assertEquals(active, ledger.reserveSegment("s1", "owner-a", "request-a", 4, 5_000, 100));
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> ledger.reserveSegment("s1", "owner-a",
                         "request-a", 4, 5_000, 99)).errorCode());
-        assertEquals(4, queryLong("select count(*) from mvcc_local_first_slot_v1 where status = 'PENDING'"));
-        assertEquals(104, queryLong("select next_commit_ts from mvcc_local_first_state_v1"));
+        Assertions.assertEquals(4, queryLong("select count(*) from mvcc_local_first_slot_v1 where status = 'PENDING'"));
+        Assertions.assertEquals(104, queryLong("select next_commit_ts from mvcc_local_first_state_v1"));
         ledger.releaseSnapshot(begun.txId());
     }
 
-    /** 控制段先进入 FENCING，再物理封存未安装的分片段并阻止迟到安装。 */
+    /**
+     * The control section enters FENCING, then physically seals the uninstalled shard segment and prevents late installation.
+     */
     @Test
     void preparingSegmentMustFenceMissingPhysicalInstallation() {
         var segment = ledger.reserveSegment("s1", "owner-a", "request-a", 4, 5_000, 80);
         var request = ledger.beginFencing(segment, true);
-        assertEquals(1, request.physicalLease().generation());
-        assertEquals("s1", request.shardId());
-        assertEquals(MysqlLocalFirstPublicationLedger.SegmentStatus.FENCING,
+        Assertions.assertEquals(1, request.physicalLease().generation());
+        Assertions.assertEquals("s1", request.shardId());
+        Assertions.assertEquals(MysqlLocalFirstPublicationLedger.SegmentStatus.FENCING,
                 ledger.segment(101).orElseThrow().status());
-        assertEquals(2, ledger.segment(101).orElseThrow().lease().generation());
+        Assertions.assertEquals(2, ledger.segment(101).orElseThrow().lease().generation());
         assertTrue(physical.fence(request.physicalLease()));
         assertTrue(physical.scanFenced(request.physicalLease(), 100, 10).isEmpty());
-        assertEquals(request, ledger.beginFencing(segment, true));
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(request, ledger.beginFencing(segment, true));
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class,
                         () -> physical.install(segment.lease(), 5_000)).errorCode());
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class,
                         () -> ledger.activateSegment(segment, physical)).errorCode());
     }
 
-    /** 逐事务快照到期后，未封存段的保守下界仍固定全局安全点。 */
+    /**
+     * When transaction snapshot expires, the conservative lower bounds of unsealed segments remain fixed to global safe point.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentSnapshotFloorMustSurviveTransactionLeaseExpiry() throws Exception {
         var reader = ledger.begin(IsolationLevel.REPEATABLE_READ, 20);
         var segment = ledger.reserveSegment("s1", "owner-a", "request-a", 4, 5_000, 80);
-        assertEquals(79, ledger.advanceSafePoint());
+        Assertions.assertEquals(79, ledger.advanceSafePoint());
         Thread.sleep(50);
-        assertEquals(1, ledger.expireSnapshots(10));
-        assertEquals(79, ledger.advanceSafePoint());
+        Assertions.assertEquals(1, ledger.expireSnapshots(10));
+        Assertions.assertEquals(79, ledger.advanceSafePoint());
         ledger.beginFencing(segment, true);
-        assertEquals(79, ledger.advanceSafePoint());
-        assertEquals(79, ledger.currentSafePoint());
+        Assertions.assertEquals(79, ledger.advanceSafePoint());
+        Assertions.assertEquals(79, ledger.currentSafePoint());
         assertTrue(reader.txId() > 0);
     }
 
-    /** 预留槽插入失败时全局下一个时间戳及段身份必须整笔回滚。 */
+    /**
+     * The next timestamp and paragraph identity must be a whole rollback when prep slot insertion failed.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void failedSlotInsertionMustRollBackWholeReservation() throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
@@ -147,14 +189,18 @@ class MysqlLocalFirstPublicationLedgerTest {
                         + "drop check mvcc_test_reject_local_slot");
             }
         }
-        assertEquals(100, queryLong("select next_commit_ts from mvcc_local_first_state_v1"));
-        assertEquals(0, queryLong("select count(*) from mvcc_local_first_segment_v1"));
-        assertEquals(0, queryLong("select count(*) from mvcc_local_first_slot_v1"));
-        assertEquals(101, ledger.reserveSegment("s1", "owner-a", "request-a",
+        Assertions.assertEquals(100, queryLong("select next_commit_ts from mvcc_local_first_state_v1"));
+        Assertions.assertEquals(0, queryLong("select count(*) from mvcc_local_first_segment_v1"));
+        Assertions.assertEquals(0, queryLong("select count(*) from mvcc_local_first_slot_v1"));
+        Assertions.assertEquals(101, ledger.reserveSegment("s1", "owner-a", "request-a",
                 4, 5_000, 100).lease().firstTs());
     }
 
-    /** 并发协调者只取得互不重叠的持久时间段。 */
+    /**
+     * Concurrent The coordinator will only obtain a non-overlapping durable period.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void concurrentReservationsMustCoverUniqueTimeSlots() throws Exception {
         try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -168,51 +214,59 @@ class MysqlLocalFirstPublicationLedgerTest {
             for (var future : futures) {
                 assertTrue(firstTimestamps.add(future.get(10, TimeUnit.SECONDS)));
             }
-            assertEquals(8, firstTimestamps.size());
-            assertEquals(132, queryLong("select next_commit_ts from mvcc_local_first_state_v1"));
-            assertEquals(32, queryLong("select count(*) from mvcc_local_first_slot_v1"));
+            Assertions.assertEquals(8, firstTimestamps.size());
+            Assertions.assertEquals(132, queryLong("select next_commit_ts from mvcc_local_first_state_v1"));
+            Assertions.assertEquals(32, queryLong("select count(*) from mvcc_local_first_slot_v1"));
         }
     }
 
-    /** 协调器级租约在没有逐事务写入时仍固定快照下界，释放后旧代数不能继续开始。 */
+    /**
+     * Coordinator Class lease fixed the lower snapshot boundary without writing on a transaction basis and could not continue to start after release.
+     */
     @Test
     void coordinatorLeaseMustProtectSnapshotWithoutPerTransactionRow() {
         var lease = ledger.acquireCoordinatorLease(120_000);
         var view = ledger.snapshotUnderCoordinatorLease(lease.coordinatorId(), lease.generation(), 60_000);
-        assertEquals(100, view.readTs());
-        assertEquals(0, queryLong("select count(*) from mvcc_local_first_snapshot_v1"));
-        assertEquals(99, ledger.advanceSafePoint());
+        Assertions.assertEquals(100, view.readTs());
+        Assertions.assertEquals(0, queryLong("select count(*) from mvcc_local_first_snapshot_v1"));
+        Assertions.assertEquals(99, ledger.advanceSafePoint());
         assertTrue(ledger.releaseCoordinatorLease(lease.coordinatorId(), lease.generation()));
-        assertEquals(100, ledger.advanceSafePoint());
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(100, ledger.advanceSafePoint());
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> ledger.snapshotUnderCoordinatorLease(
                         lease.coordinatorId(), lease.generation(), 60_000)).errorCode());
     }
 
-    /** 协调器续租只可提高保护下界，旧代数即使仍持本地事务也必须失效。 */
+    /**
+     * The renewal of the coordinator lease only increases the protected lower boundary, and the old algebra must be invalidated even if it holds local transaction.
+     */
     @Test
     void coordinatorRenewalMustFenceOldGeneration() {
         var initial = ledger.acquireCoordinatorLease(120_000);
         var renewed = ledger.renewCoordinatorLease(initial.coordinatorId(),
                 initial.generation(), 100, 120_000);
-        assertEquals(2, renewed.generation());
-        assertEquals(ErrorCode.TRANSACTION_TIMEOUT,
+        Assertions.assertEquals(2, renewed.generation());
+        Assertions.assertEquals(ErrorCode.TRANSACTION_TIMEOUT,
                 assertThrows(MvccException.class, () -> ledger.snapshotUnderCoordinatorLease(
                         initial.coordinatorId(), initial.generation(), 60_000)).errorCode());
-        assertEquals(100, ledger.snapshotUnderCoordinatorLease(
+        Assertions.assertEquals(100, ledger.snapshotUnderCoordinatorLease(
                 renewed.coordinatorId(), renewed.generation(), 60_000).readTs());
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> ledger.assertCoordinatorSnapshot(
                         initial.coordinatorId(), initial.generation(), 100,
                         initial.expiresAtMillis(), -1)).errorCode());
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> ledger.renewCoordinatorLease(
                         renewed.coordinatorId(), renewed.generation(), 99, 120_000)).errorCode());
         assertFalse(ledger.releaseCoordinatorLease(initial.coordinatorId(), initial.generation()));
         assertTrue(ledger.releaseCoordinatorLease(renewed.coordinatorId(), renewed.generation()));
     }
 
-    /** 发布例程遇到缺失主键槽时必须回滚，不能越过未来已终态槽。 */
+    /**
+     * When a routine is released, rollback must be used when the missing main key slot is encountered. The future terminal state slot cannot be crossed.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void fastPublisherMustFailClosedOnMissingTimeSlot() throws Exception {
         ledger.reserveSegment("s1", "owner-a", "request-a", 4, 5_000, 100);
@@ -221,12 +275,16 @@ class MysqlLocalFirstPublicationLedgerTest {
                     + "set status = 'ABORTED' where commit_ts = 101");
             statement.executeUpdate("delete from mvcc_local_first_slot_v1 where commit_ts = 102");
         }
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 assertThrows(MvccException.class, () -> ledger.advancePublishedFast(10)).errorCode());
-        assertEquals(100, ledger.currentPublished());
+        Assertions.assertEquals(100, ledger.currentPublished());
     }
 
-    /** 旧响应重试只能读取当前有效期限，FENCING 后不得把原 owner 续命。 */
+    /**
+     * The old response retry can only read the current validity period and FENCING cannot continue after the original owner.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentRenewalMustRespectGenerationAndExpiry() throws Exception {
         var prepared = ledger.reserveSegment("s1", "owner-a", "request-a", 4, 5_000, 100);
@@ -238,12 +296,16 @@ class MysqlLocalFirstPublicationLedgerTest {
         var replay = ledger.renewSegment(active);
         assertTrue(replay.lease().expiresAtMillis() >= renewed.lease().expiresAtMillis());
         ledger.beginFencing(active, true);
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> ledger.renewSegment(active)).errorCode());
         physical.fence(prepared.lease());
     }
 
-    /** 控制数据库时间已超过持久截止后，续租不能复活同一代数。 */
+    /**
+     * The renewal of the lease cannot revive the same generation after database control has exceeded the end of durable.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void expiredControlOwnerMustFailRenewal() throws Exception {
         var prepared = ledger.reserveSegment("s1", "owner-a", "request-a", 4, 5_000, 100);
@@ -253,19 +315,26 @@ class MysqlLocalFirstPublicationLedgerTest {
             statement.executeUpdate("update mvcc_local_first_segment_v1 set expires_at = 1 "
                     + "where segment_start = 101");
         }
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> ledger.renewSegment(active)).errorCode());
-        assertEquals(1, ledger.beginFencing(ledger.segment(101).orElseThrow(), false)
+        Assertions.assertEquals(1, ledger.beginFencing(ledger.segment(101).orElseThrow(), false)
                 .physicalLease().generation());
     }
 
-    /** 用一个只读 SQL 返回控制库持久计数或水位。 */
-    private long queryLong(String sql) {
-        try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
-             ResultSet row = statement.executeQuery(sql)) {
+    /**
+     * Use an read-only SQL to return durable count or watermark.
+     *
+     * @param sql sql
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private long queryLong(final String sql) {
+        try (
+                Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement();
+                ResultSet row = statement.executeQuery(sql)) {
             assertTrue(row.next());
             return row.getLong(1);
-        } catch (Exception ex) {
+        } catch (final Exception ex) {
             throw new IllegalStateException("read local-first test state failed", ex);
         }
     }

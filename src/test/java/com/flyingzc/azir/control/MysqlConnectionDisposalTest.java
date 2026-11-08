@@ -1,4 +1,25 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.control;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.zaxxer.hikari.HikariDataSource;
 import com.zaxxer.hikari.pool.ProxyConnection;
@@ -17,17 +38,22 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-/** 仅使用内存 JDBC 故障桩验证连接弃用，无需数据库或网络。 */
+/**
+ * Only the memory JDBC failure stake verify connection is disabled without database or network.
+ */
 class MysqlConnectionDisposalTest {
-    /** 释放锁与 abort 同时失败时，通用池连接必须保留，整个同库域停止借连接。 */
+
+    /**
+     * When the release lock and abort simultaneously failed, the general pool connection must be preserved and the entire same database domain stops borrowing connection.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void failedReleaseAndAbortQuarantineGenericPoolWithoutReturningConnection() throws SQLException {
         var jdbc = new FaultyJdbc(UUID.randomUUID().toString());
         var peer = new FaultyJdbc(jdbc.serverId);
         try (Connection ignored = MysqlConnectionContext.connection(peer.source)) {
-            // 预先绑定另一个数据源，验证隔离范围覆盖整个数据库域。
+            // Pre-bound another data source, with the verify quarantine range covering the entire database domain.
         }
         var held = new AtomicReference<ConnectionState>();
         assertThrows(MvccException.class, () -> MysqlConnectionContext.withPublicationLock(jdbc.source, 0, () -> {
@@ -36,18 +62,20 @@ class MysqlConnectionDisposalTest {
             jdbc.failAbort = true;
             return null;
         }));
-        assertEquals(1, held.get().abortCalls);
-        assertEquals(0, held.get().closeCalls);
+        Assertions.assertEquals(1, held.get().abortCalls);
+        Assertions.assertEquals(0, held.get().closeCalls);
         assertFalse(held.get().closed);
         int ownBorrows = jdbc.borrows.get();
         int peerBorrows = peer.borrows.get();
         assertThrows(SQLException.class, () -> MysqlConnectionContext.connection(jdbc.source));
         assertThrows(SQLException.class, () -> MysqlConnectionContext.connection(peer.source));
-        assertEquals(ownBorrows, jdbc.borrows.get());
-        assertEquals(peerBorrows, peer.borrows.get());
+        Assertions.assertEquals(ownBorrows, jdbc.borrows.get());
+        Assertions.assertEquals(peerBorrows, peer.borrows.get());
     }
 
-    /** 独立 SQL 事务回滚和 abort 都失败后，不能通过 close 或 autoCommit 把脏连接归池。 */
+    /**
+     * Independent SQL transaction rollback and abort failed to return dirty connection to the pool by close or autoCommit.
+     */
     @Test
     void failedRollbackAndAbortQuarantineStandaloneTransactionConnection() {
         var jdbc = new FaultyJdbc(UUID.randomUUID().toString());
@@ -56,15 +84,18 @@ class MysqlConnectionDisposalTest {
         var error = assertThrows(SQLException.class, () -> MysqlConnectionContext.inTransaction(jdbc.source, connection -> {
             throw new SQLException("original failure");
         }));
-        assertEquals("original failure", error.getMessage());
-        assertEquals(2, error.getSuppressed().length);
-        assertEquals(0, jdbc.last.get().closeCalls);
-        assertEquals(0, jdbc.last.get().autoCommitRestores);
+        Assertions.assertEquals("original failure", error.getMessage());
+        Assertions.assertEquals(2, error.getSuppressed().length);
+        Assertions.assertEquals(0, jdbc.last.get().closeCalls);
+        Assertions.assertEquals(0, jdbc.last.get().autoCommitRestores);
         assertFalse(jdbc.last.get().autoCommit);
         assertThrows(SQLException.class, () -> MysqlConnectionContext.connection(jdbc.source));
     }
 
-    /** 借用连接回滚失败必须污染外层发布连接，即使业务吞掉异常也不能继续发布或归池。 */
+    /**
+     * The use of connection rollback failure must contaminate the outer release connection and cannot continue to be published or returned to the pond even if the business swallows an
+     * anomaly.
+     */
     @Test
     void failedBorrowedTransactionDiscardsTheOuterPublicationConnection() {
         var jdbc = new FaultyJdbc(UUID.randomUUID().toString());
@@ -76,7 +107,7 @@ class MysqlConnectionDisposalTest {
             Connection cached;
             try {
                 cached = MysqlConnectionContext.connection(jdbc.source);
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw new AssertionError(ex);
             }
             assertThrows(SQLException.class, () -> MysqlConnectionContext.inTransaction(jdbc.source, connection -> {
@@ -86,12 +117,16 @@ class MysqlConnectionDisposalTest {
             assertThrows(SQLException.class, () -> cached.prepareStatement("select 1"));
             return null;
         }));
-        assertEquals(0, held.get().closeCalls);
-        assertEquals(0, held.get().autoCommitRestores);
-        assertEquals(1, held.get().abortCalls);
+        Assertions.assertEquals(0, held.get().closeCalls);
+        Assertions.assertEquals(0, held.get().autoCommitRestores);
+        Assertions.assertEquals(1, held.get().abortCalls);
     }
 
-    /** Hikari 必须收到自己的原始代理执行显式淘汰，不能传入借用的 JDK 代理。 */
+    /**
+     * Hikari must receive its original agent to perform a visible phase-out and cannot be transferred to the borrowed JDK agent.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void hikariEvictionReceivesTheOriginalPooledProxyAfterAbortFailure() throws SQLException {
         var jdbc = new FaultyJdbc(UUID.randomUUID().toString());
@@ -106,60 +141,115 @@ class MysqlConnectionDisposalTest {
                 jdbc.failAbort = true;
                 return null;
             }));
-            assertInstanceOf(ProxyConnection.class, pool.evicted);
-            assertSame(pool.lastBorrowed, pool.evicted);
+            Assertions.assertInstanceOf(ProxyConnection.class, pool.evicted);
+            Assertions.assertSame(pool.lastBorrowed, pool.evicted);
             assertFalse(Proxy.isProxyClass(pool.evicted.getClass()));
             int previousConnections = jdbc.borrows.get();
             jdbc.failRelease = false;
             jdbc.failAbort = false;
-            assertEquals(1, MysqlConnectionContext.withPublicationLock(pool, 0, () -> 1));
+            Assertions.assertEquals(1, MysqlConnectionContext.withPublicationLock(pool, 0, () -> 1));
             assertTrue(jdbc.borrows.get() > previousConnections);
         }
     }
 
-    /** 记录真实 Hikari 池代理淘汰，底层连接仍是纯内存故障桩。 */
+    /**
+     * Returns an empty or original type default value that is not used for JDBC.
+     *
+     * @param type type
+     * @return the operation result
+     */
+    private static Object defaultValue(final Class<?> type) {
+        if (type == boolean.class) {
+            return false;
+        }
+        if (type == int.class) {
+            return 0;
+        }
+        if (type == long.class) {
+            return 0L;
+        }
+        return null;
+    }
+
+    /**
+     * Record real Hikari pool agent phase-out, bottom connection still pure memory failure bars.
+     */
     private static final class RecordingHikariDataSource extends HikariDataSource {
+
         private Connection lastBorrowed;
+
         private Connection evicted;
 
-        /** 创建尚未启动连接池的测试对象。 */
+        /**
+         * Creates a test object that has not yet started connection pool.
+         */
         private RecordingHikariDataSource() {
         }
 
-        /** 保留当前实际借出的 Hikari 代理身份。 */
+        /**
+         * Keeps the currently actually borrowed Hikari proxy identity.
+         *
+         * @return the operation result
+         * @throws SQLException if the operation cannot complete
+         */
         @Override
         public Connection getConnection() throws SQLException {
             lastBorrowed = super.getConnection();
             return lastBorrowed;
         }
 
-        /** 记录淘汰对象并调用真实池淘汰实现。 */
+        /**
+         * Recording phase-out objects and calling for real pool phase-out.
+         *
+         * @param connection connection
+         */
         @Override
-        public void evictConnection(Connection connection) {
+        public void evictConnection(final Connection connection) {
             evicted = connection;
             super.evictConnection(connection);
         }
     }
 
-    /** 为每次借连接创建独立会话，用固定服务器身份模拟同库别名。 */
+    /**
+     * Creates a stand-alone session for each loan with a fixed server identity to simulate an same database alias.
+     */
     private static final class FaultyJdbc implements InvocationHandler {
+
         private final String serverId;
+
         private final DataSource source;
+
         private final AtomicInteger borrows = new AtomicInteger();
+
         private final AtomicReference<ConnectionState> last = new AtomicReference<>();
+
         private volatile boolean failRelease;
+
         private volatile boolean failRollback;
+
         private volatile boolean failAbort;
 
-        /** 创建不连接任何外部服务的数据源。 */
-        private FaultyJdbc(String serverId) {
+        /**
+         * Creates a data source that does not connection for any external service.
+         *
+         * @param serverId server id
+         */
+        private FaultyJdbc(final String serverId) {
             this.serverId = serverId;
             source = (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(), new Class<?>[]{DataSource.class}, this);
         }
 
-        /** 分配内存会话并提供连接池初始化所需的基础数据源行为。 */
+        /**
+         * Distributes memory session and provides the basic data source behaviour required for initialisation of connection pool.
+         *
+         * @param proxy proxy
+         * @param method method
+         * @param args args
+         * @return the operation result
+         * @throws Throwable if the operation cannot complete
+         */
         @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        public Object invoke(final Object proxy, final Method method, final Object[] args) throws Throwable {
             return switch (method.getName()) {
                 case "getConnection" -> {
                     borrows.incrementAndGet();
@@ -177,25 +267,47 @@ class MysqlConnectionDisposalTest {
         }
     }
 
-    /** 独立记录关闭、回滚、abort 和 autoCommit 恢复，避免仅验证异常类型。 */
+    /**
+     * Independent records close, rollback, abort and autoCommit recovery to avoid only verify abnormal types.
+     */
     private static final class ConnectionState implements InvocationHandler {
+
         private final FaultyJdbc jdbc;
+
         private final Connection connection;
+
         private volatile boolean autoCommit = true;
+
         private volatile boolean closed;
+
         private int closeCalls;
+
         private int abortCalls;
+
         private int autoCommitRestores;
 
-        /** 创建底层 JDBC 会话代理。 */
-        private ConnectionState(FaultyJdbc jdbc) {
+        /**
+         * Creates a bottom-up JDBC session proxy.
+         *
+         * @param jdbc jdbc
+         */
+        private ConnectionState(final FaultyJdbc jdbc) {
             this.jdbc = jdbc;
             connection = (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class}, this);
         }
 
-        /** 实现控制面和 Hikari 初始化所需的最小 JDBC 会话语义。 */
+        /**
+         * The minimum JDBC session syntax required to achieve control and Hikari initialization.
+         *
+         * @param proxy proxy
+         * @param method method
+         * @param args args
+         * @return the operation result
+         * @throws SQLException if the operation cannot complete
+         * @throws Throwable if the operation cannot complete
+         */
         @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        public Object invoke(final Object proxy, final Method method, final Object[] args) throws Throwable {
             return switch (method.getName()) {
                 case "hashCode" -> System.identityHashCode(proxy);
                 case "equals" -> proxy == args[0];
@@ -212,7 +324,11 @@ class MysqlConnectionDisposalTest {
                 case "getCatalog", "getSchema" -> "control";
                 case "isValid" -> !closed;
                 case "isClosed" -> closed;
-                case "close" -> { closeCalls++; closed = true; yield null; }
+                case "close" -> {
+                    closeCalls++;
+                    closed = true;
+                    yield null;
+                }
                 case "abort" -> {
                     abortCalls++;
                     if (jdbc.failAbort) {
@@ -234,8 +350,13 @@ class MysqlConnectionDisposalTest {
             };
         }
 
-        /** 模拟命名锁和域查询，在指定释放语句上注入普通 SQL 错误。 */
-        private PreparedStatement statement(String sql) {
+        /**
+         * Simulates a naming lock and field query, injecting normal SQL errors into the specified release statement.
+         *
+         * @param sql sql
+         * @return the operation result
+         */
+        private PreparedStatement statement(final String sql) {
             return (PreparedStatement) Proxy.newProxyInstance(PreparedStatement.class.getClassLoader(),
                     new Class<?>[]{PreparedStatement.class}, (proxy, method, args) -> {
                         if (method.getName().equals("executeQuery")) {
@@ -251,8 +372,13 @@ class MysqlConnectionDisposalTest {
                     });
         }
 
-        /** 为身份查询和命名锁查询返回一行结果。 */
-        private ResultSet row(String sql) {
+        /**
+         * Returns a line result for the identity query and naming lock query.
+         *
+         * @param sql sql
+         * @return the operation result
+         */
+        private ResultSet row(final String sql) {
             var position = new AtomicInteger();
             return (ResultSet) Proxy.newProxyInstance(ResultSet.class.getClassLoader(), new Class<?>[]{ResultSet.class},
                     (proxy, method, args) -> switch (method.getName()) {
@@ -263,19 +389,5 @@ class MysqlConnectionDisposalTest {
                         default -> defaultValue(method.getReturnType());
                     });
         }
-    }
-
-    /** 返回未使用 JDBC 方法所需的空值或原始类型默认值。 */
-    private static Object defaultValue(Class<?> type) {
-        if (type == boolean.class) {
-            return false;
-        }
-        if (type == int.class) {
-            return 0;
-        }
-        if (type == long.class) {
-            return 0L;
-        }
-        return null;
     }
 }

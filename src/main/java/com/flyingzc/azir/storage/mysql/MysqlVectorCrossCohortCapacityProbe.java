@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -31,14 +47,26 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
-/** 同一事务组贯穿中心登记、两片预写和中心决议的隔离容量上界。 */
+/**
+ * The same group transaction runs through the upper quarantine capacity of the centre, two pieces prewrite and Centre decision.
+ */
 public final class MysqlVectorCrossCohortCapacityProbe {
-    /** 容量探针不保存全局连接或事务状态。 */
+
+    /**
+     * Volume probe does not save global connection or transaction state.
+     */
     private MysqlVectorCrossCohortCapacityProbe() {
     }
 
-    /** 仅使用全新空数据库，显式参数限制物理并发与逻辑组大小。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Use only new empty database, with visible parameters to limit the size of physical concurrent and logical groups.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("vector cohort probe requires AZIR_TX_RESET=true");
         }
@@ -71,9 +99,10 @@ public final class MysqlVectorCrossCohortCapacityProbe {
         String controlUrl = env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control");
         String leftUrl = env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23307/shard_1");
         String rightUrl = env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:23308/shard_2");
-        try (HikariDataSource center = pool(controlUrl, username, password);
-             HikariDataSource leftData = pool(leftUrl, username, password);
-             HikariDataSource rightData = pool(rightUrl, username, password)) {
+        try (
+                HikariDataSource center = pool(controlUrl, username, password);
+                HikariDataSource leftData = pool(leftUrl, username, password);
+                HikariDataSource rightData = pool(rightUrl, username, password)) {
             requireEmpty(center);
             requireEmpty(leftData);
             requireEmpty(rightData);
@@ -89,20 +118,22 @@ public final class MysqlVectorCrossCohortCapacityProbe {
             Map<String, DataSource> routes = Map.of("s1", leftData, "s2", rightData);
             var leases = MysqlVectorCutLeaderLease.forProduct(center, routes, stripes);
             leases.initializeProduct();
-            try (var fanout = Executors.newVirtualThreadPerTaskExecutor();
-                 var snapshots = new LocalFirstCoordinatorSnapshots(ledger, 20_000, 60_000, 1_000);
-                 var owner = new LocalFirstIntentSegmentOwnerRegistry(ledger,
-                         snapshots::floorForReservation, 512, 5_000, 1_000, 100);
-                 var publisher = MysqlVectorCutLeaderRuntime.forProduct(center, routes, stripes,
-                         ledger::currentPublished, leases, "cohort-probe-owner", 5_000, 200)) {
+            try (
+                    var fanout = Executors.newVirtualThreadPerTaskExecutor();
+                    var snapshots = new LocalFirstCoordinatorSnapshots(ledger, 20_000, 60_000, 1_000);
+                    var owner = new LocalFirstIntentSegmentOwnerRegistry(ledger,
+                            snapshots::floorForReservation, 512, 5_000, 1_000, 100);
+                    var publisher = MysqlVectorCutLeaderRuntime.forProduct(center, routes, stripes,
+                            ledger::currentPublished, leases, "cohort-probe-owner", 5_000, 200)) {
                 if (!publisher.start()) {
                     throw new IllegalStateException("vector cohort probe found another publisher");
                 }
-                try (var steady = steadyFull ? new MysqlVectorCrossSteadyBackground(ledger,
-                        left, right, center, leftData, rightData, publisher,
-                        controlUrl, leftUrl, rightUrl, username, password, stripes,
-                        gcParallelism, gcRetireBatch, gcCandidateLimit,
-                        localEveryRounds, gcIntervalMillis) : null) {
+                try (
+                        var steady = steadyFull ? new MysqlVectorCrossSteadyBackground(ledger,
+                                left, right, center, leftData, rightData, publisher,
+                                controlUrl, leftUrl, rightUrl, username, password, stripes,
+                                gcParallelism, gcRetireBatch, gcCandidateLimit,
+                                localEveryRounds, gcIntervalMillis) : null) {
                     if (steady != null) {
                         steady.start();
                     }
@@ -114,13 +145,26 @@ public final class MysqlVectorCrossCohortCapacityProbe {
         }
     }
 
-    /** 探针复用产品连接池与驱动超时配置。 */
-    private static HikariDataSource pool(String url, String username, String password) {
+    /**
+     * Probe reuse product connection pool with driver timeout configuration.
+     *
+     * @param url url
+     * @param username username
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String url, final String username, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.create(url, username, password);
     }
 
-    /** 已有产品表可能存有业务数据时拒绝运行，而非依赖重置标志猜测可删除。 */
-    private static void requireEmpty(HikariDataSource dataSource) throws SQLException {
+    /**
+     * Existing product lists may refuse to run when business data are available, rather than relying on reset sign guesses for deletion.
+     *
+     * @param dataSource database connection source
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void requireEmpty(final HikariDataSource dataSource) throws SQLException {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select table_name from information_schema.tables
                 where table_schema = database() and left(table_name, 5) = 'mvcc_'
@@ -132,18 +176,41 @@ public final class MysqlVectorCrossCohortCapacityProbe {
         }
     }
 
-    /** 物理线程每轮组成完整事务组，后台物化只在计时结束后排空以量化前台上界。 */
-    private static void run(MysqlLocalFirstPublicationLedger ledger,
-                            MysqlStorageAdapter left, MysqlStorageAdapter right,
-                            HikariDataSource center, HikariDataSource leftData,
-                            HikariDataSource rightData, LocalFirstCoordinatorSnapshots snapshots,
-                            LocalFirstIntentSegmentOwnerRegistry owner,
-                            MysqlVectorCutLeaderRuntime publisher,
-                            java.util.concurrent.ExecutorService fanout,
-                            int workerCount, int cohortSize, int seconds, int stripes,
-                            boolean asynchronousPublication, long publicationParkMicros,
-                            boolean steadyRecovery,
-                            MysqlVectorCrossSteadyBackground steady) throws Exception {
+    /**
+     * The physical threads form a complete transaction group per round, and background materialization is empty only to quantify the upper foreground boundary after time.
+     *
+     * @param ledger ledger
+     * @param left left
+     * @param right right
+     * @param center center
+     * @param leftData left data
+     * @param rightData right data
+     * @param snapshots snapshots
+     * @param owner owner
+     * @param publisher publisher
+     * @param fanout fanout
+     * @param workerCount worker count
+     * @param cohortSize cohort size
+     * @param seconds seconds
+     * @param stripes stripes
+     * @param asynchronousPublication asynchronous publication
+     * @param publicationParkMicros publication park micros
+     * @param steadyRecovery steady recovery
+     * @param steady steady
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static void run(final MysqlLocalFirstPublicationLedger ledger,
+                            final MysqlStorageAdapter left, final MysqlStorageAdapter right,
+                            final HikariDataSource center, final HikariDataSource leftData,
+                            final HikariDataSource rightData, final LocalFirstCoordinatorSnapshots snapshots,
+                            final LocalFirstIntentSegmentOwnerRegistry owner,
+                            final MysqlVectorCutLeaderRuntime publisher,
+                            final java.util.concurrent.ExecutorService fanout,
+                            final int workerCount, final int cohortSize, final int seconds, final int stripes,
+                            final boolean asynchronousPublication, final long publicationParkMicros,
+                            final boolean steadyRecovery,
+                            final MysqlVectorCrossSteadyBackground steady) throws Exception {
         LongAdder committed = new LongAdder();
         LongAdder failures = new LongAdder();
         LongAdder groups = new LongAdder();
@@ -179,24 +246,26 @@ public final class MysqlVectorCrossCohortCapacityProbe {
                             if (result.finalized() == 0 && result.aborted() == 0) {
                                 LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
                             }
-                        } catch (RuntimeException ex) {
+                        } catch (final RuntimeException ex) {
                             firstRecoveryFailure.compareAndSet(null, describeFailure(ex));
                             steadyRecoveryFailures.increment();
                             LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
                         }
                     }
-                }) : null;
+                })
+                : null;
         Thread centerPublisher = asynchronousPublication
                 ? Thread.ofVirtual().name("azir-cohort-center-publisher").start(() -> {
                     while (publishing.get()) {
                         try {
                             ledger.advancePublishedFast(4096);
-                        } catch (RuntimeException ex) {
+                        } catch (final RuntimeException ex) {
                             firstFailure.compareAndSet(null, describeFailure(ex));
                         }
                         LockSupport.parkNanos(TimeUnit.MICROSECONDS.toNanos(publicationParkMicros));
                     }
-                }) : null;
+                })
+                : null;
         CountDownLatch ready = new CountDownLatch(workerCount);
         CountDownLatch start = new CountDownLatch(1);
         CountDownLatch done = new CountDownLatch(workerCount);
@@ -211,7 +280,7 @@ public final class MysqlVectorCrossCohortCapacityProbe {
                             if (steady != null) {
                                 try {
                                     steady.requireHealthy();
-                                } catch (RuntimeException ex) {
+                                } catch (final RuntimeException ex) {
                                     firstFailure.compareAndSet(null, describeFailure(ex));
                                     break;
                                 }
@@ -227,10 +296,9 @@ public final class MysqlVectorCrossCohortCapacityProbe {
                                 beginNanos.add(System.nanoTime() - stage);
                                 Set<String> routes = Set.of("s1", "s2");
                                 stage = System.nanoTime();
-                                ledger.registerVectorIntentBatch(begun.stream().map(tx ->
-                                        new IntentRegistrationRequest(tx.txId(), tx.startTs(),
-                                                tx.deadlineMillis(), IsolationLevel.REPEATABLE_READ,
-                                                routes)).toList());
+                                ledger.registerVectorIntentBatch(begun.stream().map(tx -> new IntentRegistrationRequest(tx.txId(), tx.startTs(),
+                                        tx.deadlineMillis(), IsolationLevel.REPEATABLE_READ,
+                                        routes)).toList());
                                 registerNanos.add(System.nanoTime() - stage);
                                 long expiry = System.currentTimeMillis() + 60_000;
                                 List<MysqlStorageAdapter.VectorPrewriteRequest> leftWrites = new ArrayList<>();
@@ -248,10 +316,12 @@ public final class MysqlVectorCrossCohortCapacityProbe {
                                 stage = System.nanoTime();
                                 var leftFuture = CompletableFuture.supplyAsync(
                                         () -> prewriteWithFallback(left, leftWrites,
-                                                prewriteFallbacks, firstBatchFailure), fanout);
+                                                prewriteFallbacks, firstBatchFailure),
+                                        fanout);
                                 var rightFuture = CompletableFuture.supplyAsync(
                                         () -> prewriteWithFallback(right, rightWrites,
-                                                prewriteFallbacks, firstBatchFailure), fanout);
+                                                prewriteFallbacks, firstBatchFailure),
+                                        fanout);
                                 List<MysqlStorageAdapter.PrewriteProof> leftProofs = leftFuture.join();
                                 List<MysqlStorageAdapter.PrewriteProof> rightProofs = rightFuture.join();
                                 prewriteNanos.add(System.nanoTime() - stage);
@@ -297,22 +367,22 @@ public final class MysqlVectorCrossCohortCapacityProbe {
                                 }
                                 committed.add(begun.size());
                                 groups.increment();
-                            } catch (RuntimeException ex) {
+                            } catch (final RuntimeException ex) {
                                 failures.add(Math.max(1, begun.size()));
                                 firstFailure.compareAndSet(null, describeFailure(ex));
                                 assigned.forEach(owner::unknown);
                                 for (BeginReservation tx : begun) {
                                     try {
                                         ledger.abortIntentTransaction(tx.txId());
-                                    } catch (RuntimeException ignored) {
-                                        // 中心可能已持久提交，恢复器仍须依中心终态处理。
+                                    } catch (final RuntimeException ignored) {
+                                        // The centre may already be durable commit, and the recovery device must still be processed according to the center terminal state.
                                     }
                                 }
                             } finally {
                                 begun.forEach(tx -> snapshots.release(tx.txId()));
                             }
                         }
-                    } catch (InterruptedException ex) {
+                    } catch (final InterruptedException ex) {
                         Thread.currentThread().interrupt();
                     } finally {
                         done.countDown();
@@ -321,32 +391,33 @@ public final class MysqlVectorCrossCohortCapacityProbe {
             }
             ready.await();
             AtomicBoolean reporting = new AtomicBoolean(steady != null);
-            Thread reporter = steady == null ? null : Thread.ofVirtual()
-                    .name("azir-cross-steady-window").start(() -> {
-                        long windowStarted = System.nanoTime();
-                        while (reporting.get()) {
-                            LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(5));
-                            if (!reporting.get()) {
-                                return;
-                            }
-                            try {
-                                var status = steady.snapshot();
-                                System.out.printf("VECTOR_CROSS_STEADY_WINDOW elapsed_s=%.2f "
+            Thread reporter = steady == null ? null
+                    : Thread.ofVirtual()
+                            .name("azir-cross-steady-window").start(() -> {
+                                long windowStarted = System.nanoTime();
+                                while (reporting.get()) {
+                                    LockSupport.parkNanos(TimeUnit.SECONDS.toNanos(5));
+                                    if (!reporting.get()) {
+                                        return;
+                                    }
+                                    try {
+                                        var status = steady.snapshot();
+                                        System.out.printf("VECTOR_CROSS_STEADY_WINDOW elapsed_s=%.2f "
                                                 + "ack=%d pending_recovery=%d "
                                                 + "successors=%d/%d mapped=%d retired=%d "
                                                 + "gc_runs=%d gc_failures=%d%n",
-                                        (System.nanoTime() - windowStarted) / 1_000_000_000.0,
-                                        committed.sum(), ledger.countUnfinalizedIntentDecisions(),
-                                        status.completed(), status.submitted(),
-                                        status.leftMappings() + status.rightMappings(),
-                                        status.leftReceipts() + status.rightReceipts(),
-                                        status.gcRuns(), status.gcFailures());
-                            } catch (RuntimeException | SQLException ex) {
-                                firstFailure.compareAndSet(null, describeFailure(ex));
-                                return;
-                            }
-                        }
-                    });
+                                                (System.nanoTime() - windowStarted) / 1_000_000_000.0,
+                                                committed.sum(), ledger.countUnfinalizedIntentDecisions(),
+                                                status.completed(), status.submitted(),
+                                                status.leftMappings() + status.rightMappings(),
+                                                status.leftReceipts() + status.rightReceipts(),
+                                                status.gcRuns(), status.gcFailures());
+                                    } catch (final RuntimeException | SQLException ex) {
+                                        firstFailure.compareAndSet(null, describeFailure(ex));
+                                        return;
+                                    }
+                                }
+                            });
             long started = System.nanoTime();
             start.countDown();
             done.await();
@@ -362,7 +433,8 @@ public final class MysqlVectorCrossCohortCapacityProbe {
             }
             double elapsed = (System.nanoTime() - started) / 1_000_000_000.0;
             MysqlVectorCrossSteadyBackground.Snapshot steadyAtStop = steady == null
-                    ? null : steady.snapshot();
+                    ? null
+                    : steady.snapshot();
             owner.close();
             long pendingAtStop = ledger.countUnfinalizedIntentDecisions();
             long drainStarted = System.nanoTime();
@@ -411,10 +483,10 @@ public final class MysqlVectorCrossCohortCapacityProbe {
                             + finalSteady.firstFailure());
                 }
                 System.out.printf("VECTOR_CROSS_STEADY_RESULT ack=%d duration_s=%.2f "
-                                + "ack_tps=%.2f stop_pending_recovery=%d "
-                                + "stop_successors=%d/%d stop_mapped=%d stop_retired=%d "
-                                + "final_successors=%d final_mapped=%d final_retired=%d "
-                                + "gc_drain_s=%.2f gc_runs=%d gc_failures=%d%n",
+                        + "ack_tps=%.2f stop_pending_recovery=%d "
+                        + "stop_successors=%d/%d stop_mapped=%d stop_retired=%d "
+                        + "final_successors=%d final_mapped=%d final_retired=%d "
+                        + "gc_drain_s=%.2f gc_runs=%d gc_failures=%d%n",
                         committed.sum(), elapsed, committed.sum() / elapsed,
                         pendingAtStop, steadyAtStop.completed(), steadyAtStop.submitted(),
                         steadyAtStop.leftMappings() + steadyAtStop.rightMappings(),
@@ -425,17 +497,17 @@ public final class MysqlVectorCrossCohortCapacityProbe {
             }
             long count = Math.max(1, committed.sum());
             System.out.printf("VECTOR_CROSS_COHORT_CAPACITY async_publish=%s steady_recovery=%s "
-                            + "publish_park_us=%d "
-                            + "physical_workers=%d cohort=%d "
-                            + "logical_inflight=%d duration_s=%.2f committed=%d failures=%d "
-                            + "ack_tps=%.2f groups=%d avg_group=%.2f first_failure=%s "
-                            + "prewrite_fallback_members=%d first_batch_failure=%s "
-                            + "begin_avg_ms=%.3f register_avg_ms=%.3f prewrite_avg_ms=%.3f "
-                            + "center_avg_ms=%.3f publish_avg_ms=%.3f "
-                            + "pending_at_stop=%d drain_s=%.2f finalized=%d recovery_failures=%d "
-                            + "first_recovery_failure=%s "
-                            + "left_versions=%d right_versions=%d left_pending=%d right_pending=%d "
-                            + "control_rows=%d%n",
+                    + "publish_park_us=%d "
+                    + "physical_workers=%d cohort=%d "
+                    + "logical_inflight=%d duration_s=%.2f committed=%d failures=%d "
+                    + "ack_tps=%.2f groups=%d avg_group=%.2f first_failure=%s "
+                    + "prewrite_fallback_members=%d first_batch_failure=%s "
+                    + "begin_avg_ms=%.3f register_avg_ms=%.3f prewrite_avg_ms=%.3f "
+                    + "center_avg_ms=%.3f publish_avg_ms=%.3f "
+                    + "pending_at_stop=%d drain_s=%.2f finalized=%d recovery_failures=%d "
+                    + "first_recovery_failure=%s "
+                    + "left_versions=%d right_versions=%d left_pending=%d right_pending=%d "
+                    + "control_rows=%d%n",
                     asynchronousPublication, steadyRecovery, publicationParkMicros,
                     workerCount, cohortSize, workerCount * cohortSize, elapsed,
                     committed.sum(), failures.sum(), committed.sum() / elapsed,
@@ -456,13 +528,21 @@ public final class MysqlVectorCrossCohortCapacityProbe {
         }
     }
 
-    /** 整批响应不确定时按独立事务号重放，保留原数据库错误供归因。 */
+    /**
+     * Keeps the original database error for attribution when the whole batch of responses is uncertain on a stand-alone transaction ID replay.
+     *
+     * @param adapter adapter
+     * @param requests requests
+     * @param fallbackMembers fallback members
+     * @param firstBatchFailure first batch failure
+     * @return the operation result
+     */
     private static List<MysqlStorageAdapter.PrewriteProof> prewriteWithFallback(
-            MysqlStorageAdapter adapter, List<MysqlStorageAdapter.VectorPrewriteRequest> requests,
-            LongAdder fallbackMembers, AtomicReference<String> firstBatchFailure) {
+                                                                                final MysqlStorageAdapter adapter, final List<MysqlStorageAdapter.VectorPrewriteRequest> requests,
+                                                                                final LongAdder fallbackMembers, final AtomicReference<String> firstBatchFailure) {
         try {
             return adapter.prewriteVectorBatchWithProof(requests);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             firstBatchFailure.compareAndSet(null, describeFailure(ex));
             fallbackMembers.add(requests.size());
             List<MysqlStorageAdapter.PrewriteProof> proofs = new ArrayList<>(requests.size());
@@ -474,11 +554,15 @@ public final class MysqlVectorCrossCohortCapacityProbe {
         }
     }
 
-    /** 完整异常链和 SQL 错误码用于区分死锁、超时与协议拒绝。 */
-    private static String describeFailure(Throwable failure) {
+    /**
+     * Full anomaly chain and SQL error code used to distinguish dead lock, timeout from protocol rejected.
+     *
+     * @param failure failure
+     * @return the operation result
+     */
+    private static String describeFailure(final Throwable failure) {
         StringBuilder result = new StringBuilder();
-        for (Throwable current = failure; current != null && result.length() < 600;
-             current = current.getCause()) {
+        for (Throwable current = failure; current != null && result.length() < 600; current = current.getCause()) {
             if (!result.isEmpty()) {
                 result.append(" <- ");
             }
@@ -490,10 +574,19 @@ public final class MysqlVectorCrossCohortCapacityProbe {
         return result.toString();
     }
 
-    /** 按固定表名核对组提交物化与中心事务数。 */
-    private static long countRows(HikariDataSource dataSource, String table) throws SQLException {
-        try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement(
-                "select count(*) from " + table); ResultSet row = query.executeQuery()) {
+    /**
+     * Checks the commit materialization and centre transaction numbers by a fixed list name.
+     *
+     * @param dataSource database connection source
+     * @param table table
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long countRows(final HikariDataSource dataSource, final String table) throws SQLException {
+        try (
+                Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement(
+                        "select count(*) from " + table);
+                ResultSet row = query.executeQuery()) {
             if (!row.next()) {
                 throw new SQLException("vector cohort count returned no row");
             }
@@ -501,8 +594,14 @@ public final class MysqlVectorCrossCohortCapacityProbe {
         }
     }
 
-    /** 仅读取本探针显式连接和短时容量参数。 */
-    private static String env(String name, String fallback) {
+    /**
+     * Reads only the probe visible connection and short-hour capacity parameters.
+     *
+     * @param name name
+     * @param fallback fallback
+     * @return the operation result
+     */
+    private static String env(final String name, final String fallback) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? fallback : value;
     }

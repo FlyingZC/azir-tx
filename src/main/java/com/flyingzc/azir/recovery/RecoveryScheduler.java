@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.recovery;
 
 import com.flyingzc.azir.common.BackgroundTaskStats;
@@ -10,28 +26,44 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 后台恢复与 GC 调度器。
+ * Background recovery with GC Scheduler.
  */
 public final class RecoveryScheduler implements AutoCloseable {
+
     private final BackgroundRecoveryRunner recoveryRunner;
+
     private final GcManager gcManager;
+
     private final int recoveryBatchSize;
+
     private final int gcBatchSize;
+
     private final long recoveryIntervalMillis;
+
     private final long gcIntervalMillis;
+
     private final ScheduledExecutorService executorService;
+
     private final BackgroundTaskStats recoveryStats = new BackgroundTaskStats();
+
     private final BackgroundTaskStats gcStats = new BackgroundTaskStats();
 
     /**
-     * 构造 RecoveryScheduler 实例。
+     * Construct a RecoveryScheduler instance.
+     *
+     * @param recoveryRunner recovery runner
+     * @param gcManager gc manager
+     * @param recoveryBatchSize recovery batch size
+     * @param gcBatchSize gc batch size
+     * @param recoveryIntervalMillis recovery interval millis
+     * @param gcIntervalMillis gc interval millis
      */
-    public RecoveryScheduler(BackgroundRecoveryRunner recoveryRunner,
-                             GcManager gcManager,
-                             int recoveryBatchSize,
-                             int gcBatchSize,
-                             long recoveryIntervalMillis,
-                             long gcIntervalMillis) {
+    public RecoveryScheduler(final BackgroundRecoveryRunner recoveryRunner,
+                             final GcManager gcManager,
+                             final int recoveryBatchSize,
+                             final int gcBatchSize,
+                             final long recoveryIntervalMillis,
+                             final long gcIntervalMillis) {
         this.recoveryRunner = Objects.requireNonNull(recoveryRunner);
         this.gcManager = Objects.requireNonNull(gcManager);
         this.recoveryBatchSize = recoveryBatchSize;
@@ -42,7 +74,7 @@ public final class RecoveryScheduler implements AutoCloseable {
     }
 
     /**
-     * 启动后台调度任务。
+     * Starts the background schedule task.
      */
     public void start() {
         executorService.scheduleWithFixedDelay(this::runRecoverySafely, 0L, recoveryIntervalMillis, TimeUnit.MILLISECONDS);
@@ -50,21 +82,25 @@ public final class RecoveryScheduler implements AutoCloseable {
     }
 
     /**
-     * 返回恢复任务统计信息。
+     * Synchronising "%s".
+     *
+     * @return the operation result
      */
     public BackgroundTaskStats recoveryStats() {
         return recoveryStats;
     }
 
     /**
-     * 返回 GC 任务统计信息。
+     * Synchronising "%s".
+     *
+     * @return the operation result
      */
     public BackgroundTaskStats gcStats() {
         return gcStats;
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
      */
     @Override
     public void close() {
@@ -72,31 +108,33 @@ public final class RecoveryScheduler implements AutoCloseable {
     }
 
     /**
-     * 安全执行一次恢复任务。
+     * Safely perform an recovery mission.
      */
     private void runRecoverySafely() {
         try {
             int recovered = recoveryRunner.recoverOnce(recoveryBatchSize);
             recoveryStats.recordSuccess(recovered);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             recoveryStats.recordFailure();
         }
     }
 
     /**
-     * 安全执行一次 GC 任务。
+     * A GC mission is carried out safely.
      */
     private void runGcSafely() {
         try {
             int reclaimed = gcManager.gcOnce(gcBatchSize);
             gcStats.recordSuccess(reclaimed);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             gcStats.recordFailure();
         }
     }
 
     /**
-     * 创建守护线程工厂。
+     * Create a daemon factory.
+     *
+     * @return the operation result
      */
     private static ThreadFactory daemonFactory() {
         return runnable -> {

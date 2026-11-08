@@ -1,4 +1,26 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.zaxxer.hikari.HikariDataSource;
 import com.flyingzc.azir.common.ErrorCode;
@@ -23,30 +45,34 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
-/** 真实 MySQL 下验证分片 owner 安装、代数 fencing 和在途本地事务串行化。 */
+/**
+ * Real MySQL verify shard owner installation, algebra fencing and en route local transaction serialization.
+ */
 @Testcontainers
 class MysqlShardSegmentFenceTest {
+
     @Container
     private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4")
             .withDatabaseName("local_segment_fence").withUsername("test").withPassword("test");
+
     private static HikariDataSource dataSource;
+
     private MysqlShardSegmentFence fence;
+
     private MysqlStorageAdapter shard;
 
-    /** 建立只供新协议栅栏测试使用的隔离连接池。 */
+    /**
+     * Creates an isolation connection pool for new protocol fence testing only.
+     */
     @BeforeAll
     static void openDatabase() {
         dataSource = (HikariDataSource) MysqlDataSourceFactory.create(MYSQL.getJdbcUrl(),
                 MYSQL.getUsername(), MYSQL.getPassword());
     }
 
-    /** 关闭测试持有的物理连接池。 */
+    /**
+     * Close test held physical connection pool.
+     */
     @AfterAll
     static void closeDatabase() {
         if (dataSource != null) {
@@ -54,7 +80,11 @@ class MysqlShardSegmentFenceTest {
         }
     }
 
-    /** 每个用例重新创建完全独立的版本化本地栅栏。 */
+    /**
+     * Recreate a fully independent version version of local fence for each example.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeEach
     void reset() throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
@@ -76,31 +106,38 @@ class MysqlShardSegmentFenceTest {
         }
     }
 
-    /** 安装重放不延长租约，范围重叠与其他 owner 都不能取得同一时间槽。 */
+    /**
+     * Installation replay does not extend lease and overlaps with other owners cannot get the same slot.
+     */
     @Test
     void installReplayMustPreserveIdentityAndRejectOverlap() {
         var owner = lease(101, 104, "owner-a");
         var installed = fence.install(owner, 60_000);
         var replay = fence.install(owner, 60_000);
-        assertEquals(installed.expiresAtMillis(), replay.expiresAtMillis());
-        assertEquals(1, replay.generation());
+        Assertions.assertEquals(installed.expiresAtMillis(), replay.expiresAtMillis());
+        Assertions.assertEquals(1, replay.generation());
         assertTrue(replay.active());
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> fence.install(lease(103, 106, "owner-b"),
                         60_000)).errorCode());
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> fence.install(lease(101, 104, "owner-b"),
                         60_000)).errorCode());
         assertTrue(fence.renew(owner, 60_000).active());
     }
 
-    /** 排他接管等待持共享栅栏的本地提交结束，旧代数之后不能新增提交。 */
+    /**
+     * The platoon takes over the local commit waiting to hold shared fence, and cannot add commit after the old algebra.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void fencingMustWaitForInFlightLocalCommit() throws Exception {
         var owner = lease(101, 104, "owner-a");
         fence.install(owner, 60_000);
-        try (Connection writer = dataSource.getConnection();
-             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (
+                Connection writer = dataSource.getConnection();
+                var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             writer.setAutoCommit(false);
             assertTrue(fence.lockForCommit(writer, owner, 101));
             var takeover = workers.submit(() -> fence.fence(owner));
@@ -114,18 +151,22 @@ class MysqlShardSegmentFenceTest {
             assertTrue(takeover.get(5, TimeUnit.SECONDS));
         }
         assertFalse(fence.snapshot(owner.firstTs()).active());
-        assertEquals(2, fence.snapshot(owner.firstTs()).generation());
+        Assertions.assertEquals(2, fence.snapshot(owner.firstTs()).generation());
         assertFalse(fence.fence(owner));
         try (Connection late = dataSource.getConnection()) {
             late.setAutoCommit(false);
             assertFalse(fence.lockForCommit(late, owner, 101));
             late.rollback();
         }
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> fence.renew(owner, 60_000)).errorCode());
     }
 
-    /** 分片租约到期后即使中心尚未接管，也不能再开启新的本地提交。 */
+    /**
+     * Shard lease cannot open a new local commit even if the centre has not been taken over by its expiry date.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void expiredLocalLeaseMustRejectNewCommitAndRenewal() throws Exception {
         var owner = lease(101, 104, "owner-a");
@@ -133,27 +174,29 @@ class MysqlShardSegmentFenceTest {
         Thread.sleep(50);
         try (Connection late = dataSource.getConnection()) {
             late.setAutoCommit(false);
-            assertEquals(ErrorCode.TRANSACTION_ABORTED,
+            Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                     assertThrows(MvccException.class, () -> fence.lockForCommit(late, owner, 101)).errorCode());
             late.rollback();
         }
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> fence.renew(owner, 60_000)).errorCode());
         assertTrue(fence.fence(owner));
     }
 
-    /** 分片安装尚未落盘时接管须写入墓碑，阻止迟到安装和首次物理提交。 */
+    /**
+     * The shard installation must be written to tombstone when it has not landed, preventing late installation and initial physical commit.
+     */
     @Test
     void missingFenceMustPersistTombstoneBeforeCenterSealsSlots() {
         var owner = lease(101, 104, "owner-a");
         assertTrue(fence.fence(owner));
         assertFalse(fence.snapshot(101).active());
-        assertEquals(2, fence.snapshot(101).generation());
+        Assertions.assertEquals(2, fence.snapshot(101).generation());
         assertFalse(fence.fence(owner));
         assertTrue(fence.scanFenced(owner, 100, 10).isEmpty());
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> fence.install(owner, 60_000)).errorCode());
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         10, 100, 101, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:tombstone", new byte[]{1})))).errorCode());
@@ -161,7 +204,11 @@ class MysqlShardSegmentFenceTest {
         assertTrue(shard.participantRecord(10).isEmpty());
     }
 
-    /** 安装与缺行 fencing 无论谁先执行，最终都只能留下不可再提交的物理栅栏。 */
+    /**
+     * Installation and absence of fencing will eventually leave no more than commit physical fence.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void concurrentInstallAndMissingFenceMustConverge() throws Exception {
         try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -174,7 +221,7 @@ class MysqlShardSegmentFenceTest {
                     try {
                         fence.install(owner, 60_000);
                         return true;
-                    } catch (MvccException ex) {
+                    } catch (final MvccException ex) {
                         if (ex.errorCode() != ErrorCode.TRANSACTION_ABORTED) {
                             throw ex;
                         }
@@ -189,14 +236,16 @@ class MysqlShardSegmentFenceTest {
                 install.get(5, TimeUnit.SECONDS);
                 assertTrue(takeover.get(5, TimeUnit.SECONDS));
                 assertFalse(fence.snapshot(first).active());
-                assertEquals(2, fence.snapshot(first).generation());
-                assertEquals(ErrorCode.TRANSACTION_ABORTED,
+                Assertions.assertEquals(2, fence.snapshot(first).generation());
+                Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                         assertThrows(MvccException.class, () -> fence.install(owner, 60_000)).errorCode());
             }
         }
     }
 
-    /** 分片版本、参与者终态和本地证明同事务提交；物理 fencing 后集合保持稳定。 */
+    /**
+     * Shard version, participant terminal state and local prove the same as transaction commit; physical fencing after collection remains stable.
+     */
     @Test
     void localCommitCandidateMustRemainRecoverableAfterFencing() {
         var owner = lease(101, 104, "owner-a");
@@ -205,22 +254,22 @@ class MysqlShardSegmentFenceTest {
         shard.directCommitFenced(fence, owner, 10, 100, 101, 60_000,
                 IsolationLevel.REPEATABLE_READ, writes);
         var proof = fence.candidate(10).orElseThrow();
-        assertEquals(101, proof.commitTs());
-        assertEquals(100, proof.startTs());
-        assertEquals(TxStatus.COMMITTED, shard.participantRecord(10).orElseThrow().status());
+        Assertions.assertEquals(101, proof.commitTs());
+        Assertions.assertEquals(100, proof.startTs());
+        Assertions.assertEquals(TxStatus.COMMITTED, shard.participantRecord(10).orElseThrow().status());
         assertArrayEquals(new byte[]{7}, shard.get(new ReadContext(999, 101,
                 IsolationLevel.READ_COMMITTED), "local:first").orElseThrow().value());
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> fence.scanFenced(owner, 100, 10)).errorCode());
         assertTrue(fence.fence(owner));
-        assertEquals(List.of(proof), fence.scanFenced(owner, 100, 10));
+        Assertions.assertEquals(List.of(proof), fence.scanFenced(owner, 100, 10));
         shard.directCommitFenced(fence, owner, 10, 100, 101, 60_000,
                 IsolationLevel.REPEATABLE_READ, writes);
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         10, 100, 101, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:first", new byte[]{8})))).errorCode());
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         11, 100, 102, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:late", new byte[]{1})))).errorCode());
@@ -228,7 +277,9 @@ class MysqlShardSegmentFenceTest {
         assertTrue(shard.participantRecord(11).isEmpty());
     }
 
-    /** 写冲突不得产生候选证明或泄漏局部版本，接管扫描只看到先提交事务。 */
+    /**
+     * Write conflict shall not produce a candidate or leak local version and only the first commit transaction can be seen in the take-over scan.
+     */
     @Test
     void conflictMustNotLeaveLocalCandidate() {
         var owner = lease(101, 104, "owner-a");
@@ -236,17 +287,21 @@ class MysqlShardSegmentFenceTest {
         shard.directCommitFenced(fence, owner, 10, 100, 101, 60_000,
                 IsolationLevel.REPEATABLE_READ,
                 List.of(Mutation.put("local:conflict", new byte[]{1})));
-        assertEquals(ErrorCode.WRITE_CONFLICT,
+        Assertions.assertEquals(ErrorCode.WRITE_CONFLICT,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         11, 100, 102, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:conflict", new byte[]{2})))).errorCode());
         assertTrue(fence.candidate(11).isEmpty());
         assertTrue(shard.participantRecord(11).isEmpty());
         assertTrue(fence.fence(owner));
-        assertEquals(1, fence.scanFenced(owner, 100, 10).size());
+        Assertions.assertEquals(1, fence.scanFenced(owner, 100, 10).size());
     }
 
-    /** 候选插入失败须回滚已经写入的版本和本地 COMMITTED 终态。 */
+    /**
+     * The candidate for insertion failed with rollback already written version and local COMMITTED terminal state.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void candidateWriteFailureMustRollBackLocalCommit() throws Exception {
         var owner = lease(101, 104, "owner-a");
@@ -271,7 +326,9 @@ class MysqlShardSegmentFenceTest {
                 IsolationLevel.READ_COMMITTED), "local:rollback").isEmpty());
     }
 
-    /** 未完成中心决议的本地证明禁止 GC 越过其开始快照。 */
+    /**
+     * The local certificate for uncompleted centre decision forbids GC to cross its start snapshot.
+     */
     @Test
     void localCandidateMustPinShardSafePoint() {
         var owner = lease(101, 104, "owner-a");
@@ -279,16 +336,18 @@ class MysqlShardSegmentFenceTest {
         shard.directCommitFenced(fence, owner, 10, 100, 101, 60_000,
                 IsolationLevel.REPEATABLE_READ,
                 List.of(Mutation.put("local:gc-protected", new byte[]{9})));
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> shard.gc(101, 10)).errorCode());
         shard.gc(100, 10);
         assertTrue(fence.candidate(10).isPresent());
-        assertEquals(TxStatus.COMMITTED, shard.participantRecord(10).orElseThrow().status());
+        Assertions.assertEquals(TxStatus.COMMITTED, shard.participantRecord(10).orElseThrow().status());
         assertArrayEquals(new byte[]{9}, shard.get(new ReadContext(999, 101,
                 IsolationLevel.READ_COMMITTED), "local:gc-protected").orElseThrow().value());
     }
 
-    /** 单键服务器端例程在物理 fencing、重放和旧快照写冲突下保持原子证明。 */
+    /**
+     * The single-key server path maintains atomic proofs under physics fencing, replay and old snapshot write conflict.
+     */
     @Test
     void singleKeyProcedureMustPreserveFencingReplayAndConflict() {
         var owner = lease(101, 104, "owner-a");
@@ -297,8 +356,8 @@ class MysqlShardSegmentFenceTest {
         List<Mutation> writes = List.of(Mutation.put("local:procedure", new byte[]{6}));
         shard.directCommitFenced(fence, owner, 10, 100, 101, 60_000,
                 IsolationLevel.REPEATABLE_READ, writes);
-        assertEquals(101, fence.verifiedCandidate(10).orElseThrow().commitTs());
-        assertEquals(ErrorCode.WRITE_CONFLICT,
+        Assertions.assertEquals(101, fence.verifiedCandidate(10).orElseThrow().commitTs());
+        Assertions.assertEquals(ErrorCode.WRITE_CONFLICT,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         11, 100, 102, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:procedure", new byte[]{7})))).errorCode());
@@ -306,14 +365,16 @@ class MysqlShardSegmentFenceTest {
         assertTrue(fence.fence(owner));
         shard.directCommitFenced(fence, owner, 10, 100, 101, 60_000,
                 IsolationLevel.REPEATABLE_READ, writes);
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         12, 100, 103, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:late-procedure", new byte[]{8})))).errorCode());
-        assertEquals(1, fence.scanFenced(owner, 100, 10).size());
+        Assertions.assertEquals(1, fence.scanFenced(owner, 100, 10).size());
     }
 
-    /** 第三版直接终态例程仍须校验写冲突、旧代数重放及封段后迟到请求。 */
+    /**
+     * The third version of the direct terminal state routine still requires late requests for validate write conflict, old algebra replay and cover.
+     */
     @Test
     void singleKeyProcedureV3MustPreserveFencingReplayAndConflict() {
         var owner = lease(101, 104, "owner-a");
@@ -322,9 +383,9 @@ class MysqlShardSegmentFenceTest {
         List<Mutation> writes = List.of(Mutation.put("local:procedure-v3", new byte[]{6}));
         shard.directCommitFenced(fence, owner, 10, 100, 101, 60_000,
                 IsolationLevel.REPEATABLE_READ, writes);
-        assertEquals(101, fence.verifiedCandidate(10).orElseThrow().commitTs());
-        assertEquals(TxStatus.COMMITTED, shard.participantRecord(10).orElseThrow().status());
-        assertEquals(ErrorCode.WRITE_CONFLICT,
+        Assertions.assertEquals(101, fence.verifiedCandidate(10).orElseThrow().commitTs());
+        Assertions.assertEquals(TxStatus.COMMITTED, shard.participantRecord(10).orElseThrow().status());
+        Assertions.assertEquals(ErrorCode.WRITE_CONFLICT,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         11, 100, 102, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:procedure-v3", new byte[]{7})))).errorCode());
@@ -332,18 +393,22 @@ class MysqlShardSegmentFenceTest {
         assertTrue(fence.fence(owner));
         shard.directCommitFenced(fence, owner, 10, 100, 101, 60_000,
                 IsolationLevel.REPEATABLE_READ, writes);
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         10, 100, 101, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:procedure-v3", new byte[]{9})))).errorCode());
-        assertEquals(ErrorCode.TRANSACTION_ABORTED,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_ABORTED,
                 assertThrows(MvccException.class, () -> shard.directCommitFenced(fence, owner,
                         12, 100, 103, 60_000, IsolationLevel.REPEATABLE_READ,
                         List.of(Mutation.put("local:late-procedure-v3", new byte[]{8})))).errorCode());
-        assertEquals(1, fence.scanFenced(owner, 100, 10).size());
+        Assertions.assertEquals(1, fence.scanFenced(owner, 100, 10).size());
     }
 
-    /** 并发同事务号只能有一份不可逆版本与候选，失败调用的本地写必须回滚。 */
+    /**
+     * Concurrent and transaction ID can only have one irreversible version with a candidate. The local script that failed to be called must be rollback.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void singleKeyProcedureV3ConcurrentIdentityRaceMustHaveOneWinner() throws Exception {
         var owner = lease(101, 104, "owner-a");
@@ -358,7 +423,7 @@ class MysqlShardSegmentFenceTest {
                             IsolationLevel.REPEATABLE_READ,
                             List.of(Mutation.put("local:v3-race:a", new byte[]{1})));
                     return true;
-                } catch (MvccException ex) {
+                } catch (final MvccException ex) {
                     return false;
                 }
             });
@@ -369,7 +434,7 @@ class MysqlShardSegmentFenceTest {
                             IsolationLevel.REPEATABLE_READ,
                             List.of(Mutation.put("local:v3-race:b", new byte[]{2})));
                     return true;
-                } catch (MvccException ex) {
+                } catch (final MvccException ex) {
                     return false;
                 }
             });
@@ -377,13 +442,17 @@ class MysqlShardSegmentFenceTest {
             assertTrue(first.get(5, TimeUnit.SECONDS) ^ second.get(5, TimeUnit.SECONDS));
         }
         var proof = fence.verifiedCandidate(10).orElseThrow();
-        assertEquals(proof.commitTs(), shard.participantRecord(10).orElseThrow().commitTs());
+        Assertions.assertEquals(proof.commitTs(), shard.participantRecord(10).orElseThrow().commitTs());
         var reader = new ReadContext(999, 102, IsolationLevel.READ_COMMITTED);
         assertTrue(shard.get(reader, "local:v3-race:a").isPresent()
                 ^ shard.get(reader, "local:v3-race:b").isPresent());
     }
 
-    /** 两笔旧快照写在业务键锁前排队，后取得锁者必须看见先提交的版本。 */
+    /**
+     * Two old snapshot s are queuing in front of the key lock, after which the locker must see the version first.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void singleKeyProcedureV3MustRecheckConflictAfterKeyLockWait() throws Exception {
         var owner = lease(101, 104, "owner-a");
@@ -392,8 +461,9 @@ class MysqlShardSegmentFenceTest {
         try (Connection blocker = dataSource.getConnection(); Statement statement = blocker.createStatement()) {
             statement.execute("insert into mvcc_key_lock(user_key) values ('local:v3-stale-snapshot')");
             blocker.setAutoCommit(false);
-            try (var locked = statement.executeQuery("select user_key from mvcc_key_lock "
-                    + "where user_key = 'local:v3-stale-snapshot' for update")) {
+            try (
+                    var locked = statement.executeQuery("select user_key from mvcc_key_lock "
+                            + "where user_key = 'local:v3-stale-snapshot' for update")) {
                 assertTrue(locked.next());
             }
             var start = new CountDownLatch(1);
@@ -405,7 +475,7 @@ class MysqlShardSegmentFenceTest {
                                 IsolationLevel.REPEATABLE_READ,
                                 List.of(Mutation.put("local:v3-stale-snapshot", new byte[]{1})));
                         return true;
-                    } catch (MvccException ex) {
+                    } catch (final MvccException ex) {
                         return false;
                     }
                 });
@@ -416,7 +486,7 @@ class MysqlShardSegmentFenceTest {
                                 IsolationLevel.REPEATABLE_READ,
                                 List.of(Mutation.put("local:v3-stale-snapshot", new byte[]{2})));
                         return true;
-                    } catch (MvccException ex) {
+                    } catch (final MvccException ex) {
                         return false;
                     }
                 });
@@ -431,7 +501,11 @@ class MysqlShardSegmentFenceTest {
         assertTrue(fence.candidate(10).isPresent() ^ fence.candidate(11).isPresent());
     }
 
-    /** 回滚与第三版直接提交竞赛只能留下 COMMITTED 候选或 ABORTED 终态之一。 */
+    /**
+     * Rollback direct with the third version of the commit competition can only leave COMMITTED candidate or one of ABORTED terminal state.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void singleKeyProcedureV3AbortRaceMustRemainAtomic() throws Exception {
         var owner = lease(101, 104, "owner-a");
@@ -446,7 +520,7 @@ class MysqlShardSegmentFenceTest {
                             IsolationLevel.REPEATABLE_READ,
                             List.of(Mutation.put("local:v3-abort-race", new byte[]{3})));
                     return true;
-                } catch (MvccException ex) {
+                } catch (final MvccException ex) {
                     return false;
                 }
             });
@@ -460,12 +534,12 @@ class MysqlShardSegmentFenceTest {
             assertTrue(abort.get(5, TimeUnit.SECONDS));
             TxStatus status = shard.participantRecord(10).orElseThrow().status();
             if (committed) {
-                assertEquals(TxStatus.COMMITTED, status);
+                Assertions.assertEquals(TxStatus.COMMITTED, status);
                 assertTrue(fence.candidate(10).isPresent());
                 assertArrayEquals(new byte[]{3}, shard.get(new ReadContext(999, 101,
                         IsolationLevel.READ_COMMITTED), "local:v3-abort-race").orElseThrow().value());
             } else {
-                assertEquals(TxStatus.ABORTED, status);
+                Assertions.assertEquals(TxStatus.ABORTED, status);
                 assertTrue(fence.candidate(10).isEmpty());
                 assertTrue(shard.get(new ReadContext(999, 101,
                         IsolationLevel.READ_COMMITTED), "local:v3-abort-race").isEmpty());
@@ -473,7 +547,11 @@ class MysqlShardSegmentFenceTest {
         }
     }
 
-    /** 原版单键调用的候选插入失败也须回滚本地版本和参与者终态。 */
+    /**
+     * Rollback local version and participant terminal state are also required for candidate insertion of original single key.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void singleKeyProcedureCandidateFailureMustRollBack() throws Exception {
         var owner = lease(101, 104, "owner-a");
@@ -499,7 +577,11 @@ class MysqlShardSegmentFenceTest {
                 IsolationLevel.READ_COMMITTED), "local:procedure-rollback").isEmpty());
     }
 
-    /** 第三版候选插入失败必须同时回滚数据版本和直接写入的 COMMITTED 终态。 */
+    /**
+     * The third version of the candidate for insertion has to be both rollback data version and a directly written COMMITTED terminal state.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void singleKeyProcedureV3CandidateFailureMustRollBack() throws Exception {
         var owner = lease(101, 104, "owner-a");
@@ -525,8 +607,15 @@ class MysqlShardSegmentFenceTest {
                 IsolationLevel.READ_COMMITTED), "local:procedure-v3-rollback").isEmpty());
     }
 
-    /** 构造一个只用于本地 shard fencing 的持久控制段身份。 */
-    private PublicationSegmentLease lease(long first, long last, String ownerId) {
+    /**
+     * Construct an durable control segment for local shell funcing only.
+     *
+     * @param first first
+     * @param last last
+     * @param ownerId owner id
+     * @return the operation result
+     */
+    private PublicationSegmentLease lease(final long first, final long last, final String ownerId) {
         return new PublicationSegmentLease(first, last, ownerId, 1, Long.MAX_VALUE);
     }
 }

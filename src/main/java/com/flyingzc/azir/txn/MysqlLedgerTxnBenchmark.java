@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -28,14 +44,25 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 隔离数据库中的新账本两分片完整事务压测入口。 */
+/**
+ * Separates the new database book with two shard complete transaction pressure access.
+ */
 public final class MysqlLedgerTxnBenchmark {
-    /** 防止实例化基准程序。 */
+
+    /**
+     * Prevents exemplifying benchmark programs.
+     */
     private MysqlLedgerTxnBenchmark() {
     }
 
-    /** 使用明确的隔离重置开关运行定时并发写事务。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Run timed concurrent writing transaction using a clear segregation reset switch.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("ledger benchmark requires AZIR_TX_RESET=true on an isolated database");
         }
@@ -64,9 +91,10 @@ public final class MysqlLedgerTxnBenchmark {
                 || writeShards < 1 || writeShards > 2) {
             throw new IllegalArgumentException("invalid benchmark concurrency or duration");
         }
-        try (HikariDataSource control = pool("AZIR_TX_CONTROL_JDBC", "control");
-             HikariDataSource firstData = pool("AZIR_TX_SHARD1_JDBC", "shard_1");
-             HikariDataSource secondData = pool("AZIR_TX_SHARD2_JDBC", "shard_2")) {
+        try (
+                HikariDataSource control = pool("AZIR_TX_CONTROL_JDBC", "control");
+                HikariDataSource firstData = pool("AZIR_TX_SHARD1_JDBC", "shard_1");
+                HikariDataSource secondData = pool("AZIR_TX_SHARD2_JDBC", "shard_2")) {
             var tso = new MysqlTimestampOracle(control);
             var metadata = new MysqlTransactionMetadataStore(control);
             var oldSafePoint = new MysqlSafePointStore(control);
@@ -92,7 +120,8 @@ public final class MysqlLedgerTxnBenchmark {
             boolean asyncCommit = Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "true"));
             var options = new TransactionOptions(LockWaitPolicy.mysqlLikeDefaults(),
                     TransactionRetryPolicy.mysqlLikeDefaults(), asyncCommit
-                    ? CrossShardCommitPolicy.asyncParallel(16) : CrossShardCommitPolicy.parallel(),
+                            ? CrossShardCommitPolicy.asyncParallel(16)
+                            : CrossShardCommitPolicy.parallel(),
                     true, true, false, limits);
             InMemoryTransactionMetrics stageMetrics = Boolean.parseBoolean(
                     env("AZIR_TX_STAGE_METRICS", "false")) ? new InMemoryTransactionMetrics() : null;
@@ -114,20 +143,21 @@ public final class MysqlLedgerTxnBenchmark {
                         Boolean.parseBoolean(env("AZIR_TX_SEGMENT_OVERLAP_MATERIALIZATION", "false")),
                         Boolean.parseBoolean(env("AZIR_TX_SEGMENT_FAST_MATERIALIZATION", "false")),
                         Boolean.parseBoolean(env("AZIR_TX_SEGMENT_FAST_COMMIT_PROC", "false")));
-                try (HikariDataSource backgroundControl = backgroundPool("AZIR_TX_CONTROL_JDBC", "control");
-                     HikariDataSource backgroundFirst = backgroundPool("AZIR_TX_SHARD1_JDBC", "shard_1");
-                     HikariDataSource backgroundSecond = backgroundPool("AZIR_TX_SHARD2_JDBC", "shard_2");
-                     var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
-                             Map.of("shard-1", firstData, "shard-2", secondData),
-                             Map.of("shard-1", backgroundFirst, "shard-2", backgroundSecond),
-                             options, segmentOptions,
-                             stageMetrics == null ? NoOpTransactionMetrics.INSTANCE : stageMetrics)) {
+                try (
+                        HikariDataSource backgroundControl = backgroundPool("AZIR_TX_CONTROL_JDBC", "control");
+                        HikariDataSource backgroundFirst = backgroundPool("AZIR_TX_SHARD1_JDBC", "shard_1");
+                        HikariDataSource backgroundSecond = backgroundPool("AZIR_TX_SHARD2_JDBC", "shard_2");
+                        var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
+                                Map.of("shard-1", firstData, "shard-2", secondData),
+                                Map.of("shard-1", backgroundFirst, "shard-2", backgroundSecond),
+                                options, segmentOptions,
+                                stageMetrics == null ? NoOpTransactionMetrics.INSTANCE : stageMetrics)) {
                     runAndReport(runtime.transactionManager(), stageMetrics, concurrency,
                             durationSeconds, shardConcurrency, asyncCommit, windowSeconds, writeShards, readOnly);
                     System.out.printf("SEGMENT_BACKGROUND recovery_runs=%d recovery_failures=%d "
-                                    + "publication_runs=%d publication_failures=%d gc_runs=%d gc_failures=%d "
-                                    + "owner_runs=%d owner_failures=%d owner_error=%s recovery_error=%s "
-                                    + "publication_error=%s gc_error=%s%n",
+                            + "publication_runs=%d publication_failures=%d gc_runs=%d gc_failures=%d "
+                            + "owner_runs=%d owner_failures=%d owner_error=%s recovery_error=%s "
+                            + "publication_error=%s gc_error=%s%n",
                             runtime.maintenanceScheduler().recoveryStats().runCount(),
                             runtime.maintenanceScheduler().recoveryStats().failureCount(),
                             runtime.maintenanceScheduler().publicationStats().runCount(),
@@ -141,21 +171,22 @@ public final class MysqlLedgerTxnBenchmark {
                             runtime.maintenanceScheduler().lastGcFailure());
                 }
             } else if (backgroundEnabled) {
-                try (HikariDataSource backgroundControl = backgroundPool("AZIR_TX_CONTROL_JDBC", "control");
-                     HikariDataSource backgroundFirst = backgroundPool("AZIR_TX_SHARD1_JDBC", "shard_1");
-                     HikariDataSource backgroundSecond = backgroundPool("AZIR_TX_SHARD2_JDBC", "shard_2");
-                     var runtime = MysqlLedgerTransactionRuntime.open(control, backgroundControl,
-                             Map.of("shard-1", firstData, "shard-2", secondData),
-                             Map.of("shard-1", backgroundFirst, "shard-2", backgroundSecond),
-                             options, new LedgerRuntimeOptions(128, 128, 100, 1_000,
-                                     batchControlCommit, batchWorkers, directSingleShard,
-                                     batchBegin, beginWorkers, coordinatorSnapshots,
-                                     coordinatorLeaseMillis, coordinatorRefreshMillis),
-                             stageMetrics == null ? NoOpTransactionMetrics.INSTANCE : stageMetrics)) {
+                try (
+                        HikariDataSource backgroundControl = backgroundPool("AZIR_TX_CONTROL_JDBC", "control");
+                        HikariDataSource backgroundFirst = backgroundPool("AZIR_TX_SHARD1_JDBC", "shard_1");
+                        HikariDataSource backgroundSecond = backgroundPool("AZIR_TX_SHARD2_JDBC", "shard_2");
+                        var runtime = MysqlLedgerTransactionRuntime.open(control, backgroundControl,
+                                Map.of("shard-1", firstData, "shard-2", secondData),
+                                Map.of("shard-1", backgroundFirst, "shard-2", backgroundSecond),
+                                options, new LedgerRuntimeOptions(128, 128, 100, 1_000,
+                                        batchControlCommit, batchWorkers, directSingleShard,
+                                        batchBegin, beginWorkers, coordinatorSnapshots,
+                                        coordinatorLeaseMillis, coordinatorRefreshMillis),
+                                stageMetrics == null ? NoOpTransactionMetrics.INSTANCE : stageMetrics)) {
                     runAndReport(runtime.transactionManager(), stageMetrics, concurrency,
                             durationSeconds, shardConcurrency, asyncCommit, windowSeconds, writeShards, readOnly);
                     System.out.printf("LEDGER_BACKGROUND recovery_runs=%d recovery_failures=%d "
-                                    + "gc_runs=%d gc_failures=%d recovery_error=%s gc_error=%s%n",
+                            + "gc_runs=%d gc_failures=%d recovery_error=%s gc_error=%s%n",
                             runtime.maintenanceScheduler().recoveryStats().runCount(),
                             runtime.maintenanceScheduler().recoveryStats().failureCount(),
                             runtime.maintenanceScheduler().gcStats().runCount(),
@@ -164,11 +195,12 @@ public final class MysqlLedgerTxnBenchmark {
                             runtime.maintenanceScheduler().lastGcFailure());
                 }
             } else {
-                try (var manager = new TransactionManager(tso, metadata, NoOpSafePointStore.INSTANCE,
-                        options, Map.of("shard-1", first, "shard-2", second),
-                        stageMetrics == null ? NoOpTransactionMetrics.INSTANCE : stageMetrics,
-                        ledger, batchControlCommit, batchWorkers, directSingleShard,
-                        batchBegin, beginWorkers)) {
+                try (
+                        var manager = new TransactionManager(tso, metadata, NoOpSafePointStore.INSTANCE,
+                                options, Map.of("shard-1", first, "shard-2", second),
+                                stageMetrics == null ? NoOpTransactionMetrics.INSTANCE : stageMetrics,
+                                ledger, batchControlCommit, batchWorkers, directSingleShard,
+                                batchBegin, beginWorkers)) {
                     runAndReport(manager, stageMetrics, concurrency,
                             durationSeconds, shardConcurrency, asyncCommit, windowSeconds, writeShards, readOnly);
                 }
@@ -176,11 +208,24 @@ public final class MysqlLedgerTxnBenchmark {
         }
     }
 
-    /** 统一输出前台吞吐、批次形态及可选阶段指标。 */
-    private static void runAndReport(TransactionManager manager, InMemoryTransactionMetrics stageMetrics, int concurrency,
-                                     int durationSeconds, int shardConcurrency,
-                                     boolean asyncCommit, int windowSeconds, int writeShards,
-                                     boolean readOnly) throws Exception {
+    /**
+     * Harmonizes the output of foreground throughput, batch form and optional stage indicators.
+     *
+     * @param manager manager
+     * @param stageMetrics stage metrics
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param shardConcurrency shard concurrency
+     * @param asyncCommit async commit
+     * @param windowSeconds window seconds
+     * @param writeShards write shards
+     * @param readOnly read only
+     * @throws Exception if the operation cannot complete
+     */
+    private static void runAndReport(final TransactionManager manager, final InMemoryTransactionMetrics stageMetrics, final int concurrency,
+                                     final int durationSeconds, final int shardConcurrency,
+                                     final boolean asyncCommit, final int windowSeconds, final int writeShards,
+                                     final boolean readOnly) throws Exception {
         run(manager, concurrency, durationSeconds, shardConcurrency, asyncCommit, windowSeconds,
                 writeShards, readOnly);
         var batchStats = manager.ledgerBatchStats();
@@ -192,7 +237,7 @@ public final class MysqlLedgerTxnBenchmark {
             var timing = manager.ledgerBatchTiming();
             if (timing.calls() > 0) {
                 System.out.printf("LEDGER_BATCH_TIME calls=%d validation_avg_ms=%.3f state_wait_avg_ms=%.3f "
-                                + "write_avg_ms=%.3f finish_avg_ms=%.3f%n",
+                        + "write_avg_ms=%.3f finish_avg_ms=%.3f%n",
                         timing.calls(), timing.validationNanos() / 1_000_000.0 / timing.calls(),
                         timing.stateWaitNanos() / 1_000_000.0 / timing.calls(),
                         timing.writeNanos() / 1_000_000.0 / timing.calls(),
@@ -202,7 +247,7 @@ public final class MysqlLedgerTxnBenchmark {
         var segmentBatch = manager.segmentBatchStats();
         if (segmentBatch != null) {
             System.out.printf("SEGMENT_BATCH groups=%d requests=%d singletons=%d unknown_groups=%d "
-                            + "synchronous_fallbacks=%d avg_size=%.2f%n",
+                    + "synchronous_fallbacks=%d avg_size=%.2f%n",
                     segmentBatch.groups(), segmentBatch.requests(), segmentBatch.singletons(),
                     segmentBatch.unknownGroups(), segmentBatch.synchronousFallbacks(),
                     segmentBatch.groups() == 0 ? 0.0
@@ -233,22 +278,39 @@ public final class MysqlLedgerTxnBenchmark {
         }
     }
 
-    /** 创建带固定凭据的本地基准连接池。 */
-    private static HikariDataSource pool(String key, String database) {
+    /**
+     * Create local benchmark connection pool with fixed receipt.
+     *
+     * @param key business key
+     * @param database database
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String key, final String database) {
         String url = env(key, "jdbc:mysql://127.0.0.1:23306/" + database);
         return (HikariDataSource) MysqlDataSourceFactory.create(url,
                 env("AZIR_TX_USERNAME", "root"), env("AZIR_TX_PASSWORD", "root"));
     }
 
-    /** 为恢复和 GC 使用同库但独立预算的后台连接池。 */
-    private static HikariDataSource backgroundPool(String key, String database) {
+    /**
+     * Same database but independent budget background connection pool is used for recovery and GC.
+     *
+     * @param key business key
+     * @param database database
+     * @return the operation result
+     */
+    private static HikariDataSource backgroundPool(final String key, final String database) {
         String url = env(key, "jdbc:mysql://127.0.0.1:23306/" + database);
         return (HikariDataSource) MysqlDataSourceFactory.createBackground(url,
                 env("AZIR_TX_USERNAME", "root"), env("AZIR_TX_PASSWORD", "root"));
     }
 
-    /** 清理所有旧控制记录与隔离账本结构，禁止复用线上协议状态。 */
-    private static void resetControl(HikariDataSource dataSource) throws Exception {
+    /**
+     * Clear all old control records and segregated book structures and prohibit re-use online agreement status.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
+     */
+    private static void resetControl(final HikariDataSource dataSource) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("drop table if exists mvcc_publication_segment_slot_v1");
             statement.execute("drop table if exists mvcc_publication_segment_v1");
@@ -268,8 +330,13 @@ public final class MysqlLedgerTxnBenchmark {
         }
     }
 
-    /** 重置一个分片的版本、意向、终态与本地安全点。 */
-    private static void resetShard(HikariDataSource dataSource) throws Exception {
+    /**
+     * Reset version, intent, terminal state and local safe point for an shard.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
+     */
+    private static void resetShard(final HikariDataSource dataSource) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.executeUpdate("delete from mvcc_intent");
             statement.executeUpdate("delete from mvcc_data");
@@ -280,10 +347,22 @@ public final class MysqlLedgerTxnBenchmark {
         }
     }
 
-    /** 统计前台确认吞吐、事务尾延迟和异步物化积压。 */
-    private static void run(TransactionManager manager, int concurrency, int durationSeconds,
-                            int shardConcurrency, boolean asyncCommit, int windowSeconds,
-                            int writeShards, boolean readOnly) throws Exception {
+    /**
+     * Statistics foreground confirms the backlog of throughput, transaction tail delay and walk materialization.
+     *
+     * @param manager manager
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param shardConcurrency shard concurrency
+     * @param asyncCommit async commit
+     * @param windowSeconds window seconds
+     * @param writeShards write shards
+     * @param readOnly read only
+     * @throws Exception if the operation cannot complete
+     */
+    private static void run(final TransactionManager manager, final int concurrency, final int durationSeconds,
+                            final int shardConcurrency, final boolean asyncCommit, final int windowSeconds,
+                            final int writeShards, final boolean readOnly) throws Exception {
         if (readOnly) {
             manager.execute(IsolationLevel.REPEATABLE_READ, tx -> {
                 manager.put(tx, "shard-1", "ledger:read:seed", bytes("seed"));
@@ -324,12 +403,12 @@ public final class MysqlLedgerTxnBenchmark {
                                 });
                                 committed.increment();
                                 latencies.add(System.nanoTime() - started);
-                            } catch (RuntimeException ex) {
+                            } catch (final RuntimeException ex) {
                                 failures.increment();
                                 firstFailure.compareAndSet(null, describeFailure(ex));
                             }
                         }
-                    } catch (InterruptedException ex) {
+                    } catch (final InterruptedException ex) {
                         Thread.currentThread().interrupt();
                     } finally {
                         done.countDown();
@@ -339,8 +418,7 @@ public final class MysqlLedgerTxnBenchmark {
             ready.await();
             long started = System.nanoTime();
             start.countDown();
-            Thread reporter = Thread.ofVirtual().name("mvcc-ledger-bench-window").start(() ->
-                    reportWindows(manager, committed, failures, windowSeconds));
+            Thread reporter = Thread.ofVirtual().name("mvcc-ledger-bench-window").start(() -> reportWindows(manager, committed, failures, windowSeconds));
             done.await();
             reporter.interrupt();
             reporter.join();
@@ -351,7 +429,7 @@ public final class MysqlLedgerTxnBenchmark {
             var stats = manager.runtimeStats();
             String mode = Boolean.parseBoolean(env("AZIR_TX_SEGMENT_RUNTIME", "false")) ? "SEGMENT" : "LEDGER";
             System.out.printf("%s_BENCH concurrency=%d duration_s=%.2f read_only=%s write_shards=%d shard_concurrency=%d async_commit=%s attempts=%d committed=%d failures=%d "
-                            + "commit_tps=%.2f p99_ms=%.2f async_queued=%d background_failures=%d first_failure=%s%n",
+                    + "commit_tps=%.2f p99_ms=%.2f async_queued=%d background_failures=%d first_failure=%s%n",
                     mode, concurrency, seconds, readOnly, writeShards, shardConcurrency, asyncCommit,
                     attempts.sum(), committed.sum(), failures.sum(),
                     committed.sum() / seconds, p99Millis, stats.asyncQueued(), stats.backgroundFailures(),
@@ -359,9 +437,16 @@ public final class MysqlLedgerTxnBenchmark {
         }
     }
 
-    /** 每个固定窗口打印实际完成吞吐和批次规模，识别长运行期间的退化。 */
-    private static void reportWindows(TransactionManager manager, LongAdder committed, LongAdder failures,
-                                      int windowSeconds) {
+    /**
+     * Each fixed window print actually completes the throughput and batch scales to recognize degradation during long run.
+     *
+     * @param manager manager
+     * @param committed committed
+     * @param failures failures
+     * @param windowSeconds window seconds
+     */
+    private static void reportWindows(final TransactionManager manager, final LongAdder committed, final LongAdder failures,
+                                      final int windowSeconds) {
         long previousCommitted = 0;
         long previousFailures = 0;
         long previousGroups = 0;
@@ -371,7 +456,7 @@ public final class MysqlLedgerTxnBenchmark {
         while (true) {
             try {
                 Thread.sleep(TimeUnit.SECONDS.toMillis(windowSeconds));
-            } catch (InterruptedException ex) {
+            } catch (final InterruptedException ex) {
                 Thread.currentThread().interrupt();
                 return;
             }
@@ -388,7 +473,7 @@ public final class MysqlLedgerTxnBenchmark {
             long requests = totalRequests - previousRequests;
             String mode = Boolean.parseBoolean(env("AZIR_TX_SEGMENT_RUNTIME", "false")) ? "SEGMENT" : "LEDGER";
             System.out.printf("%s_WINDOW index=%d elapsed_s=%.2f commit_tps=%.2f committed=%d failures=%d "
-                            + "batch_groups=%d batch_avg_size=%.2f host_load=%.2f%n",
+                    + "batch_groups=%d batch_avg_size=%.2f host_load=%.2f%n",
                     mode, ++window, (now - previousAt) / 1_000_000_000.0,
                     (currentCommitted - previousCommitted) / ((now - previousAt) / 1_000_000_000.0),
                     currentCommitted - previousCommitted, currentFailures - previousFailures,
@@ -402,19 +487,35 @@ public final class MysqlLedgerTxnBenchmark {
         }
     }
 
-    /** 读取单个环境参数并使用仅供本地短测的默认值。 */
-    private static String env(String name, String fallback) {
+    /**
+     * Reads a single environment parameter and uses the default value for short local only.
+     *
+     * @param name name
+     * @param fallback fallback
+     * @return the operation result
+     */
+    private static String env(final String name, final String fallback) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? fallback : value;
     }
 
-    /** 把写入值编码成存储适配器的二进制格式。 */
-    private static byte[] bytes(String value) {
+    /**
+     * Encodes the writing value as a binary format for the storage adapter.
+     *
+     * @param value value to write
+     * @return the operation result
+     */
+    private static byte[] bytes(final String value) {
         return value.getBytes(StandardCharsets.UTF_8);
     }
 
-    /** 保留一条异常链的 SQLState 和错误码，区分协议回滚与连接结果未知。 */
-    private static String describeFailure(Throwable failure) {
+    /**
+     * Keeps SQLSate and error codes with an abnormal chain, distinguishing the protocol rollback from connection unknown outcome.
+     *
+     * @param failure failure
+     * @return the operation result
+     */
+    private static String describeFailure(final Throwable failure) {
         StringBuilder result = new StringBuilder();
         for (Throwable cause = failure; cause != null && result.length() < 800; cause = cause.getCause()) {
             if (!result.isEmpty()) {

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -28,40 +44,31 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 
-/** 单分片本地先提交协议的持久 owner 栅栏；中心接管必须先完成物理 fencing。 */
+/**
+ * Durable owner fence for single shard local; the centre must finish physics before taking over.
+ */
 public final class MysqlShardSegmentFence {
+
     private final String shardId;
+
     private final DataSource dataSource;
+
     private volatile boolean localSingleKeyProcedureReady;
+
     private volatile boolean localSingleKeyProcedureV3Ready;
+
     private volatile boolean useLocalSingleKeyProcedure;
+
     private volatile boolean useLocalSingleKeyProcedureV3;
 
-    /** 返回分片数据库时钟下的本地租约，而不复用控制库绝对时间。 */
-    public record FenceSnapshot(long segmentStart, long generation, long expiresAtMillis, boolean active) {
-        /** 拒绝没有持久代数或截止时间的本地栅栏视图。 */
-        public FenceSnapshot {
-            if (segmentStart < 1 || generation < 1 || expiresAtMillis < 1) {
-                throw new IllegalArgumentException("invalid local segment fence snapshot");
-            }
-        }
-    }
-
-    /** 与分片版本及参与者 COMMITTED 终态同事务持久化的本地候选证明。 */
-    public record CandidateProof(long segmentStart, long txId, long startTs, long commitTs,
-                                 long deadlineMillis, IsolationLevel isolationLevel, long ownerGeneration) {
-        /** 候选必须属于正代数且提交时间晚于其读快照。 */
-        public CandidateProof {
-            Objects.requireNonNull(isolationLevel, "isolationLevel");
-            if (segmentStart < 1 || txId == 0 || startTs < 0 || commitTs <= startTs
-                    || deadlineMillis < 1 || ownerGeneration < 1) {
-                throw new IllegalArgumentException("invalid local segment candidate proof");
-            }
-        }
-    }
-
-    /** 将 shard fence 绑定到一个确定的分片路由和物理连接池。 */
-    public MysqlShardSegmentFence(String shardId, DataSource dataSource) {
+    /**
+     * Staples the shard fence to a determined shard route and physics connection pool.
+     *
+     * @param shardId logical shard identifier
+     * @param dataSource database connection source
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public MysqlShardSegmentFence(final String shardId, final DataSource dataSource) {
         TransactionMetadataValidation.validateParticipant(0, shardId);
         if (shardId.length() > 128) {
             throw new IllegalArgumentException("local segment shard identity is too long");
@@ -70,17 +77,28 @@ public final class MysqlShardSegmentFence {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     }
 
-    /** 返回未来控制段必须精确绑定的目标分片。 */
+    /**
+     * Returns the target shard which must be precisely bound to the future control segment.
+     *
+     * @return the operation result
+     */
     public String shardId() {
         return shardId;
     }
 
-    /** 分片版本和 fence 必须在同一物理数据库事务中写入。 */
-    boolean usesDataSource(DataSource candidate) {
+    /**
+     * Shard version and fence must be written in the same physical database transaction.
+     *
+     * @param candidate candidate
+     * @return the operation result
+     */
+    boolean usesDataSource(final DataSource candidate) {
         return dataSource == candidate;
     }
 
-    /** 只显式创建独立版本表，默认 MySQL 参与者不会隐式启用本地先提交协议。 */
+    /**
+     * Creates a stand-alone version table only visible, the default MySQL participant does not implicitly enable local first commit protocols.
+     */
     public void initializeIsolated() {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("""
@@ -135,12 +153,14 @@ public final class MysqlShardSegmentFence {
             localSingleKeyProcedureReady = true;
             ensureSingleKeyCommitProcedureV3(connection);
             localSingleKeyProcedureV3Ready = true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("initialize local segment fence failed", ex);
         }
     }
 
-    /** 重启后验证版本化本地例程存在，缺失时仍可保留 Java 多语句回退路径。 */
+    /**
+     * The verify version local routine exists after restart, and Java Multi-Speech Back path is retained when missing.
+     */
     public void requireInitializedFastPath() {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select routine_name from information_schema.routines
@@ -162,12 +182,14 @@ public final class MysqlShardSegmentFence {
             }
             localSingleKeyProcedureReady = true;
             localSingleKeyProcedureV3Ready = v3;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("inspect local-first single-key procedure failed", ex);
         }
     }
 
-    /** 第二条路径须显式启用，默认继续使用已验证的 Java 本地事务。 */
+    /**
+     * The second path must be visiblely enabled and the verify Java local transaction default continues.
+     */
     public void enableSingleKeyProcedure() {
         if (!localSingleKeyProcedureReady) {
             throw illegal("local-first single-key procedure is not ready");
@@ -176,7 +198,9 @@ public final class MysqlShardSegmentFence {
         useLocalSingleKeyProcedureV3 = false;
     }
 
-    /** 仅显式容量实验选择避免早建读快照的第三版直接终态过程。 */
+    /**
+     * Only the visible capacity test selects to avoid a direct terminal state process for pre-reading snapshot.
+     */
     public void enableSingleKeyProcedureV3() {
         if (!localSingleKeyProcedureV3Ready) {
             throw illegal("local-first single-key v3 procedure is not ready");
@@ -185,14 +209,29 @@ public final class MysqlShardSegmentFence {
         useLocalSingleKeyProcedureV3 = true;
     }
 
-    /** 分片适配器只在明确启用且已探测例程时选择一次服务器调用。 */
+    /**
+     * The shard adaptor selects a server call only once when it is clearly activated and the routine has been detected.
+     *
+     * @return the operation result
+     */
     boolean singleKeyProcedureEnabled() {
         return useLocalSingleKeyProcedure && localSingleKeyProcedureReady;
     }
 
-    /** 单键物理提交在一次服务器调用内完成 fence、冲突、版本、终态和候选证明。 */
-    void commitSingleKey(PublicationSegmentLease lease, long txId, long startTs, long commitTs,
-                         long deadlineMillis, IsolationLevel isolationLevel, Mutation mutation) {
+    /**
+     * Single-key physics commit completes fence, conflict, version, terminal state and candidate certificates in a single server call.
+     *
+     * @param lease lease
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param deadlineMillis deadline millis
+     * @param isolationLevel global transaction isolation level
+     * @param mutation mutation
+     * @throws SQLException if the operation cannot complete
+     */
+    void commitSingleKey(final PublicationSegmentLease lease, final long txId, final long startTs, final long commitTs,
+                         final long deadlineMillis, final IsolationLevel isolationLevel, final Mutation mutation) {
         Objects.requireNonNull(isolationLevel, "isolationLevel");
         Objects.requireNonNull(mutation, "mutation");
         validateLease(lease, 1);
@@ -200,9 +239,11 @@ public final class MysqlShardSegmentFence {
             throw illegal("local-first single-key procedure is unavailable for this segment");
         }
         String routine = useLocalSingleKeyProcedureV3
-                ? "mvcc_local_first_commit_one_v3" : "mvcc_local_first_commit_one_v1";
-        try (Connection connection = dataSource.getConnection(); PreparedStatement call = connection.prepareStatement(
-                "call " + routine + "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                ? "mvcc_local_first_commit_one_v3"
+                : "mvcc_local_first_commit_one_v1";
+        try (
+                Connection connection = dataSource.getConnection(); PreparedStatement call = connection.prepareStatement(
+                        "call " + routine + "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
             if (!connection.getAutoCommit()) {
                 throw illegal("local-first single-key procedure requires auto-commit connection");
             }
@@ -226,7 +267,7 @@ public final class MysqlShardSegmentFence {
             if (!connection.getAutoCommit()) {
                 throw new SQLException("local-first single-key procedure left a transaction open");
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw switch (ex.getErrorCode()) {
                 case 33002, 33003, 33004, 33005 -> new MvccException(ErrorCode.ILLEGAL_STATE,
                         "local-first single-key identity differs from durable proof", false, txId, ex);
@@ -244,8 +285,13 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 版本化例程不修改旧存储过程，安装响应未知只重用原例程。 */
-    private void ensureSingleKeyCommitProcedure(Connection connection) throws SQLException {
+    /**
+     * The version routine does not modify the old storage process and the installation response is unknown only reused.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureSingleKeyCommitProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database()
@@ -392,15 +438,20 @@ public final class MysqlShardSegmentFence {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 第三版先以唯一参与者插入仲裁身份，避免键锁前的一致性读快照。 */
-    private void ensureSingleKeyCommitProcedureV3(Connection connection) throws SQLException {
+    /**
+     * Release 3 first inserts an arbitration identity with the only participant to avoid a consistent reading of snapshot before the key lock.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureSingleKeyCommitProcedureV3(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database()
@@ -501,20 +552,26 @@ public final class MysqlShardSegmentFence {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 每次跨中心预留的新段先安装到目标分片；完全相同的响应丢失重放不续命。 */
-    public FenceSnapshot install(PublicationSegmentLease lease, long leaseMillis) {
+    /**
+     * A new section is installed to target shard for each cross-centre; the exact same response is lost replay and not renewed.
+     *
+     * @param lease lease
+     * @param leaseMillis lease millis
+     * @return the operation result
+     */
+    public FenceSnapshot install(final PublicationSegmentLease lease, final long leaseMillis) {
         validateLease(lease, leaseMillis);
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 requireSchemaVersion(connection);
-                // 串行化安装，防止不同段范围交叠而共享同一提交时间戳。
+                // Serialized installation to prevent the overlap of different band ranges and share the same commit timestamp.
                 long retiredThrough = lockInstallState(connection);
                 FenceRow existing = lockFence(connection, lease.firstTs(), true);
                 if (existing != null) {
@@ -546,13 +603,19 @@ public final class MysqlShardSegmentFence {
                 }
                 return new FenceSnapshot(lease.firstTs(), lease.generation(), deadline, true);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("install local segment fence failed", ex);
         }
     }
 
-    /** 只在当前分片代数仍有效时按分片数据库时钟续租。 */
-    public FenceSnapshot renew(PublicationSegmentLease lease, long leaseMillis) {
+    /**
+     * Re-letting shard database hours only if the current shard algebra is still valid.
+     *
+     * @param lease lease
+     * @param leaseMillis lease millis
+     * @return the operation result
+     */
+    public FenceSnapshot renew(final PublicationSegmentLease lease, final long leaseMillis) {
         validateLease(lease, leaseMillis);
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
@@ -576,18 +639,23 @@ public final class MysqlShardSegmentFence {
                 }
                 return new FenceSnapshot(lease.firstTs(), lease.generation(), deadline, true);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("renew local segment fence failed", ex);
         }
     }
 
-    /** 排他 fencing 等待持共享锁的本地提交事务结束，然后拒绝旧代数新提交。 */
-    public boolean fence(PublicationSegmentLease lease) {
+    /**
+     * Freezing to wait for the end of local commit transaction with a shared lock and then rejecting the old algebra for new commit.
+     *
+     * @param lease lease
+     * @return the operation result
+     */
+    public boolean fence(final PublicationSegmentLease lease) {
         validateLease(lease, 1);
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 requireSchemaVersion(connection);
-                // 安装与缺行 fencing 共用状态行；先封存会留下持久墓碑阻止迟到安装。
+                // Installing and missing lines Fencing state line; first sealing will leave durable tombstone to prevent late installation.
                 long retiredThrough = lockInstallState(connection);
                 FenceRow current = lockFence(connection, lease.firstTs(), true);
                 if (current == null) {
@@ -642,13 +710,21 @@ public final class MysqlShardSegmentFence {
                 }
                 return true;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("fence local segment failed", ex);
         }
     }
 
-    /** 分片提交事务在同一 JDBC 事务中调用并持有共享锁直至本地终态落盘。 */
-    boolean lockForCommit(Connection connection, PublicationSegmentLease lease, long commitTs) throws SQLException {
+    /**
+     * Shard commit transaction is called in the same JDBC transaction and holds a shared lock until local terminal state drops.
+     *
+     * @param connection connection
+     * @param lease lease
+     * @param commitTs durable commit timestamp
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    boolean lockForCommit(final Connection connection, final PublicationSegmentLease lease, final long commitTs) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         validateLease(lease, 1);
         if (commitTs < lease.firstTs() || commitTs > lease.lastTs()) {
@@ -680,9 +756,15 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 由分片适配器在版本及本地终态所在的同一事务中插入恢复证明。 */
-    void insertCandidate(Connection connection, PublicationSegmentLease lease, CandidateProof proof)
-            throws SQLException {
+    /**
+     * Inserts recovery proof from the same transaction where version and local terminal state are found by an shard adaptor.
+     *
+     * @param connection connection
+     * @param lease lease
+     * @param proof proof
+     * @throws SQLException if the operation cannot complete
+     */
+    void insertCandidate(final Connection connection, final PublicationSegmentLease lease, final CandidateProof proof) throws SQLException {
         requireCandidateIdentity(lease, proof);
         try (PreparedStatement insert = connection.prepareStatement("""
                 insert into mvcc_local_segment_candidate_v1
@@ -704,41 +786,63 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 本地提交响应丢失后的重放必须核对同一段、事务、时间戳与隔离级别。 */
-    void requireCandidateReplay(Connection connection, PublicationSegmentLease lease, CandidateProof expected)
-            throws SQLException {
+    /**
+     * Local commit Response replay after loss must check the same paragraph, transaction, timestamp and isolation levels.
+     *
+     * @param connection connection
+     * @param lease lease
+     * @param expected expected
+     * @throws SQLException if the operation cannot complete
+     */
+    void requireCandidateReplay(final Connection connection, final PublicationSegmentLease lease, final CandidateProof expected) throws SQLException {
         requireCandidateIdentity(lease, expected);
-        CandidateProof actual = readCandidate(connection, expected.txId(), true).orElseThrow(() ->
-                illegal("committed local participant has no segment candidate proof"));
+        CandidateProof actual = readCandidate(connection, expected.txId(), true).orElseThrow(() -> illegal("committed local participant has no segment candidate proof"));
         if (!actual.equals(expected)) {
             throw illegal("local segment candidate replay changed durable identity");
         }
     }
 
-    /** 按事务编号读取已落分片的候选，响应未知时不依赖协调者内存。 */
-    public Optional<CandidateProof> candidate(long txId) {
+    /**
+     * Press transaction identifier to read the dropped shard candidate and do not rely on the coordinator memory when responding to unknown.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    public Optional<CandidateProof> candidate(final long txId) {
         try (Connection connection = dataSource.getConnection()) {
             return readCandidate(connection, txId, false);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read local segment candidate failed", ex);
         }
     }
 
-    /** 中心补决议前同时核对分片候选、本地 COMMITTED 终态和已落版本。 */
-    public Optional<CandidateProof> verifiedCandidate(long txId) {
+    /**
+     * Check shard candidate, local COMMITTED terminal state and dropped version before filling decision.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    public Optional<CandidateProof> verifiedCandidate(final long txId) {
         try (Connection connection = dataSource.getConnection()) {
             Optional<CandidateProof> proof = readCandidate(connection, txId, false);
             if (proof.isPresent()) {
                 verifyCandidate(connection, proof.get());
             }
             return proof;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("verify local segment candidate failed", ex);
         }
     }
 
-    /** 一次分片查询核对同批候选、参与者终态和版本证据，缺一笔即整批拒绝。 */
-    public List<CandidateProof> verifiedCandidates(List<Long> txIds) {
+    /**
+     * A single shard query cross-checks the evidence of candidates, participant terminal state and version and rejects it as a whole without one item.
+     *
+     * @param txIds tx ids
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public List<CandidateProof> verifiedCandidates(final List<Long> txIds) {
         if (txIds == null || txIds.isEmpty() || txIds.size() > 64
                 || new HashSet<>(txIds).size() != txIds.size()) {
             throw new IllegalArgumentException("invalid local candidate verification batch");
@@ -777,13 +881,21 @@ public final class MysqlShardSegmentFence {
                         "local candidate batch has missing durable shard proof", false, null);
             }
             return txIds.stream().map(found::get).toList();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("verify local candidate batch failed", ex);
         }
     }
 
-    /** 只有物理 fencing 成功后才能把本段候选集合当作稳定恢复输入。 */
-    public List<CandidateProof> scanFenced(PublicationSegmentLease lease, long afterCommitTs, int limit) {
+    /**
+     * Only when the physics fencing is successful can this section be used as a stable recovery input.
+     *
+     * @param lease lease
+     * @param afterCommitTs after commit ts
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<CandidateProof> scanFenced(final PublicationSegmentLease lease, final long afterCommitTs, final int limit) {
         validateLease(lease, 1);
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("invalid local segment candidate scan limit");
@@ -825,24 +937,35 @@ public final class MysqlShardSegmentFence {
                 }
                 return List.copyOf(found);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("scan fenced local candidates failed", ex);
         }
     }
 
-    /** 物理行已删除时仍可凭持久高水位确认旧段不能重新安装。 */
-    public boolean isFenceRetired(PublicationSegmentLease lease) {
+    /**
+     * Physical lines can still be deleted with durable -high watermark confirmation that old paragraphs cannot be re-installed.
+     *
+     * @param lease lease
+     * @return the operation result
+     */
+    public boolean isFenceRetired(final PublicationSegmentLease lease) {
         validateLease(lease, 1);
         try (Connection connection = dataSource.getConnection()) {
             return readRetiredThrough(connection) >= lease.lastTs()
                     && lockFence(connection, lease.firstTs(), false) == null;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("check local segment physical retirement failed", ex);
         }
     }
 
-    /** 中心已准许退役时，分片原子推进拒绝旧安装的高水位并删除 FENCED 行。 */
-    public boolean purgeFence(FinalizedFenceGcProof proof) {
+    /**
+     * Shard atomic boosts the high watermark rejection of old installation and deletes FENCED rows when the centre has authorized retirement.
+     *
+     * @param proof proof
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public boolean purgeFence(final FinalizedFenceGcProof proof) {
         Objects.requireNonNull(proof, "proof");
         if (!shardId.equals(proof.shardId())) {
             throw illegal("local fence GC proof targets another shard");
@@ -897,14 +1020,20 @@ public final class MysqlShardSegmentFence {
                 }
                 return true;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "local fence retirement requires durable state lookup", false, null, ex);
         }
     }
 
-    /** 中心已封段并持久发布后，幂等删除这笔分片候选以解除本地 GC 下界。 */
-    public boolean purgeCandidate(FinalizedCandidateProof proof) {
+    /**
+     * Idempotent removes this shard candidate after the center is closed and durable has been released to remove the local GC lower boundary.
+     *
+     * @param proof proof
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public boolean purgeCandidate(final FinalizedCandidateProof proof) {
         Objects.requireNonNull(proof, "proof");
         if (!shardId.equals(proof.shardId())) {
             throw illegal("local candidate GC proof targets another shard");
@@ -938,14 +1067,20 @@ public final class MysqlShardSegmentFence {
                 }
                 return true;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "local candidate GC result requires durable lookup", false, expected.txId(), ex);
         }
     }
 
-    /** 全段中心终态已发布后，在物理 FENCED 代数内一次删除全部候选。 */
-    public int purgeFencedSegmentCandidates(FinalizedSegmentProof proof) {
+    /**
+     * After the entire section terminal state has been released, all candidates are deleted at a time within the physical FENCED algebra.
+     *
+     * @param proof proof
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public int purgeFencedSegmentCandidates(final FinalizedSegmentProof proof) {
         Objects.requireNonNull(proof, "proof");
         if (!shardId.equals(proof.shardId())) {
             throw illegal("local-first segment GC proof targets another shard");
@@ -964,14 +1099,20 @@ public final class MysqlShardSegmentFence {
                     return delete.executeUpdate();
                 }
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "local-first segment candidate purge requires durable lookup", false, null, ex);
         }
     }
 
-    /** 已物理封存的段按主键统计尚存证明，供中心批量 GC 标记核实。 */
-    public int countCandidates(long segmentStart) {
+    /**
+     * Physically sealed segments still have a key-based statistical certificate to verify the centre batch GC tag.
+     *
+     * @param segmentStart segment start
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    public int countCandidates(final long segmentStart) {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select count(*) from mvcc_local_segment_candidate_v1 where segment_start = ?
                 """)) {
@@ -982,12 +1123,16 @@ public final class MysqlShardSegmentFence {
                 }
                 return row.getInt(1);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("count local-first segment candidates failed", ex);
         }
     }
 
-    /** 后台 GC 先读尚存候选的最老快照，允许分片安全点保守落后控制库。 */
+    /**
+     * Background GC first reads the oldest remaining candidate snapshot and allows shard safe point to maintain a backward control library.
+     *
+     * @return the operation result
+     */
     public OptionalLong oldestCandidateStartTs() {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select min(start_ts) from mvcc_local_segment_candidate_v1
@@ -996,13 +1141,18 @@ public final class MysqlShardSegmentFence {
                 return OptionalLong.empty();
             }
             return OptionalLong.of(row.getLong(1));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read local-first oldest candidate snapshot failed", ex);
         }
     }
 
-    /** 分片候选必须落在同一中心预留范围和 owner 代数内。 */
-    private void requireCandidateIdentity(PublicationSegmentLease lease, CandidateProof proof) {
+    /**
+     * Shard Candidates must be within the reserved range of the same centre and the owner algebra.
+     *
+     * @param lease lease
+     * @param proof proof
+     */
+    private void requireCandidateIdentity(final PublicationSegmentLease lease, final CandidateProof proof) {
         Objects.requireNonNull(proof, "proof");
         if (proof.segmentStart() != lease.firstTs() || proof.commitTs() < lease.firstTs()
                 || proof.commitTs() > lease.lastTs() || proof.ownerGeneration() != lease.generation()) {
@@ -1010,9 +1160,16 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 事务编号索引精确查询本地证明，重放时额外取得排他行锁。 */
-    private Optional<CandidateProof> readCandidate(Connection connection, long txId, boolean lock)
-            throws SQLException {
+    /**
+     * Transaction identifier Index is accurately searched for local proof, and extra-exclusive locks are obtained on replay.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param lock lock
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private Optional<CandidateProof> readCandidate(final Connection connection, final long txId, final boolean lock) throws SQLException {
         String sql = "select segment_start, tx_id, start_ts, commit_ts, deadline_millis,"
                 + " isolation_level, owner_generation from mvcc_local_segment_candidate_v1"
                 + " where tx_id = ?" + (lock ? " for update" : "");
@@ -1024,15 +1181,27 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 将数据库中的持久枚举和时间戳转换为不可变本地证明。 */
-    private CandidateProof mapCandidate(ResultSet row) throws SQLException {
+    /**
+     * Converts the durable count and timestamp in database to immutable local certificate.
+     *
+     * @param row row
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private CandidateProof mapCandidate(final ResultSet row) throws SQLException {
         return new CandidateProof(row.getLong("segment_start"), row.getLong("tx_id"),
                 row.getLong("start_ts"), row.getLong("commit_ts"), row.getLong("deadline_millis"),
                 IsolationLevel.valueOf(row.getString("isolation_level")), row.getLong("owner_generation"));
     }
 
-    /** 单分片版本链至少保留一条与候选时间戳相同的本地持久提交记录。 */
-    private void verifyCandidate(Connection connection, CandidateProof proof) throws SQLException {
+    /**
+     * Single shard version chain keeps at least one local durable commit record identical to the candidate timestamp.
+     *
+     * @param connection connection
+     * @param proof proof
+     * @throws SQLException if the operation cannot complete
+     */
+    private void verifyCandidate(final Connection connection, final CandidateProof proof) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select p.start_ts, p.status, p.commit_ts,
                        exists(select 1 from mvcc_data d
@@ -1053,8 +1222,13 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 只读取持久化分片栅栏状态，供失联接管重复确认物理 fencing。 */
-    public FenceSnapshot snapshot(long segmentStart) {
+    /**
+     * Read-only takes the durable storage shard fence state for loss of connection to take over a duplicate confirmation of physics.
+     *
+     * @param segmentStart segment start
+     * @return the operation result
+     */
+    public FenceSnapshot snapshot(final long segmentStart) {
         try (Connection connection = dataSource.getConnection()) {
             FenceRow row = lockFence(connection, segmentStart, false);
             if (row == null) {
@@ -1062,18 +1236,21 @@ public final class MysqlShardSegmentFence {
             }
             return new FenceSnapshot(segmentStart, row.generation(), row.expiresAtMillis(),
                     "ACTIVE".equals(row.status()));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read local segment fence failed", ex);
         }
     }
 
-    /** 只在短事务内部保存完整 owner 身份。 */
-    private record FenceRow(long segmentEnd, String ownerId, long generation,
-                            long expiresAtMillis, String status) {
-    }
-
-    /** 共享或排他锁定一条分片 fence 行，调用方决定是否允许重放。 */
-    private FenceRow lockFence(Connection connection, long segmentStart, boolean exclusive) throws SQLException {
+    /**
+     * Share or separate a shard fence line and caller to decide whether replay is allowed.
+     *
+     * @param connection connection
+     * @param segmentStart segment start
+     * @param exclusive exclusive
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private FenceRow lockFence(final Connection connection, final long segmentStart, final boolean exclusive) throws SQLException {
         String sql = "select segment_end, owner_id, generation, expires_at, status"
                 + " from mvcc_local_segment_fence_v1 where segment_start = ?"
                 + (exclusive ? " for update" : "");
@@ -1086,8 +1263,14 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 新段安装与缺行 tombstone 写入共享一条串行栅栏。 */
-    private long lockInstallState(Connection connection) throws SQLException {
+    /**
+     * New paragraph installation and line absence tombstone write to share a string fence.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private long lockInstallState(final Connection connection) throws SQLException {
         try (PreparedStatement state = connection.prepareStatement("""
                 select retired_through_ts from mvcc_local_segment_state_v1
                 where singleton_id = 1 for update
@@ -1099,8 +1282,14 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 非锁定读取只用于不可逆退役的重放证明，安装与删除仍使用状态行排他锁。 */
-    private long readRetiredThrough(Connection connection) throws SQLException {
+    /**
+     * The replay certificate, which is not locked to read only for the decommissioning of irreversible, installs and removes a still-used state line exclusion lock.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private long readRetiredThrough(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select retired_through_ts from mvcc_local_segment_state_v1
                 where singleton_id = 1
@@ -1112,8 +1301,14 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 分片段范围重叠会破坏时间槽的唯一归属，安装和缺行 fencing 都须拒绝。 */
-    private void requireNoOverlap(Connection connection, PublicationSegmentLease lease) throws SQLException {
+    /**
+     * The overlap of the shard segment will destroy the single ownership time slot, and installation and absences are subject to rejection.
+     *
+     * @param connection connection
+     * @param lease lease
+     * @throws SQLException if the operation cannot complete
+     */
+    private void requireNoOverlap(final Connection connection, final PublicationSegmentLease lease) throws SQLException {
         try (PreparedStatement overlap = connection.prepareStatement("""
                 select segment_start from mvcc_local_segment_fence_v1
                 where segment_start <= ? and segment_end >= ? limit 1
@@ -1128,8 +1323,13 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 不允许另一个 owner、范围或代数复用已安装的 shard fence。 */
-    private void requireSameLease(PublicationSegmentLease expected, FenceRow current) {
+    /**
+     * Another homeer, range or algebra is not allowed to reuse the installed shell fence.
+     *
+     * @param expected expected
+     * @param current current
+     */
+    private void requireSameLease(final PublicationSegmentLease expected, final FenceRow current) {
         if (current == null || current.segmentEnd() != expected.lastTs()
                 || !current.ownerId().equals(expected.ownerId())) {
             throw illegal("local segment owner identity differs from reserved range");
@@ -1143,8 +1343,13 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 初始化后的 schema 版本须精确匹配，旧表不能静默作为新协议运行。 */
-    private void requireSchemaVersion(Connection connection) throws SQLException {
+    /**
+     * An initialized schema version must be accurately matched and the old table cannot run silently as a new protocol.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void requireSchemaVersion(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select schema_version, retired_through_ts
                 from mvcc_local_segment_state_v1 where singleton_id = 1
@@ -1156,8 +1361,14 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 分片数据库时钟只判定本地租约，控制库时钟由中心单独处理。 */
-    private long databaseNow(Connection connection) throws SQLException {
+    /**
+     * Shard database clock only determines local lease and the control library clock is handled separately by the centre.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private long databaseNow(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
                 """); ResultSet row = query.executeQuery()) {
@@ -1168,8 +1379,14 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 拒绝不可信 owner 身份及无界本地租约。 */
-    private void validateLease(PublicationSegmentLease lease, long leaseMillis) {
+    /**
+     * Deny untrustworthy own identity and unbounded local lease.
+     *
+     * @param lease lease
+     * @param leaseMillis lease millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private void validateLease(final PublicationSegmentLease lease, final long leaseMillis) {
         Objects.requireNonNull(lease, "lease");
         if (!lease.ownerId().matches("[A-Za-z0-9._:-]{1,128}")
                 || leaseMillis < 1 || leaseMillis > 86_400_000L) {
@@ -1177,18 +1394,108 @@ public final class MysqlShardSegmentFence {
         }
     }
 
-    /** 本地持久身份不匹配时禁止继续恢复或安装。 */
-    private MvccException illegal(String message) {
+    /**
+     * The continuation of recovery or installation is prohibited if local durable identity does not match.
+     *
+     * @param message message
+     * @return the operation result
+     */
+    private MvccException illegal(final String message) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, null);
     }
 
-    /** 已失去旧代数时只允许读取已有证明，不能创建新候选。 */
-    private MvccException aborted(String message) {
+    /**
+     * The old algebra is only allowed to read the certificates and cannot create new candidates when it has been lost.
+     *
+     * @param message message
+     * @return the operation result
+     */
+    private MvccException aborted(final String message) {
         return new MvccException(ErrorCode.TRANSACTION_ABORTED, message, false, null);
     }
 
-    /** 数据库失败保留异常链，由上层决定结果未知或可重试接管。 */
-    private MvccException storageError(String message, SQLException cause) {
+    /**
+     * Database failed to maintain the anomaly chain, which is taken over by a top-level decision unknown outcome or retry.
+     *
+     * @param message message
+     * @param cause cause
+     * @return the operation result
+     */
+    private MvccException storageError(final String message, final SQLException cause) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, null, cause);
+    }
+
+    /**
+     * Returns local lease under shard database clock without reverting to the control library absolute time.
+     *
+     * @param segmentStart segment start
+     * @param generation generation
+     * @param expiresAtMillis expires at millis
+     * @param active active
+     */
+    public record FenceSnapshot(long segmentStart, long generation, long expiresAtMillis, boolean active) {
+
+        /**
+         * Rejects the local fence view with no durable algebra or deadline.
+         *
+         * @param segmentStart segment start
+         * @param generation generation
+         * @param expiresAtMillis expires at millis
+         * @param active active
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public FenceSnapshot {
+            if (segmentStart < 1 || generation < 1 || expiresAtMillis < 1) {
+                throw new IllegalArgumentException("invalid local segment fence snapshot");
+            }
+        }
+    }
+
+    /**
+     * Local with shard version and participant COMMITTED terminal state.
+     *
+     * @param segmentStart segment start
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param deadlineMillis deadline millis
+     * @param isolationLevel global transaction isolation level
+     * @param ownerGeneration owner generation
+     */
+    public record CandidateProof(long segmentStart, long txId, long startTs, long commitTs,
+            long deadlineMillis, IsolationLevel isolationLevel, long ownerGeneration) {
+
+        /**
+         * The candidate must have a positive algebra and commit time is later than it reads snapshot.
+         *
+         * @param segmentStart segment start
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param deadlineMillis deadline millis
+         * @param isolationLevel global transaction isolation level
+         * @param ownerGeneration owner generation
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public CandidateProof {
+            Objects.requireNonNull(isolationLevel, "isolationLevel");
+            if (segmentStart < 1 || txId == 0 || startTs < 0 || commitTs <= startTs
+                    || deadlineMillis < 1 || ownerGeneration < 1) {
+                throw new IllegalArgumentException("invalid local segment candidate proof");
+            }
+        }
+    }
+
+    /**
+     * Only save full owner identity in short transaction.
+     *
+     * @param segmentEnd segment end
+     * @param ownerId owner id
+     * @param generation generation
+     * @param expiresAtMillis expires at millis
+     * @param status status
+     */
+    private record FenceRow(long segmentEnd, String ownerId, long generation,
+            long expiresAtMillis, String status) {
     }
 }

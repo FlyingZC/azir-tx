@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -16,51 +32,57 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 回环 TCP 切面客户端，按中心租约代数发现并验证每个二进制响应。 */
+/**
+ * Return ring TCP cut-off client, found by centre lease algebra and verify response per binary.
+ */
 final class MysqlVectorCutTcpClient implements AutoCloseable {
+
     private final MysqlVectorCutLeaderLease leases;
+
     private final List<String> routes;
+
     private final int stripes;
+
     private final ConcurrentLinkedQueue<Channel> idle = new ConcurrentLinkedQueue<>();
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private volatile Endpoint cached;
 
-    /** 端点在中心期限前保守失效，不能无限复用旧领导者。 */
-    private record Endpoint(String ownerId, long generation, long validUntilNanos) {
-        /** 只接受本地单调时钟仍处于保守租期内的地址。 */
-        boolean valid() {
-            return validUntilNanos - System.nanoTime() > 0;
-        }
-    }
-
-    /** 一条复用连接同一时刻只借给一个读请求，旧代数连接直接销毁。 */
-    private record Channel(Endpoint endpoint, Socket socket,
-                           DataInputStream input, DataOutputStream output) implements AutoCloseable {
-        /** 关闭底层连接，不把损坏的帧留给下一次读取。 */
-        @Override
-        public void close() {
-            try {
-                socket.close();
-            } catch (IOException ignored) {
-                // 连接销毁失败只影响本次网络资源回收，不使旧代数重新可用。
-            }
-        }
-    }
-
-    /** 固定读侧路由布局，与中心持久租约和响应体均须完全一致。 */
-    MysqlVectorCutTcpClient(DataSource center, Map<String, DataSource> shards, int stripes) {
+    /**
+     * Fixed-read side routing, which is fully consistent with the centre durable lease and the responder.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     */
+    MysqlVectorCutTcpClient(final DataSource center, final Map<String, DataSource> shards, final int stripes) {
         this(center, shards, stripes, false);
     }
 
-    /** 正式读侧发现正式租约表，不接受容量实验领导者。 */
-    static MysqlVectorCutTcpClient forProduct(DataSource center,
-                                               Map<String, DataSource> shards, int stripes) {
+    /**
+     * The official lease table found on the reading side is not acceptable to the leadership of the capacity experiment.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @return the operation result
+     */
+    static MysqlVectorCutTcpClient forProduct(final DataSource center,
+                                              final Map<String, DataSource> shards, final int stripes) {
         return new MysqlVectorCutTcpClient(center, shards, stripes, true);
     }
 
-    /** 两套中心租约共享代数校验和有界连接池。 */
-    private MysqlVectorCutTcpClient(DataSource center, Map<String, DataSource> shards,
-                                    int stripes, boolean product) {
+    /**
+     * Two sets of centres lease share algebra validate and bounded connection pool.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param product product
+     */
+    private MysqlVectorCutTcpClient(final DataSource center, final Map<String, DataSource> shards,
+                                    final int stripes, final boolean product) {
         Objects.requireNonNull(shards, "shards");
         leases = product ? MysqlVectorCutLeaderLease.forProduct(center, shards, stripes)
                 : new MysqlVectorCutLeaderLease(center, shards, stripes);
@@ -68,7 +90,12 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
         this.stripes = stripes;
     }
 
-    /** 单次请求读完整切面；旧端点拒绝或连接失败后再发现一次。 */
+    /**
+     * One request to read the full cut-off; old endpoint rejected or connection failed to find again.
+     *
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
     MysqlVectorCutLeaderRuntime.PublishedView currentView() {
         for (int attempt = 0; attempt < 2; attempt++) {
             Endpoint endpoint = resolve();
@@ -88,7 +115,7 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
                     }
                 }
                 invalidate(endpoint);
-            } catch (IOException | IllegalArgumentException ex) {
+            } catch (final IOException | IllegalArgumentException ex) {
                 invalidate(endpoint);
             } finally {
                 if (channel != null) {
@@ -104,8 +131,14 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
                 "no current TCP vector cut leader answered with the expected generation", true, null);
     }
 
-    /** 优先复用当前代数的空闲连接，避免每条 RC 都建立 TCP 短连接。 */
-    private Channel borrow(Endpoint endpoint) throws IOException {
+    /**
+     * Prefer the current algebra free connection to avoid creating TCP short connection for each RC.
+     *
+     * @param endpoint endpoint
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
+    private Channel borrow(final Endpoint endpoint) throws IOException {
         Channel channel;
         while ((channel = idle.poll()) != null) {
             if (!channel.socket().isClosed()
@@ -124,14 +157,19 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
             return new Channel(endpoint, socket,
                     new DataInputStream(socket.getInputStream()),
                     new DataOutputStream(socket.getOutputStream()));
-        } catch (IOException | RuntimeException ex) {
+        } catch (final IOException | RuntimeException ex) {
             socket.close();
             throw ex;
         }
     }
 
-    /** 仅把仍属于当前租约的完整帧连接放回有界空闲池。 */
-    private void recycle(Channel channel, Endpoint endpoint) {
+    /**
+     * Only the complete frame connection that still belongs to the current lease will be released back to the bounded empty pool.
+     *
+     * @param channel channel
+     * @param endpoint endpoint
+     */
+    private void recycle(final Channel channel, final Endpoint endpoint) {
         Endpoint latest = cached;
         if (closed.get() || !endpoint.valid() || latest == null
                 || latest.generation() != endpoint.generation()
@@ -142,7 +180,13 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
         }
     }
 
-    /** 仅在缓存过期时读中心租约，并以请求开始时间计算保守本地截止。 */
+    /**
+     * Reads lease only when the cache has expired and calculates the conservative local deadline for the start time of the request.
+     *
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
     private synchronized Endpoint resolve() {
         if (closed.get()) {
             throw new IllegalStateException("TCP vector cut client is closed");
@@ -152,9 +196,8 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
             return current;
         }
         long started = System.nanoTime();
-        var leader = leases.discover().orElseThrow(() ->
-                new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                        "TCP vector cut has no active leader", true, null));
+        var leader = leases.discover().orElseThrow(() -> new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                "TCP vector cut has no active leader", true, null));
         requireLoopbackEndpoint(leader.ownerId());
         long margin = Math.max(25, leader.remainingMillis() / 5);
         if (leader.remainingMillis() <= margin) {
@@ -167,8 +210,13 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
         return current;
     }
 
-    /** 实验端点只允许合法的数字回环 IPv4 地址与端口。 */
-    private static void requireLoopbackEndpoint(String ownerId) {
+    /**
+     * The experimental endpoint allows only a valid digital returnring IPv4 address and port.
+     *
+     * @param ownerId owner id
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static void requireLoopbackEndpoint(final String ownerId) {
         if (!ownerId.startsWith("127.0.0.1:")) {
             throw new IllegalArgumentException("TCP vector cut owner is not a loopback endpoint");
         }
@@ -177,13 +225,17 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
             if (port < 1 || port > 65535) {
                 throw new IllegalArgumentException("TCP vector cut owner port is invalid");
             }
-        } catch (NumberFormatException ex) {
+        } catch (final NumberFormatException ex) {
             throw new IllegalArgumentException("TCP vector cut owner port is invalid", ex);
         }
     }
 
-    /** 清理本次失败的旧端点，不覆盖其他读取线程已刷新出的新地址。 */
-    private synchronized void invalidate(Endpoint endpoint) {
+    /**
+     * Clears the old end of this failure and does not overwrite new addresses that have been refreshed by other read threads.
+     *
+     * @param endpoint endpoint
+     */
+    private synchronized void invalidate(final Endpoint endpoint) {
         if (cached == endpoint) {
             cached = null;
             Channel channel;
@@ -193,13 +245,58 @@ final class MysqlVectorCutTcpClient implements AutoCloseable {
         }
     }
 
-    /** 关闭所有空闲 TCP 连接，借出连接归还时会自行销毁。 */
+    /**
+     * Closes all free TCP connection and will destroy it when loaning connection back.
+     */
     @Override
     public void close() {
         closed.set(true);
         Channel channel;
         while ((channel = idle.poll()) != null) {
             channel.close();
+        }
+    }
+
+    /**
+     * Endpoints are conservatively disabled before the centre deadline and old leaders cannot be reused indefinitely.
+     *
+     * @param ownerId owner id
+     * @param generation generation
+     * @param validUntilNanos valid until nanos
+     */
+    private record Endpoint(String ownerId, long generation, long validUntilNanos) {
+
+        /**
+         * Only local monotonic clock addresses that remain under a conservative lease are accepted.
+         *
+         * @return the operation result
+         */
+        boolean valid() {
+            return validUntilNanos - System.nanoTime() > 0;
+        }
+    }
+
+    /**
+     * A duplicate connection is loaned to only one reading request at the same time and the old algebra connection is destroyed directly.
+     *
+     * @param endpoint endpoint
+     * @param socket socket
+     * @param input input
+     * @param output output
+     */
+    private record Channel(Endpoint endpoint, Socket socket,
+            DataInputStream input, DataOutputStream output) implements AutoCloseable {
+
+        /**
+         * Closes the bottom connection, without leaving the damaged frame for next reading.
+         */
+        @Override
+        public void close() {
+            try {
+                socket.close();
+            } catch (final IOException ignored) {
+                // The connection destruction failure affects only the current network resource collection and does not allow old algebras to be reused.
+            }
         }
     }
 }

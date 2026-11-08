@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import java.io.ByteArrayInputStream;
@@ -10,18 +26,32 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** 只读切面的有界二进制网络格式，代数、路由和每条序号一并校验。 */
+/**
+ * Read-only tangent bounded binary network format, algebra, routing and each serial number together validate.
+ */
 final class MysqlVectorCutWire {
+
     private static final int MAGIC = 0x415A5643;
+
     private static final int VERSION = 1;
+
     private static final int MAX_BYTES = 1024 * 1024;
 
-    /** 网络编解码器无需保存进程状态。 */
+    /**
+     * The network codec does not need to save process status.
+     */
     private MysqlVectorCutWire() {
     }
 
-    /** 将领导者代数和固定切面编码为一个不可拆分的响应体。 */
-    static byte[] encode(MysqlVectorCutLeaderRuntime.PublishedView view) {
+    /**
+     * Encoding the leader ' s algebra and fixed cut-off as a non-separable response.
+     *
+     * @param view view
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    static byte[] encode(final MysqlVectorCutLeaderRuntime.PublishedView view) {
         try (var bytes = new ByteArrayOutputStream(); var output = new DataOutputStream(bytes)) {
             output.writeInt(MAGIC);
             output.writeInt(VERSION);
@@ -45,14 +75,22 @@ final class MysqlVectorCutWire {
                 throw new IllegalArgumentException("vector cut response exceeds wire limit");
             }
             return encoded;
-        } catch (IOException ex) {
+        } catch (final IOException ex) {
             throw new IllegalStateException("encode in-memory vector cut failed", ex);
         }
     }
 
-    /** 客户端拒绝错误版本、代数、路由布局、分条数量及截断响应。 */
-    static MysqlVectorCutLeaderRuntime.PublishedView decode(byte[] encoded,
-                                                              List<String> expectedRoutes, int stripes) {
+    /**
+     * Client rejects error version, algebra, route layout, number of strips and cut-off response.
+     *
+     * @param encoded encoded
+     * @param expectedRoutes expected routes
+     * @param stripes stripes
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    static MysqlVectorCutLeaderRuntime.PublishedView decode(final byte[] encoded,
+                                                            final List<String> expectedRoutes, final int stripes) {
         if (encoded == null || encoded.length < 28 || encoded.length > MAX_BYTES
                 || expectedRoutes == null || expectedRoutes.isEmpty()
                 || expectedRoutes.size() > 128 || stripes < 1 || stripes > 256) {
@@ -94,7 +132,7 @@ final class MysqlVectorCutWire {
             }
             return new MysqlVectorCutLeaderRuntime.PublishedView(generation,
                     new MysqlStripedSnapshotOracle.Snapshot(epoch, values));
-        } catch (IOException ex) {
+        } catch (final IOException ex) {
             throw new IllegalArgumentException("vector cut wire response was truncated", ex);
         }
     }

@@ -1,4 +1,23 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.common.ErrorCode;
 import com.flyingzc.azir.common.MvccException;
@@ -6,15 +25,13 @@ import org.junit.jupiter.api.Test;
 
 import java.sql.SQLException;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /**
- * MySQL 存储异常映射测试，验证瞬时 SQL 冲突会转换为 MVCC 冲突语义。
+ * MySQL storage anomaly map test, verify SQL conflicts are converted to MVCC conflict syntax.
  */
 class MysqlStorageExceptionMapperTest {
+
     /**
-     * 验证 MySQL deadlock 会映射为锁冲突。
+     * Verify MySQL deadlock will map lock conflict.
      */
     @Test
     void shouldMapDeadlockToLockConflict() {
@@ -22,13 +39,13 @@ class MysqlStorageExceptionMapperTest {
 
         MvccException actual = MysqlStorageExceptionMapper.toMvccException("shard-1", 10L, "prewrite failed", deadlock);
 
-        assertEquals(ErrorCode.LOCK_CONFLICT, actual.errorCode());
+        Assertions.assertEquals(ErrorCode.LOCK_CONFLICT, actual.errorCode());
         assertTrue(actual.retryable());
-        assertEquals(10L, actual.txId());
+        Assertions.assertEquals(10L, actual.txId());
     }
 
     /**
-     * 验证 MySQL lock wait timeout 会映射为锁等待超时。
+     * Verify MySQL lock wait timeout will map to lock waiting timeout.
      */
     @Test
     void shouldMapLockWaitTimeoutToLockWaitTimeout() {
@@ -36,13 +53,13 @@ class MysqlStorageExceptionMapperTest {
 
         MvccException actual = MysqlStorageExceptionMapper.toMvccException("shard-1", 11L, "prewrite failed", timeout);
 
-        assertEquals(ErrorCode.LOCK_WAIT_TIMEOUT, actual.errorCode());
+        Assertions.assertEquals(ErrorCode.LOCK_WAIT_TIMEOUT, actual.errorCode());
         assertTrue(actual.retryable());
-        assertEquals(11L, actual.txId());
+        Assertions.assertEquals(11L, actual.txId());
     }
 
     /**
-     * 验证普通 SQL 异常仍映射为存储不可用。
+     * Verify Normal SQL anomaly still map as unusable for storage.
      */
     @Test
     void shouldMapRegularSqlExceptionToStorageUnavailable() {
@@ -50,8 +67,8 @@ class MysqlStorageExceptionMapperTest {
 
         MvccException actual = MysqlStorageExceptionMapper.toMvccException("shard-1", 12L, "read failed", regular);
 
-        assertEquals(ErrorCode.STORAGE_UNAVAILABLE, actual.errorCode());
+        Assertions.assertEquals(ErrorCode.STORAGE_UNAVAILABLE, actual.errorCode());
         assertTrue(actual.retryable());
-        assertEquals(12L, actual.txId());
+        Assertions.assertEquals(12L, actual.txId());
     }
 }

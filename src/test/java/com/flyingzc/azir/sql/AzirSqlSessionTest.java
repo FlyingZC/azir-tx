@@ -1,4 +1,26 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.api.Transaction;
 import com.flyingzc.azir.common.ErrorCode;
@@ -40,18 +62,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /**
- * Azir SQL 会话执行测试。
+ * Azir SQL session performs the test.
  */
 class AzirSqlSessionTest {
+
     /**
-     * 验证显式事务可以读到自己的写入并在提交后被新会话读取。
+     * Verify Visible transaction can read its own writing and be read after commit.
      */
     @Test
     void explicitTransactionShouldReadOwnWriteAndCommit() {
@@ -64,19 +81,19 @@ class AzirSqlSessionTest {
 
             SqlExecutionResult result = session.execute("select value from account where id = 'u1'");
 
-            assertEquals("v1", result.singleRow().get("value"));
+            Assertions.assertEquals("v1", result.singleRow().get("value"));
             assertNotNull(session.execute("commit").commitResult());
         }
 
         try (SqlSession session = engine.openSession()) {
             SqlExecutionResult result = session.execute("select value from account where id = 'u1'");
 
-            assertEquals("v1", result.singleRow().get("value"));
+            Assertions.assertEquals("v1", result.singleRow().get("value"));
         }
     }
 
     /**
-     * 验证自动提交写入会在语句结束后提交。
+     * Verify autocommit writing takes place after the statement commit.
      */
     @Test
     void autocommitWriteShouldBeVisibleToNextStatement() {
@@ -86,14 +103,14 @@ class AzirSqlSessionTest {
             SqlExecutionResult write = session.execute("insert into account (id, value) values ('u2', 'v2')");
             SqlExecutionResult read = session.execute("select value from account where id = 'u2'");
 
-            assertEquals(1, write.updateCount());
+            Assertions.assertEquals(1, write.updateCount());
             assertNotNull(write.commitResult());
-            assertEquals("v2", read.singleRow().get("value"));
+            Assertions.assertEquals("v2", read.singleRow().get("value"));
         }
     }
 
     /**
-     * 验证更新和删除都走现有事务核心。
+     * Verify updates and removes both from the existing transaction core.
      */
     @Test
     void updateAndDeleteShouldUseMvccCore() {
@@ -103,7 +120,7 @@ class AzirSqlSessionTest {
             session.execute("insert into account (id, value) values ('u3', 'v3')");
             session.execute("update account set value = 'v4' where id = 'u3'");
 
-            assertEquals("v4", session.execute("select value from account where id = 'u3'").singleRow().get("value"));
+            Assertions.assertEquals("v4", session.execute("select value from account where id = 'u3'").singleRow().get("value"));
 
             session.execute("delete from account where id = 'u3'");
 
@@ -112,7 +129,7 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证 planner 可以被外部实现替换。
+     * Verify planner can be replaced externally.
      */
     @Test
     void shouldUseInjectedPlanner() {
@@ -123,18 +140,17 @@ class AzirSqlSessionTest {
                 planner,
                 ShardResolver.singleShard("s0"),
                 SqlValueCodec.utf8(),
-                IsolationLevel.READ_COMMITTED
-        );
+                IsolationLevel.READ_COMMITTED);
 
         try (SqlSession session = engine.openSession()) {
             session.execute("external syntax");
 
-            assertEquals("v4", readCommittedValue(storage, "account", "u4"));
+            Assertions.assertEquals("v4", readCommittedValue(storage, "account", "u4"));
         }
     }
 
     /**
-     * 验证分片解析器收到表名和主键并决定访问的分片。
+     * The verify shard solver receives a table name and primary key and decides to access the shard.
      */
     @Test
     void shouldUseInjectedShardResolver() {
@@ -149,19 +165,18 @@ class AzirSqlSessionTest {
                 new SimpleSqlPlanner(),
                 resolver,
                 SqlValueCodec.utf8(),
-                IsolationLevel.READ_COMMITTED
-        );
+                IsolationLevel.READ_COMMITTED);
 
         try (SqlSession session = engine.openSession()) {
             session.execute("insert into account (id, value) values ('u5', 'v5')");
 
-            assertEquals("account:u5", routed.get());
-            assertEquals("v5", session.execute("select value from account where id = 'u5'").singleRow().get("value"));
+            Assertions.assertEquals("account:u5", routed.get());
+            Assertions.assertEquals("v5", session.execute("select value from account where id = 'u5'").singleRow().get("value"));
         }
     }
 
     /**
-     * 验证没有活动事务时提交会报错。
+     * Verify does not function transaction when commit is wrong.
      */
     @Test
     void commitWithoutActiveTransactionShouldFail() {
@@ -170,12 +185,12 @@ class AzirSqlSessionTest {
         try (SqlSession session = engine.openSession()) {
             MvccException ex = assertThrows(MvccException.class, () -> session.execute("commit"));
 
-            assertEquals(ErrorCode.ILLEGAL_STATE, ex.errorCode());
+            Assertions.assertEquals(ErrorCode.ILLEGAL_STATE, ex.errorCode());
         }
     }
 
     /**
-     * 验证 RR 显式事务不会看到事务期间的其他提交。
+     * Verify RR Visible transaction does not see any other commit during transaction.
      */
     @Test
     void repeatableReadShouldKeepStableSnapshotAcrossStatements() {
@@ -186,17 +201,17 @@ class AzirSqlSessionTest {
 
         try (SqlSession rr = engine.openSession(); SqlSession writer = engine.openSession()) {
             rr.execute("begin repeatable read");
-            assertEquals("v1", rr.execute("select value from account where id = 'u6'").singleRow().get("value"));
+            Assertions.assertEquals("v1", rr.execute("select value from account where id = 'u6'").singleRow().get("value"));
 
             writer.execute("update account set value = 'v2' where id = 'u6'");
 
-            assertEquals("v1", rr.execute("select value from account where id = 'u6'").singleRow().get("value"));
+            Assertions.assertEquals("v1", rr.execute("select value from account where id = 'u6'").singleRow().get("value"));
             rr.execute("rollback");
         }
     }
 
     /**
-     * 验证 RC 显式事务每条语句可以看到新的已提交版本。
+     * Verify RC Visible transaction can see new commit version in each statement.
      */
     @Test
     void readCommittedShouldRefreshSnapshotAcrossStatements() {
@@ -207,17 +222,17 @@ class AzirSqlSessionTest {
 
         try (SqlSession rc = engine.openSession(); SqlSession writer = engine.openSession()) {
             rc.execute("begin read committed");
-            assertEquals("v1", rc.execute("select value from account where id = 'u7'").singleRow().get("value"));
+            Assertions.assertEquals("v1", rc.execute("select value from account where id = 'u7'").singleRow().get("value"));
 
             writer.execute("update account set value = 'v2' where id = 'u7'");
 
-            assertEquals("v2", rc.execute("select value from account where id = 'u7'").singleRow().get("value"));
+            Assertions.assertEquals("v2", rc.execute("select value from account where id = 'u7'").singleRow().get("value"));
             rc.execute("rollback");
         }
     }
 
     /**
-     * 验证自动提交遇到结果未知时不会继续回滚事务。
+     * Verify autocommit will not continue with rollback transaction when unknown outcome is encountered.
      */
     @Test
     void autocommitShouldNotRollbackUnknownCommitResult() {
@@ -228,17 +243,16 @@ class AzirSqlSessionTest {
         try (SqlSession session = engine.openSession()) {
             MvccException ex = assertThrows(
                     MvccException.class,
-                    () -> session.execute("insert into account (id, value) values ('u8', 'v1')")
-            );
+                    () -> session.execute("insert into account (id, value) values ('u8', 'v1')"));
 
-            assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, ex.errorCode());
+            Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, ex.errorCode());
             assertFalse(ex.retryable());
-            assertEquals(0, storage.abortCount());
+            Assertions.assertEquals(0, storage.abortCount());
         }
     }
 
     /**
-     * 验证显式提交遇到结果未知后关闭会话也不会回滚事务。
+     * Verify Visible commit will not close session after encountering unknown outcome. Nor will rollback transaction.
      */
     @Test
     void explicitCommitShouldDetachUnknownCommitResultBeforeClose() {
@@ -252,18 +266,18 @@ class AzirSqlSessionTest {
 
             MvccException ex = assertThrows(MvccException.class, () -> session.execute("commit"));
 
-            assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, ex.errorCode());
+            Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, ex.errorCode());
             assertFalse(ex.retryable());
             assertFalse(session.active());
         }
-        assertEquals(0, storage.abortCount());
+        Assertions.assertEquals(0, storage.abortCount());
         try (SqlSession reader = engine.openSession()) {
-            assertEquals("v1", reader.execute("select value from account where id = 'u9'").singleRow().get("value"));
+            Assertions.assertEquals("v1", reader.execute("select value from account where id = 'u9'").singleRow().get("value"));
         }
     }
 
     /**
-     * 验证 Calcite 可以执行投影、表达式、过滤、排序和限制行数。
+     * Verify Calcite can execute projectors, expressions, filters, sorting and limiting row numbers.
      */
     @Test
     void calciteShouldExecuteProjectionFilterSortAndLimit() {
@@ -271,8 +285,7 @@ class AzirSqlSessionTest {
 
         try (SqlSession session = engine.openSession()) {
             SqlExecutionResult inserted = session.execute(
-                    "insert into account (id, value) values ('1', 'alpha'), ('2', 'beta'), ('3', 'gamma')"
-            );
+                    "insert into account (id, value) values ('1', 'alpha'), ('2', 'beta'), ('3', 'gamma')");
             SqlExecutionResult selected = session.execute("""
                     select id, upper(value) as normalized
                     from account
@@ -281,14 +294,14 @@ class AzirSqlSessionTest {
                     limit 2
                     """);
 
-            assertEquals(3, inserted.updateCount());
-            assertEquals(List.of("3", "2"), selected.rows().stream().map(row -> row.get("id")).toList());
-            assertEquals(List.of("GAMMA", "BETA"), selected.rows().stream().map(row -> row.get("normalized")).toList());
+            Assertions.assertEquals(3, inserted.updateCount());
+            Assertions.assertEquals(List.of("3", "2"), selected.rows().stream().map(row -> row.get("id")).toList());
+            Assertions.assertEquals(List.of("GAMMA", "BETA"), selected.rows().stream().map(row -> row.get("normalized")).toList());
         }
     }
 
     /**
-     * 验证 Calcite JOIN、分组聚合、HAVING 和排序在 MVCC 快照行上执行。
+     * Verify Calcite JOIN, Group Aggregation, HAVING and Sorting executes on the MVCC snapshot line.
      */
     @Test
     void calciteShouldExecuteJoinAggregationAndHaving() {
@@ -310,16 +323,16 @@ class AzirSqlSessionTest {
                     order by total desc
                     """);
 
-            assertEquals(1, result.rows().size());
-            assertEquals("gold", result.singleRow().get("category"));
-            assertEquals("2", result.singleRow().get("total"));
-            assertEquals(2, storage.scanReadTimestamps().size());
-            assertEquals(1, new HashSet<>(storage.scanReadTimestamps()).size());
+            Assertions.assertEquals(1, result.rows().size());
+            Assertions.assertEquals("gold", result.singleRow().get("category"));
+            Assertions.assertEquals("2", result.singleRow().get("total"));
+            Assertions.assertEquals(2, storage.scanReadTimestamps().size());
+            Assertions.assertEquals(1, new HashSet<>(storage.scanReadTimestamps()).size());
         }
     }
 
     /**
-     * 验证 INSERT SELECT、表达式 UPDATE 和条件 DELETE 均写回 MVCC 事务核心。
+     * Verify INSERT SELECT, Expression UPDATE and Condition DELETE all write back to the MVCC transaction core.
      */
     @Test
     void calciteShouldExecuteInsertSelectUpdateAndDelete() {
@@ -329,24 +342,23 @@ class AzirSqlSessionTest {
             session.execute("insert into account (id, value) values ('1', 'alpha'), ('2', 'beta'), ('3', 'delta')");
 
             SqlExecutionResult updated = session.execute(
-                    "update account set value = upper(value) where id in ('1', '2')"
-            );
+                    "update account set value = upper(value) where id in ('1', '2')");
             SqlExecutionResult copied = session.execute("""
                     insert into archive (id, value)
                     select id, value from account where value like 'A%'
                     """);
             SqlExecutionResult deleted = session.execute("delete from account where value like 'd%'");
 
-            assertEquals(2, updated.updateCount());
-            assertEquals(1, copied.updateCount());
-            assertEquals(1, deleted.updateCount());
-            assertEquals("ALPHA", session.execute("select value from archive where id = '1'").singleRow().get("value"));
+            Assertions.assertEquals(2, updated.updateCount());
+            Assertions.assertEquals(1, copied.updateCount());
+            Assertions.assertEquals(1, deleted.updateCount());
+            Assertions.assertEquals("ALPHA", session.execute("select value from archive where id = '1'").singleRow().get("value"));
             assertTrue(session.execute("select * from account where id = '3'").rows().isEmpty());
         }
     }
 
     /**
-     * 验证同一物理分片中相同主键的不同逻辑表不会互相覆盖。
+     * Verify Different logical tables of the same primary key in the same physics shard do not overwhelm each other.
      */
     @Test
     void sqlTablesShouldUseIndependentPhysicalKeyNamespaces() {
@@ -356,19 +368,17 @@ class AzirSqlSessionTest {
             session.execute("insert into account (id, value) values ('same', 'account-value')");
             session.execute("insert into profile (id, value) values ('same', 'profile-value')");
 
-            assertEquals(
+            Assertions.assertEquals(
                     "account-value",
-                    session.execute("select value from account where id = 'same'").singleRow().get("value")
-            );
-            assertEquals(
+                    session.execute("select value from account where id = 'same'").singleRow().get("value"));
+            Assertions.assertEquals(
                     "profile-value",
-                    session.execute("select value from profile where id = 'same'").singleRow().get("value")
-            );
+                    session.execute("select value from profile where id = 'same'").singleRow().get("value"));
         }
     }
 
     /**
-     * 验证显式事务中的复杂扫描可以读取尚未提交的本事务缓冲写。
+     * The complex scans in verify visible transaction can read the transaction buffer script that is not yet commit.
      */
     @Test
     void calciteQueryShouldReadOwnWritesInsideExplicitTransaction() {
@@ -379,10 +389,9 @@ class AzirSqlSessionTest {
             session.execute("insert into account (id, value) values ('1', 'alpha'), ('2', 'beta')");
 
             SqlExecutionResult result = session.execute(
-                    "select count(*) as total from account where value is not null"
-            );
+                    "select count(*) as total from account where value is not null");
 
-            assertEquals("2", result.singleRow().get("total"));
+            Assertions.assertEquals("2", result.singleRow().get("total"));
             session.execute("rollback");
         }
 
@@ -392,7 +401,7 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证哈希路由下的复杂查询会扫描全部分片并合并排序结果。
+     * A complex query under the verify Hash route scans all shard and merges the sorting results.
      */
     @Test
     void calciteQueryShouldScanAllHashShards() {
@@ -403,41 +412,41 @@ class AzirSqlSessionTest {
                 manager(shard0, shard1),
                 resolver,
                 SqlValueCodec.utf8(),
-                IsolationLevel.READ_COMMITTED
-        );
+                IsolationLevel.READ_COMMITTED);
 
         try (SqlSession session = engine.openSession()) {
             session.execute("insert into account (id, value) values ('a', 'one'), ('b', 'two'), ('c', 'three')");
 
             SqlExecutionResult result = session.execute("select id from account order by id");
 
-            assertEquals(List.of("a", "b", "c"), result.rows().stream().map(row -> row.get("id")).toList());
+            Assertions.assertEquals(List.of("a", "b", "c"), result.rows().stream().map(row -> row.get("id")).toList());
             assertFalse(shard0.committedValues.isEmpty());
             assertFalse(shard1.committedValues.isEmpty());
         }
     }
 
     /**
-     * 验证可插拔简单计划器同样保留主键唯一性，更新或删除不存在的行不会新增数据。
+     * Verify You can insert a simple planner to retain the primary key uniqueness, and no new data will be added if you update or delete an existing line.
      */
     @Test
     void simplePlannerShouldRespectPrimaryKeyAndMissingRows() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "original", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = new AzirSqlEngine(manager, new SimpleSqlPlanner(), ShardResolver.singleShard("s0"),
-                     SqlValueCodec.utf8(), IsolationLevel.READ_COMMITTED).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = new AzirSqlEngine(manager, new SimpleSqlPlanner(), ShardResolver.singleShard("s0"),
+                        SqlValueCodec.utf8(), IsolationLevel.READ_COMMITTED).openSession()) {
             assertThrows(MvccException.class,
                     () -> session.execute("insert into account (id, value) values ('a', 'replacement')"));
-            assertEquals(0, session.execute("update account set value = 'new' where id = 'missing'").updateCount());
-            assertEquals(0, session.execute("delete from account where id = 'missing'").updateCount());
-            assertEquals("original", session.execute("select value from account where id = 'a'").singleRow().get("value"));
+            Assertions.assertEquals(0, session.execute("update account set value = 'new' where id = 'missing'").updateCount());
+            Assertions.assertEquals(0, session.execute("delete from account where id = 'missing'").updateCount());
+            Assertions.assertEquals("original", session.execute("select value from account where id = 'a'").singleRow().get("value"));
             assertTrue(session.execute("select value from account where id = 'missing'").rows().isEmpty());
         }
     }
 
     /**
-     * 验证无排序 LIMIT 只消费首个有界页面，不调用整表扫描接口。
+     * Verify Unsorted LIMIT only consumes the first bounded page and does not call the whole sheet scan interface.
      */
     @Test
     void calciteLimitShouldReadOnlyOnePage() {
@@ -445,17 +454,18 @@ class AzirSqlSessionTest {
         for (int index = 0; index < 100; index++) {
             storage.seed("account", "k" + index, "value", 1L);
         }
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 2).openSession()) {
-            assertEquals(1, session.execute("select id from account limit 1").rows().size());
-            assertEquals(1, storage.pageRanges.size());
-            assertEquals(2, storage.scannedKeyCount);
-            assertEquals(0, storage.fullScanCount);
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 2).openSession()) {
+            Assertions.assertEquals(1, session.execute("select id from account limit 1").rows().size());
+            Assertions.assertEquals(1, storage.pageRanges.size());
+            Assertions.assertEquals(2, storage.scannedKeyCount);
+            Assertions.assertEquals(0, storage.fullScanCount);
         }
     }
 
     /**
-     * 验证 LIMIT 不会打开尚未消费的后续分片。
+     * Verify LIMIT will not open a follow-up shard that has not yet been consumed.
      */
     @Test
     void calciteLimitShouldLeaveLaterShardsUnread() {
@@ -463,16 +473,17 @@ class AzirSqlSessionTest {
         InMemoryTestStorageAdapter shard1 = new InMemoryTestStorageAdapter("s1");
         shard0.seed("account", "b", "first", 1L);
         shard1.seed("account", "a", "second", 1L);
-        try (TransactionManager manager = manager(shard0, shard1);
-             SqlSession session = pagedEngine(manager, ShardResolver.hashByKey(List.of("s0", "s1")), 1).openSession()) {
-            assertEquals("b", session.execute("select id from account limit 1").singleRow().get("id"));
-            assertEquals(1, shard0.pageRanges.size());
+        try (
+                TransactionManager manager = manager(shard0, shard1);
+                SqlSession session = pagedEngine(manager, ShardResolver.hashByKey(List.of("s0", "s1")), 1).openSession()) {
+            Assertions.assertEquals("b", session.execute("select id from account limit 1").singleRow().get("id"));
+            Assertions.assertEquals(1, shard0.pageRanges.size());
             assertTrue(shard1.pageRanges.isEmpty());
         }
     }
 
     /**
-     * 验证存在残余过滤时，LIMIT 不能提前截断跨分片扫描。
+     * LIMIT cannot cut cross-shard scan in advance when there is a residual filter.
      */
     @Test
     void calciteFilteredLimitMustReachLaterShard() {
@@ -480,17 +491,18 @@ class AzirSqlSessionTest {
         InMemoryTestStorageAdapter shard1 = new InMemoryTestStorageAdapter("s1");
         shard0.seed("account", "a", "skip", 1L);
         shard1.seed("account", "b", "match", 1L);
-        try (TransactionManager manager = manager(shard0, shard1);
-             SqlSession session = pagedEngine(manager, ShardResolver.hashByKey(List.of("s0", "s1")), 1).openSession()) {
-            assertEquals("b", session.execute("select id from account where value = 'match' limit 1")
+        try (
+                TransactionManager manager = manager(shard0, shard1);
+                SqlSession session = pagedEngine(manager, ShardResolver.hashByKey(List.of("s0", "s1")), 1).openSession()) {
+            Assertions.assertEquals("b", session.execute("select id from account where value = 'match' limit 1")
                     .singleRow().get("id"));
-            assertEquals(1, shard0.pageRanges.size());
-            assertEquals(1, shard1.pageRanges.size());
+            Assertions.assertEquals(1, shard0.pageRanges.size());
+            Assertions.assertEquals(1, shard1.pageRanges.size());
         }
     }
 
     /**
-     * 验证表注册、枚举器创建和关闭均不触发额外读取，关闭后无法继续取页。
+     * Verify Table registration, creation and closure of an item count do not trigger additional reading and cannot continue to remove pages after closing.
      */
     @Test
     void calciteEnumeratorShouldReadLazilyAndStopAfterClose() {
@@ -505,18 +517,18 @@ class AzirSqlSessionTest {
             try (Enumerator<Object[]> enumerator = table.scan(DataContexts.EMPTY, new ArrayList<>(), new int[]{0}).enumerator()) {
                 assertTrue(storage.pageRanges.isEmpty());
                 assertTrue(enumerator.moveNext());
-                assertEquals("a", enumerator.current()[0]);
+                Assertions.assertEquals("a", enumerator.current()[0]);
                 enumerator.close();
                 assertFalse(enumerator.moveNext());
                 assertThrows(IllegalStateException.class, enumerator::reset);
-                assertEquals(1, storage.pageRanges.size());
+                Assertions.assertEquals(1, storage.pageRanges.size());
             }
             manager.rollback(tx);
         }
     }
 
     /**
-     * 验证关系运算重扫时重新建立分页游标，但仍读取原语句快照。
+     * Verify Recreates the page break cursor when recleaning, but still reads the original statement snapshot.
      */
     @Test
     void calciteEnumeratorResetShouldReuseStatementSnapshot() {
@@ -530,21 +542,21 @@ class AzirSqlSessionTest {
                     new SqlScanBudget(tx.txId(), SqlExecutionOptions.defaults()));
             try (Enumerator<Object[]> enumerator = table.scan(DataContexts.EMPTY, new ArrayList<>(), new int[]{1}).enumerator()) {
                 assertTrue(enumerator.moveNext());
-                assertEquals("old", enumerator.current()[0]);
+                Assertions.assertEquals("old", enumerator.current()[0]);
                 assertFalse(enumerator.moveNext());
                 storage.seed("account", "a", "new", snapshot.readTs() + 1);
                 enumerator.reset();
-                assertEquals(1, storage.pageRanges.size());
+                Assertions.assertEquals(1, storage.pageRanges.size());
                 assertTrue(enumerator.moveNext());
-                assertEquals("old", enumerator.current()[0]);
-                assertEquals(1, new HashSet<>(storage.scanReadTimestamps).size());
+                Assertions.assertEquals("old", enumerator.current()[0]);
+                Assertions.assertEquals(1, new HashSet<>(storage.scanReadTimestamps).size());
             }
             manager.rollback(tx);
         }
     }
 
     /**
-     * 验证等值主键下推只路由到一个分片并保留 Calcite 的非主键过滤。
+     * Verify Equivalent primary key pushes only to one shard and keeps Calcite non-main key filters.
      */
     @Test
     void calcitePointPredicateShouldUseOnlyRoutedGet() {
@@ -552,10 +564,11 @@ class AzirSqlSessionTest {
         InMemoryTestStorageAdapter shard1 = new InMemoryTestStorageAdapter("s1");
         shard0.seed("account", "b", "other", 1L);
         shard1.seed("account", "a", "target", 1L);
-        try (TransactionManager manager = manager(shard0, shard1);
-             SqlSession session = pagedEngine(manager, ShardResolver.hashByKey(List.of("s0", "s1")), 1).openSession()) {
-            assertEquals("target", session.execute("select value from account where id = 'a'").singleRow().get("value"));
-            assertEquals(List.of(new SqlStorageKeyCodec().encode("account", "a")), shard1.pointReadKeys);
+        try (
+                TransactionManager manager = manager(shard0, shard1);
+                SqlSession session = pagedEngine(manager, ShardResolver.hashByKey(List.of("s0", "s1")), 1).openSession()) {
+            Assertions.assertEquals("target", session.execute("select value from account where id = 'a'").singleRow().get("value"));
+            Assertions.assertEquals(List.of(new SqlStorageKeyCodec().encode("account", "a")), shard1.pointReadKeys);
             assertTrue(shard0.pointReadKeys.isEmpty());
             assertTrue(shard0.pageRanges.isEmpty());
             assertTrue(shard1.pageRanges.isEmpty());
@@ -564,23 +577,24 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证墓碑造成的空可见页仍按非空原始游标继续分页。
+     * The empty visible pages created by verify tombstone continue with page breaks on non-empty raw cursor.
      */
     @Test
     void calciteScanShouldContinueAfterEmptyVisiblePage() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", null, 1L);
         storage.seed("account", "b", "visible", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
-            assertEquals("b", session.execute("select id from account limit 1").singleRow().get("id"));
-            assertEquals(2, storage.pageRanges.size());
-            assertEquals(1, new HashSet<>(storage.scanReadTimestamps).size());
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+            Assertions.assertEquals("b", session.execute("select id from account limit 1").singleRow().get("id"));
+            Assertions.assertEquals(2, storage.pageRanges.size());
+            Assertions.assertEquals(1, new HashSet<>(storage.scanReadTimestamps).size());
         }
     }
 
     /**
-     * 验证 INSERT SELECT 多页读取和目标主键查重共用快照，页间新提交只在下一语句可见。
+     * Verify INSERT SELECT multipage reading and target primary key recheck snapshot, with new commit on the page visible only in the next sentence.
      */
     @Test
     void calciteInsertSelectShouldShareSnapshotWithDuplicateChecks() {
@@ -588,45 +602,47 @@ class AzirSqlSessionTest {
         storage.seed("account", "a", "first", 1L);
         storage.seed("account", "b", "old", 1L);
         storage.afterFirstPage = context -> storage.seed("account", "b", "new", context.readTs() + 1);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
             session.begin(IsolationLevel.READ_COMMITTED);
-            assertEquals(2, session.execute("insert into archive (id, value) select id, value from account").updateCount());
-            assertEquals(2, storage.scanReadTimestamps.size());
-            assertEquals(2, storage.pointReadTimestamps.size());
+            Assertions.assertEquals(2, session.execute("insert into archive (id, value) select id, value from account").updateCount());
+            Assertions.assertEquals(2, storage.scanReadTimestamps.size());
+            Assertions.assertEquals(2, storage.pointReadTimestamps.size());
             Set<Long> allReadTimestamps = new HashSet<>(storage.scanReadTimestamps);
             allReadTimestamps.addAll(storage.pointReadTimestamps);
-            assertEquals(1, allReadTimestamps.size());
-            assertEquals("old", session.execute("select value from archive where id = 'b'").singleRow().get("value"));
-            assertEquals("new", session.execute("select value from account where id = 'b'").singleRow().get("value"));
+            Assertions.assertEquals(1, allReadTimestamps.size());
+            Assertions.assertEquals("old", session.execute("select value from archive where id = 'b'").singleRow().get("value"));
+            Assertions.assertEquals("new", session.execute("select value from account where id = 'b'").singleRow().get("value"));
             session.rollback();
         }
     }
 
     /**
-     * 验证 UPDATE 新主键存在性检查复用选行快照。
+     * Verify UPDATE New Primary Check Existence Checks Select Row snapshot.
      */
     @Test
     void calciteUpdateShouldShareSnapshotWithNewKeyChecks() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "first", 1L);
         storage.seed("account", "b", "second", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
             session.begin(IsolationLevel.READ_COMMITTED);
-            assertEquals(2, session.execute("update account set id = concat(id, 'x')").updateCount());
-            assertEquals(2, storage.pointReadTimestamps.size());
+            Assertions.assertEquals(2, session.execute("update account set id = concat(id, 'x')").updateCount());
+            Assertions.assertEquals(2, storage.pointReadTimestamps.size());
             Set<Long> allReadTimestamps = new HashSet<>(storage.scanReadTimestamps);
             allReadTimestamps.addAll(storage.pointReadTimestamps);
-            assertEquals(1, allReadTimestamps.size());
-            assertEquals(List.of("ax", "bx"), session.execute("select id from account order by id").rows().stream()
+            Assertions.assertEquals(1, allReadTimestamps.size());
+            Assertions.assertEquals(List.of("ax", "bx"), session.execute("select id from account order by id").rows().stream()
                     .map(row -> row.get("id")).toList());
             session.rollback();
         }
     }
 
     /**
-     * 验证范围包含边界不会误包含具有相同前缀但更长的主键。
+     * The verify range does not contain primary keys with the same prefix but longer by mistake.
      */
     @Test
     void calciteAsciiRangeShouldUseExactBinaryBoundary() {
@@ -635,34 +651,36 @@ class AzirSqlSessionTest {
         storage.seed("account", "a\u0000", "suffix", 1L);
         storage.seed("account", "ab", "longer", 1L);
         storage.seed("account", "b", "last", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
-            assertEquals("a", session.execute("select id from account where id <= 'a'").singleRow().get("id"));
-            assertEquals(new SqlStorageKeyCodec().encode("account", "a") + '\u0000',
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+            Assertions.assertEquals("a", session.execute("select id from account where id <= 'a'").singleRow().get("id"));
+            Assertions.assertEquals(new SqlStorageKeyCodec().encode("account", "a") + '\u0000',
                     storage.pageRanges.getFirst().endKeyExclusive());
             storage.pageRanges.clear();
-            assertEquals(List.of("a\u0000", "ab", "b"),
+            Assertions.assertEquals(List.of("a\u0000", "ab", "b"),
                     session.execute("select id from account where 'a' < id order by id").rows().stream()
                             .map(row -> row.get("id")).toList());
-            assertEquals(new SqlStorageKeyCodec().encode("account", "a") + '\u0000',
+            Assertions.assertEquals(new SqlStorageKeyCodec().encode("account", "a") + '\u0000',
                     storage.pageRanges.getFirst().startKeyInclusive());
         }
     }
 
     /**
-     * 验证数值转换、非 ASCII 范围和 NULL 不会被误解释为二进制主键点查。
+     * Verify value conversion, non-ASCII range and NULL will not be misinterpreted as binary primary key check.
      */
     @Test
     void calciteShouldKeepUnsafePredicatesForResidualEvaluation() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "02", "leading zero", 1L);
         storage.seed("account", "2", "plain", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
-            assertEquals(2, session.execute("select id from account where cast(id as integer) = 2").rows().size());
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+            Assertions.assertEquals(2, session.execute("select id from account where cast(id as integer) = 2").rows().size());
             assertTrue(storage.pointReadKeys.isEmpty());
             storage.pageRanges.clear();
-            assertEquals(2, session.execute("select id from account where id < '\u00e9'").rows().size());
+            Assertions.assertEquals(2, session.execute("select id from account where id < '\u00e9'").rows().size());
             SqlStorageKeyCodec keys = new SqlStorageKeyCodec();
             assertTrue(storage.pageRanges.stream().allMatch(range -> range.startKeyInclusive().equals(keys.rangeStart("account"))
                     && range.endKeyExclusive().equals(keys.rangeEnd("account"))));
@@ -672,7 +690,7 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证排序与聚合可以消费多页，不能把页面大小误当作整个关系的行数限制。
+     * Verify Sorting and Aggregation can consume multiple pages, and page size cannot be misconstrued as a line number limit for the whole relationship.
      */
     @Test
     void calciteSortAndAggregateShouldConsumeAllPages() {
@@ -680,17 +698,18 @@ class AzirSqlSessionTest {
         storage.seed("account", "a", "1", 1L);
         storage.seed("account", "b", "2", 1L);
         storage.seed("account", "c", "3", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
-            assertEquals("c", session.execute("select id from account order by id desc limit 1").singleRow().get("id"));
-            assertEquals(3, storage.pageRanges.size());
-            assertEquals("3", session.execute("select count(*) as total from account").singleRow().get("total"));
-            assertEquals(6, storage.pageRanges.size());
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+            Assertions.assertEquals("c", session.execute("select id from account order by id desc limit 1").singleRow().get("id"));
+            Assertions.assertEquals(3, storage.pageRanges.size());
+            Assertions.assertEquals("3", session.execute("select count(*) as total from account").singleRow().get("total"));
+            Assertions.assertEquals(6, storage.pageRanges.size());
         }
     }
 
     /**
-     * 验证单行结果的排序、分组和残余过滤也必须遵守输入行数预算。
+     * The sorting, grouping and residual filter of the verify single-line result must also follow input line number budget.
      */
     @Test
     void calciteBlockingOperatorsShouldRespectInputRowBudget() {
@@ -698,62 +717,65 @@ class AzirSqlSessionTest {
         storage.seed("account", "a", "same", 1L);
         storage.seed("account", "b", "same", 1L);
         storage.seed("account", "c", "same", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 2, 1024)).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 2, 1024)).openSession()) {
             for (String sql : List.of("select id from account order by id desc limit 1",
                     "select value, count(*) as total from account group by value",
                     "select count(*) as total from account where value = 'absent'")) {
                 MvccException failure = assertThrows(MvccException.class, () -> session.execute(sql));
-                assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+                Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
                 assertTrue(failure.getMessage().contains("input scan row budget"));
             }
-            assertEquals(0, storage.fullScanCount);
+            Assertions.assertEquals(0, storage.fullScanCount);
         }
     }
 
     /**
-     * 验证输入预算覆盖整页预取，即使 LIMIT 只消费该页第一行也不能绕过限制。
+     * Verify Enter budget to overwhelm the page prep, even if LIMIT only consumes the first line of the page.
      */
     @Test
     void calciteInputBudgetShouldChargePrefetchedRows() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "first", 1L);
         storage.seed("account", "b", "second", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(2, 1, 1024, 1, 1024)).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(2, 1, 1024, 1, 1024)).openSession()) {
             MvccException failure = assertThrows(MvccException.class, () -> session.execute("select id from account limit 1"));
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
             assertTrue(failure.getMessage().contains("input scan row budget"));
-            assertEquals(1, storage.pageRanges.size());
+            Assertions.assertEquals(1, storage.pageRanges.size());
         }
     }
 
     /**
-     * 验证跨逻辑表共享同一个输入预算，各表单独未超限也不能使总量超限。
+     * The verify cross-logic table shares the same input budget, and individual tables do not exceed or exceed their totals.
      */
     @Test
     void calciteInputRowBudgetShouldBeSharedAcrossTables() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "first", 1L);
         storage.seed("profile", "b", "second", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 1, 1024)).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 1, 1024)).openSession()) {
             MvccException failure = assertThrows(MvccException.class, () -> session.execute("""
                     select count(*) as total from (
                         select id from account union all select id from profile
                     ) combined
                     """));
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
             assertTrue(failure.getMessage().contains("input scan row budget"));
-            assertEquals(2, storage.pageRanges.stream().map(KeyRange::startKeyInclusive).distinct().count());
+            Assertions.assertEquals(2, storage.pageRanges.stream().map(KeyRange::startKeyInclusive).distinct().count());
         }
     }
 
     /**
-     * 验证同一逻辑表的不同物理分片也共同消耗输入预算。
+     * Verify Different physical shard s of the same logical table also co-consumption budget.
      */
     @Test
     void calciteInputRowBudgetShouldBeSharedAcrossShards() {
@@ -761,38 +783,40 @@ class AzirSqlSessionTest {
         InMemoryTestStorageAdapter shard1 = new InMemoryTestStorageAdapter("s1");
         shard0.seed("account", "b", "first", 1L);
         shard1.seed("account", "a", "second", 1L);
-        try (TransactionManager manager = manager(shard0, shard1);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.hashByKey(List.of("s0", "s1")),
-                     SqlValueCodec.utf8(), IsolationLevel.READ_COMMITTED,
-                     new SqlExecutionOptions(1, 1, 1024, 1, 1024)).openSession()) {
+        try (
+                TransactionManager manager = manager(shard0, shard1);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.hashByKey(List.of("s0", "s1")),
+                        SqlValueCodec.utf8(), IsolationLevel.READ_COMMITTED,
+                        new SqlExecutionOptions(1, 1, 1024, 1, 1024)).openSession()) {
             MvccException failure = assertThrows(MvccException.class,
                     () -> session.execute("select count(*) as total from account"));
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
-            assertEquals(1, shard0.pageRanges.size());
-            assertEquals(1, shard1.pageRanges.size());
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+            Assertions.assertEquals(1, shard0.pageRanges.size());
+            Assertions.assertEquals(1, shard1.pageRanges.size());
         }
     }
 
     /**
-     * 验证投影不含 value 时仍按取回的原始值字节和完整物理键计费。
+     * Verify Projection does not include value at the original bytes and complete physical key billing.
      */
     @Test
     void calciteInputByteBudgetShouldIncludeUnprojectedValue() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "中", 1L);
         long tooSmall = Utf8KeyOrder.encode(new SqlStorageKeyCodec().encode("account", "a")).length + 2L;
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 10, tooSmall)).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 10, tooSmall)).openSession()) {
             MvccException failure = assertThrows(MvccException.class,
                     () -> session.execute("select count(*) as total from account"));
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
             assertTrue(failure.getMessage().contains("input scan byte budget"));
         }
     }
 
     /**
-     * 验证点查和另一张表的分页读取共同累计输入字节，不能各自重建计数器。
+     * An verify check and another table page read a common cumulative byte input, which cannot be recreated separately.
      */
     @Test
     void calciteInputByteBudgetShouldCombinePointAndPageReads() {
@@ -802,23 +826,24 @@ class AzirSqlSessionTest {
         SqlStorageKeyCodec keys = new SqlStorageKeyCodec();
         long tooSmall = Utf8KeyOrder.encode(keys.encode("account", "a")).length
                 + (long) Utf8KeyOrder.encode(keys.encode("profile", "b")).length + 5L;
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 10, tooSmall)).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 10, tooSmall)).openSession()) {
             MvccException failure = assertThrows(MvccException.class, () -> session.execute("""
                     select count(*) as total from (
                         select id from account where id = 'a' union all select id from profile
                     ) combined
                     """));
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
             assertTrue(failure.getMessage().contains("input scan byte budget"));
-            assertEquals(1, storage.pointReadKeys.size());
-            assertEquals(1, storage.pageRanges.size());
+            Assertions.assertEquals(1, storage.pointReadKeys.size());
+            Assertions.assertEquals(1, storage.pageRanges.size());
         }
     }
 
     /**
-     * 验证多枚举器和 reset 重扫累计计费，任何枚举器超限后其他枚举器也不能继续输出。
+     * The cumulative cost of multiple verify liftings and reset re-cleaning is such that no more than the limit of any one lift can continue to be exported.
      */
     @Test
     void calciteInputBudgetShouldSurviveEnumeratorReset() {
@@ -835,7 +860,7 @@ class AzirSqlSessionTest {
                 assertTrue(second.moveNext());
                 first.reset();
                 MvccException failure = assertThrows(MvccException.class, first::moveNext);
-                assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+                Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
                 assertThrows(MvccException.class, second::moveNext);
             }
             manager.rollback(tx);
@@ -843,29 +868,30 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证新语句取得新的输入预算，返回前的快照复核不会额外分配 RC 时间戳。
+     * Verify new statement obtained a new input budget and the snapshot review before return will not assign an additional RC timestamp.
      */
     @Test
     void calciteStatementShouldRenewBudgetWithoutExtraReadTimestamp() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "value", 1L);
         AtomicLong sequence = new AtomicLong(1L);
-        try (TransactionManager manager = new TransactionManager(sequence::incrementAndGet,
-                new InMemoryTransactionMetadataStore(), TransactionOptions.defaults(), Map.of("s0", storage));
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 1, 1024)).openSession()) {
+        try (
+                TransactionManager manager = new TransactionManager(sequence::incrementAndGet,
+                        new InMemoryTransactionMetadataStore(), TransactionOptions.defaults(), Map.of("s0", storage));
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024, 1, 1024)).openSession()) {
             session.begin(IsolationLevel.READ_COMMITTED);
             for (int index = 0; index < 2; index++) {
                 long before = sequence.get();
-                assertEquals("1", session.execute("select count(*) as total from account").singleRow().get("total"));
-                assertEquals(before + 1, sequence.get());
+                Assertions.assertEquals("1", session.execute("select count(*) as total from account").singleRow().get("total"));
+                Assertions.assertEquals(before + 1, sequence.get());
             }
             session.rollback();
         }
     }
 
     /**
-     * 验证最后一页读取之后在解码或关系计算阶段租约到期，显式事务不能返回过期结果。
+     * Verify expires at decoding or relationship calculation stage lease after the last page is read, visible transaction cannot return the expired result.
      */
     @Test
     void calciteShouldValidateLeaseAfterFinalPageProcessing() {
@@ -873,32 +899,40 @@ class AzirSqlSessionTest {
         storage.seed("account", "a", "value", 1L);
         AtomicLong now = new AtomicLong(1_000L);
         SqlValueCodec expiringCodec = new SqlValueCodec() {
+
             /**
-             * 保留默认 UTF-8 编码行为。
+             * Keeps the default UTF-8 encoded behaviour.
+             *
+             * @param value value to write
+             * @return the operation result
              */
             @Override
-            public byte[] encode(String value) {
+            public byte[] encode(final String value) {
                 return SqlValueCodec.utf8().encode(value);
             }
 
             /**
-             * 在存储已经返回页面后推进测试时钟，不执行等待或真实耗时工作。
+             * Moves the test clock after you have stored a returned page and does not perform waiting or real time-consuming work.
+             *
+             * @param value value to write
+             * @return the operation result
              */
             @Override
-            public String decode(byte[] value) {
+            public String decode(final byte[] value) {
                 now.addAndGet(TransactionOptions.defaults().limits().timeoutMillis() + 1);
                 return SqlValueCodec.utf8().decode(value);
             }
         };
-        try (TransactionManager manager = new TransactionManager(new AtomicTimestampOracle(1L), metadataWithClock(now),
-                TransactionOptions.defaults(), Map.of("s0", storage));
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), expiringCodec,
-                     IsolationLevel.READ_COMMITTED).openSession()) {
+        try (
+                TransactionManager manager = new TransactionManager(new AtomicTimestampOracle(1L), metadataWithClock(now),
+                        TransactionOptions.defaults(), Map.of("s0", storage));
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), expiringCodec,
+                        IsolationLevel.READ_COMMITTED).openSession()) {
             session.begin(IsolationLevel.READ_COMMITTED);
             MvccException failure = assertThrows(MvccException.class,
                     () -> session.execute("select value from account order by value desc limit 1"));
-            assertEquals(ErrorCode.TRANSACTION_TIMEOUT, failure.errorCode());
-            assertEquals(1, storage.pageRanges.size());
+            Assertions.assertEquals(ErrorCode.TRANSACTION_TIMEOUT, failure.errorCode());
+            Assertions.assertEquals(1, storage.pageRanges.size());
             assertFalse(session.active());
             assertThrows(MvccException.class, session::commit);
             session.rollback();
@@ -906,78 +940,82 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证结果行数超限会报错而不是返回被截断的成功结果。
+     * Verify resulted in errors over the number of lines rather than a return to successful results that had been cut off.
      */
     @Test
     void calciteResultRowBudgetShouldFailExplicitly() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "first", 1L);
         storage.seed("account", "b", "second", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024)).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024)).openSession()) {
             MvccException failure = assertThrows(MvccException.class, () -> session.execute("select id from account"));
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
             assertTrue(failure.getMessage().contains("row budget"));
         }
     }
 
     /**
-     * 验证 DML 源结果超限时不会应用已收集的前缀行。
+     * The collected prefix will not be applied when the verify DML source result exceeds its limit.
      */
     @Test
     void calciteInsertSelectBudgetFailureShouldNotWritePrefix() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "first", 1L);
         storage.seed("account", "b", "second", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024)).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 1, 1024)).openSession()) {
             MvccException failure = assertThrows(MvccException.class,
                     () -> session.execute("insert into archive (id, value) select id, value from account"));
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
             assertTrue(session.execute("select * from archive").rows().isEmpty());
         }
     }
 
     /**
-     * 验证字节预算按 UTF-8 编码而非字符数计费，异常后显式事务无法继续提交。
+     * Verify byte budget coded on UTF-8 instead of character numbers. Unusual and visible transaction cannot continue commit.
      */
     @Test
     void calciteResultByteBudgetShouldCountUtf8AndInvalidateTransaction() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "中", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 10, 2)).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = AzirSqlEngine.calcite(manager, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED, new SqlExecutionOptions(1, 10, 2)).openSession()) {
             session.begin(IsolationLevel.READ_COMMITTED);
             MvccException failure = assertThrows(MvccException.class, () -> session.execute("select value from account"));
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED, failure.errorCode());
             assertTrue(failure.getMessage().contains("byte budget"));
             assertFalse(session.active());
             assertThrows(MvccException.class, session::commit);
             session.rollback();
-            assertEquals("a", session.execute("select id from account").singleRow().get("id"));
+            Assertions.assertEquals("a", session.execute("select id from account").singleRow().get("id"));
         }
     }
 
     /**
-     * 验证第二行预写失败会回滚整个显式事务，包括先前成功语句的写入，并阻止隐式自动提交。
+     * Verify The second line prewrite failed rollback -wide transaction, including the writing of previous successful statements, and prevented hidden autocommit.
      */
     @Test
     void calciteDmlFailureShouldRollbackWholeExplicitTransaction() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
-        try (TransactionManager manager = new TransactionManager(new AtomicTimestampOracle(1L),
-                new InMemoryTransactionMetadataStore(), TransactionOptions.failFastDefaults(), Map.of("s0", storage));
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+        try (
+                TransactionManager manager = new TransactionManager(new AtomicTimestampOracle(1L),
+                        new InMemoryTransactionMetadataStore(), TransactionOptions.failFastDefaults(), Map.of("s0", storage));
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
             session.begin(IsolationLevel.READ_COMMITTED);
             session.execute("insert into account (id, value) values ('prior', 'saved')");
             storage.failPrewriteKey = new SqlStorageKeyCodec().encode("account", "b");
             MvccException failure = assertThrows(MvccException.class, () -> session.execute(
                     "insert into account (id, value) values ('a', 'one'), ('b', 'two')"));
-            assertEquals(ErrorCode.STORAGE_UNAVAILABLE, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.STORAGE_UNAVAILABLE, failure.errorCode());
             assertTrue(failure.getMessage().contains("entire explicit transaction rolled back"));
-            assertEquals(1, storage.abortCount());
+            Assertions.assertEquals(1, storage.abortCount());
             assertTrue(storage.intentsByTx.isEmpty());
             assertFalse(session.active());
             assertThrows(MvccException.class, session::commit);
@@ -988,13 +1026,14 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证一条 INSERT 内重复主键不会留下部分写入。
+     * A repeat primary key in an verify INSERT does not leave a part to write.
      */
     @Test
     void calciteInsertShouldRejectDuplicateKeysWithinStatement() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
             assertThrows(MvccException.class, () -> session.execute(
                     "insert into account (id, value) values ('a', 'first'), ('a', 'second')"));
             assertTrue(session.execute("select * from account").rows().isEmpty());
@@ -1002,23 +1041,24 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证 UPDATE 交换两个主键时不覆盖或删除其中一行。
+     * Verify UPDATE does not overwrite or delete one of the rows when exchanging two primary keys.
      */
     @Test
     void calciteUpdateShouldPreserveBothRowsWhenKeysSwap() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
         storage.seed("account", "a", "first", 1L);
         storage.seed("account", "b", "second", 1L);
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
-            assertEquals(2, session.execute("update account set id = case when id = 'a' then 'b' else 'a' end").updateCount());
-            assertEquals(List.of("second", "first"), session.execute("select value from account order by id").rows().stream()
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+            Assertions.assertEquals(2, session.execute("update account set id = case when id = 'a' then 'b' else 'a' end").updateCount());
+            Assertions.assertEquals(List.of("second", "first"), session.execute("select value from account order by id").rows().stream()
                     .map(row -> row.get("value")).toList());
         }
     }
 
     /**
-     * 验证测试适配器声明的能力真实可用：提交后尚未物化的意向按 commitTs 可见，墓碑仍遮蔽旧值。
+     * The verify test adapter states that the capability is real: intent after commit and not yet materialization by committee Ts visible, tombstone still hides old values.
      */
     @Test
     void testAdapterShouldResolveCommittedIntentsAtSnapshotBoundary() {
@@ -1039,7 +1079,7 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证关闭后不会调用计划器或创建事务，所有事务操作均被拒绝且重复关闭无副作用。
+     * Verify does not call the planner or create transaction, all transaction operations are rejected and repeated off without side effects.
      */
     @Test
     void closedSessionShouldRejectFurtherUseBeforePlanning() {
@@ -1049,25 +1089,26 @@ class AzirSqlSessionTest {
             planned.set(true);
             return new SqlPlan.SelectByKeyPlan("account", "a");
         };
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = new AzirSqlEngine(manager, planner, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
-                     IsolationLevel.READ_COMMITTED).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = new AzirSqlEngine(manager, planner, ShardResolver.singleShard("s0"), SqlValueCodec.utf8(),
+                        IsolationLevel.READ_COMMITTED).openSession()) {
             session.close();
             assertFalse(session.active());
             assertThrows(MvccException.class, () -> session.begin(IsolationLevel.READ_COMMITTED));
             MvccException failure = assertThrows(MvccException.class, () -> session.execute("select anything"));
-            assertEquals(ErrorCode.ILLEGAL_STATE, failure.errorCode());
+            Assertions.assertEquals(ErrorCode.ILLEGAL_STATE, failure.errorCode());
             assertTrue(failure.getMessage().contains("session is closed"));
             assertFalse(planned.get());
             assertThrows(MvccException.class, session::commit);
             assertThrows(MvccException.class, session::rollback);
             session.close();
-            assertEquals(0, storage.abortCount());
+            Assertions.assertEquals(0, storage.abortCount());
         }
     }
 
     /**
-     * 验证关闭活动会话只清理一次整个事务，且之前的写入不可见。
+     * Verify closes active session only once cleans up the whole transaction and previous writing is invisible.
      */
     @Test
     void closeShouldRollbackTransactionOnlyOnce() {
@@ -1079,7 +1120,7 @@ class AzirSqlSessionTest {
                 session.execute("insert into account (id, value) values ('a', 'value')");
                 session.close();
                 session.close();
-                assertEquals(1, storage.abortCount());
+                Assertions.assertEquals(1, storage.abortCount());
                 assertThrows(MvccException.class, () -> session.begin(IsolationLevel.READ_COMMITTED));
             }
             try (SqlSession reader = engine.openSession()) {
@@ -1089,13 +1130,14 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 验证清理事务失败也不会重新开放已关闭的会话，重复关闭不会重复发送失败的清理请求。
+     * The verify clean-up transaction failed and the closed session closed will not be reopened. Repeated shut-down does not repeat failed clean-up requests.
      */
     @Test
     void rollbackFailureDuringCloseShouldKeepSessionClosed() {
         InMemoryTestStorageAdapter storage = new InMemoryTestStorageAdapter("s0");
-        try (TransactionManager manager = manager(storage);
-             SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
+        try (
+                TransactionManager manager = manager(storage);
+                SqlSession session = pagedEngine(manager, ShardResolver.singleShard("s0"), 1).openSession()) {
             session.begin(IsolationLevel.READ_COMMITTED);
             session.execute("insert into account (id, value) values ('a', 'value')");
             storage.failAbort = true;
@@ -1105,7 +1147,7 @@ class AzirSqlSessionTest {
                 assertThrows(MvccException.class, () -> session.begin(IsolationLevel.READ_COMMITTED));
                 assertThrows(MvccException.class, () -> session.execute("select * from account"));
                 session.close();
-                assertEquals(1, storage.abortCount());
+                Assertions.assertEquals(1, storage.abortCount());
             } finally {
                 storage.failAbort = false;
             }
@@ -1113,88 +1155,109 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 仅替换元数据接口时钟，其余操作委托真实内存实现，以确定性覆盖 SQL 返回前租约检查。
+     * Replaces only metadata interface clocks, and the rest of operations commission real memory realization to determine sexual overlay SQL returns before lease check.
+     *
+     * @param now now
+     * @return the operation result
      */
-    private TransactionMetadataStore metadataWithClock(AtomicLong now) {
+    private TransactionMetadataStore metadataWithClock(final AtomicLong now) {
         TransactionMetadataStore delegate = new InMemoryTransactionMetadataStore();
         return (TransactionMetadataStore) Proxy.newProxyInstance(TransactionMetadataStore.class.getClassLoader(),
                 new Class<?>[]{TransactionMetadataStore.class}, (proxy, method, args) -> {
                     if (method.getName().equals("currentTimeMillis")) {
                         return now.get();
                     }
-                    // 未被内存实现覆盖的默认方法以代理为接收者，内部时钟调用仍经过测试替身。
+                    // The default method for achieving coverage without memory is proxy-receiver, and internal clock calls are still tested as a double.
                     if (method.isDefault() && delegate.getClass()
                             .getMethod(method.getName(), method.getParameterTypes()).getDeclaringClass().isInterface()) {
                         return InvocationHandler.invokeDefault(proxy, method, args);
                     }
                     try {
                         return method.invoke(delegate, args);
-                    } catch (InvocationTargetException ex) {
+                    } catch (final InvocationTargetException ex) {
                         throw ex.getCause();
                     }
                 });
     }
 
     /**
-     * 创建指定页大小并保留默认结果预算的测试引擎。
+     * Creates a test engine for the specified page size and maintains the default result budget.
+     *
+     * @param manager manager
+     * @param resolver resolver
+     * @param pageSize page size
+     * @return the operation result
      */
-    private AzirSqlEngine pagedEngine(TransactionManager manager, ShardResolver resolver, int pageSize) {
+    private AzirSqlEngine pagedEngine(final TransactionManager manager, final ShardResolver resolver, final int pageSize) {
         SqlExecutionOptions defaults = SqlExecutionOptions.defaults();
         return AzirSqlEngine.calcite(manager, resolver, SqlValueCodec.utf8(), IsolationLevel.READ_COMMITTED,
                 new SqlExecutionOptions(pageSize, defaults.maxResultRows(), defaults.maxResultBytes()));
     }
 
     /**
-     * 创建默认测试 SQL 引擎。
+     * Creates the default SQL engine.
+     *
+     * @param storage storage
+     * @return the operation result
      */
-    private AzirSqlEngine engine(InMemoryTestStorageAdapter storage) {
+    private AzirSqlEngine engine(final InMemoryTestStorageAdapter storage) {
         return new AzirSqlEngine(
                 manager(storage),
                 new SimpleSqlPlanner(),
                 ShardResolver.singleShard(storage.shardId()),
                 SqlValueCodec.utf8(),
-                IsolationLevel.READ_COMMITTED
-        );
+                IsolationLevel.READ_COMMITTED);
     }
 
     /**
-     * 创建使用 Calcite 关系计划器的测试 SQL 引擎。
+     * Creates a test SQL engine using Calcite Relationship Planner.
+     *
+     * @param storage storage
+     * @return the operation result
      */
-    private AzirSqlEngine calciteEngine(InMemoryTestStorageAdapter storage) {
+    private AzirSqlEngine calciteEngine(final InMemoryTestStorageAdapter storage) {
         return AzirSqlEngine.calcite(
                 manager(storage),
                 ShardResolver.singleShard(storage.shardId()),
                 SqlValueCodec.utf8(),
-                IsolationLevel.READ_COMMITTED
-        );
+                IsolationLevel.READ_COMMITTED);
     }
 
     /**
-     * 创建默认测试事务管理器。
+     * Creates the default test transaction manager.
+     *
+     * @param storage storage
+     * @return the operation result
      */
-    private TransactionManager manager(InMemoryTestStorageAdapter storage) {
+    private TransactionManager manager(final InMemoryTestStorageAdapter storage) {
         return manager(new InMemoryTestStorageAdapter[]{storage});
     }
 
     /**
-     * 创建包含多个测试分片的事务管理器。
+     * Creates an transaction manager with multiple tests for shard.
+     *
+     * @param storages storages
+     * @return the operation result
      */
-    private TransactionManager manager(InMemoryTestStorageAdapter... storages) {
+    private TransactionManager manager(final InMemoryTestStorageAdapter... storages) {
         return new TransactionManager(
                 new AtomicTimestampOracle(1L),
                 new InMemoryTransactionMetadataStore(),
                 TransactionOptions.defaults(),
                 java.util.Arrays.stream(storages).collect(java.util.stream.Collectors.toMap(
                         InMemoryTestStorageAdapter::shardId,
-                        storage -> storage
-                ))
-        );
+                        storage -> storage)));
     }
 
     /**
-     * 读取测试存储中的最新已提交字符串。
+     * Reads the latest commit string in the test storage.
+     *
+     * @param storage storage
+     * @param table table
+     * @param key business key
+     * @return the operation result
      */
-    private String readCommittedValue(InMemoryTestStorageAdapter storage, String table, String key) {
+    private String readCommittedValue(final InMemoryTestStorageAdapter storage, final String table, final String key) {
         String physicalKey = new SqlStorageKeyCodec().encode(table, key);
         return storage.get(new ReadContext(-1L, Long.MAX_VALUE, IsolationLevel.READ_COMMITTED), physicalKey)
                 .map(VersionedValue::value)
@@ -1203,49 +1266,72 @@ class AzirSqlSessionTest {
     }
 
     /**
-     * 仅用于 SQL 会话测试的内存存储适配器。
+     * Memory storage adapter for SQL session testing only.
      */
     private static final class InMemoryTestStorageAdapter implements StorageAdapter {
+
         private final String shardId;
+
         private final Map<String, NavigableMap<Long, VersionedValue>> committedValues = new HashMap<>();
+
         private final Map<Long, Map<String, Mutation>> intentsByTx = new HashMap<>();
+
         private final List<Long> scanReadTimestamps = new ArrayList<>();
+
         private final List<Long> pointReadTimestamps = new ArrayList<>();
+
         private final List<String> pointReadKeys = new ArrayList<>();
+
         private final List<KeyRange> pageRanges = new ArrayList<>();
+
         private TransactionMetadataStore metadataStore;
+
         private Consumer<ReadContext> afterFirstPage;
+
         private boolean failCommitWithStatusUnknown;
+
         private boolean failAbort;
+
         private String failPrewriteKey;
+
         private int scannedKeyCount;
+
         private int fullScanCount;
+
         private int abortCount;
 
         /**
-         * 构造内存测试存储适配器。
+         * Construct a memory test storage adaptor.
+         *
+         * @param shardId logical shard identifier
          */
-        private InMemoryTestStorageAdapter(String shardId) {
+        private InMemoryTestStorageAdapter(final String shardId) {
             this.shardId = shardId;
         }
 
         /**
-         * 设置参与者物化时是否模拟失败，由事务管理器包装为不可重试的提交未知异常。
+         * Sets whether the participant materialization simulation failed and the commit unknown anomaly is packaged by the transaction manager as not retry.
+         *
+         * @param failCommitWithStatusUnknown fail commit with status unknown
          */
-        private void failCommitWithStatusUnknown(boolean failCommitWithStatusUnknown) {
+        private void failCommitWithStatusUnknown(final boolean failCommitWithStatusUnknown) {
             this.failCommitWithStatusUnknown = failCommitWithStatusUnknown;
         }
 
         /**
-         * 绑定权威元数据，读路径只将已经提交且不晚于快照的其他事务意向视为版本。
+         * Bind authority metadata, only other transaction intent s that are already commit and not later than snapshot will be considered version.
+         *
+         * @param store store
          */
         @Override
-        public void configureMetadataStore(TransactionMetadataStore store) {
+        public void configureMetadataStore(final TransactionMetadataStore store) {
             metadataStore = store;
         }
 
         /**
-         * 本适配器的点读和扫描均实现已提交意向解析，可参与跨分片快照测试。
+         * The dot reading and scan of this adaptor achieves the commit intent resolution that allows for cross-shard snapshot testing.
+         *
+         * @return the operation result
          */
         @Override
         public boolean supportsCommittedIntentResolution() {
@@ -1253,9 +1339,14 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 直接建立指定提交时间的行，避免延迟扫描测试的准备阶段产生额外读取。
+         * Creates a line that specifies the commit time to avoid additional reading at the preparatory stage of delayed scanning tests.
+         *
+         * @param table table
+         * @param id id
+         * @param value value to write
+         * @param commitTs durable commit timestamp
          */
-        private void seed(String table, String id, String value, long commitTs) {
+        private void seed(final String table, final String id, final String value, final long commitTs) {
             String key = new SqlStorageKeyCodec().encode(table, id);
             committedValues.computeIfAbsent(key, ignored -> new TreeMap<>()).put(commitTs,
                     new VersionedValue(key, value == null ? null : value.getBytes(StandardCharsets.UTF_8),
@@ -1263,28 +1354,34 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 返回测试存储收到的回滚次数。
+         * Returns the number of rollback s received for testing storage.
+         *
+         * @return the operation result
          */
         private int abortCount() {
             return abortCount;
         }
 
         /**
-         * 清空扫描读取时间戳记录。
+         * Empty scan to read timestamp records.
          */
         private void clearScanReadTimestamps() {
             scanReadTimestamps.clear();
         }
 
         /**
-         * 返回扫描读取时间戳记录。
+         * Returns to scan for timestamp records.
+         *
+         * @return the operation result
          */
         private List<Long> scanReadTimestamps() {
             return List.copyOf(scanReadTimestamps);
         }
 
         /**
-         * 返回当前测试分片编号。
+         * Returns the current test shard number.
+         *
+         * @return the operation result
          */
         @Override
         public String shardId() {
@@ -1292,26 +1389,34 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 初始化测试存储。
+         * Initialised test storage.
          */
         @Override
         public void initialize() {
         }
 
         /**
-         * 按 MVCC 快照读取可见版本。
+         * Press MVCC snapshot to read visible version.
+         *
+         * @param context context
+         * @param key business key
+         * @return the operation result
          */
         @Override
-        public Optional<VersionedValue> get(ReadContext context, String key) {
+        public Optional<VersionedValue> get(final ReadContext context, final String key) {
             pointReadTimestamps.add(context.readTs());
             pointReadKeys.add(key);
             return visibleValue(context, key);
         }
 
         /**
-         * 合并自身意向、可见已提交版本与中心已提交的未物化意向，保留最新墓碑遮蔽语义。
+         * Merges its own intent, visible commit version with the commit unx4 intent, and retains the latest tombstone mask synonym.
+         *
+         * @param context context
+         * @param key business key
+         * @return the operation result
          */
-        private Optional<VersionedValue> visibleValue(ReadContext context, String key) {
+        private Optional<VersionedValue> visibleValue(final ReadContext context, final String key) {
             Mutation ownIntent = intentsByTx.getOrDefault(context.txId(), Map.of()).get(key);
             if (ownIntent != null) {
                 return Optional.of(toIntentValue(ownIntent, context.readTs()));
@@ -1335,10 +1440,14 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 按键范围扫描可见版本。
+         * The key range scan is visible version.
+         *
+         * @param context context
+         * @param keyRange key range
+         * @return the operation result
          */
         @Override
-        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+        public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
             fullScanCount++;
             scanReadTimestamps.add(context.readTs());
             List<VersionedValue> result = new ArrayList<>();
@@ -1349,10 +1458,16 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 按原始键分页并记录读取量，墓碑或不可见意向可产生带继续游标的空页。
+         * Press the original key to break and record reading, tombstone or invisible intent can generate empty pages with continued cursor.
+         *
+         * @param context context
+         * @param keyRange key range
+         * @param afterKeyExclusive after key exclusive
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public ScanPage scanPage(ReadContext context, KeyRange keyRange, String afterKeyExclusive, int limit) {
+        public ScanPage scanPage(final ReadContext context, final KeyRange keyRange, final String afterKeyExclusive, final int limit) {
             scanReadTimestamps.add(context.readTs());
             pageRanges.add(keyRange);
             List<String> candidates = keysInRange(keyRange).stream()
@@ -1373,9 +1488,12 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 以 UTF-8 键序列举版本和意向共有的物理键空间。
+         * Holds the physical key space common to version and intent in a UTF-8 series.
+         *
+         * @param range range
+         * @return the operation result
          */
-        private Set<String> keysInRange(KeyRange range) {
+        private Set<String> keysInRange(final KeyRange range) {
             Set<String> keys = new TreeSet<>(Utf8KeyOrder::compare);
             keys.addAll(committedValues.keySet());
             intentsByTx.values().forEach(intents -> keys.addAll(intents.keySet()));
@@ -1385,10 +1503,15 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 写入测试 intent 并检测简单写冲突。
+         * Write to test inent and detect simple write conflict.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
+         * @throws MvccException if the operation cannot complete
          */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
             for (Mutation mutation : mutations) {
                 if (mutation.key().equals(failPrewriteKey)) {
                     throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "injected prewrite failure", false, txId);
@@ -1402,25 +1525,36 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 准备测试 intent。
+         * Prepare to test incent.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
         }
 
         /**
-         * 提交测试 intent。
+         * Commit Test inent.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
          */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
             commit(txId, commitTs, List.of(), true);
         }
 
         /**
-         * 提交测试 intent 或直接使用传入变更生成版本。
+         * Commit Test inent or directly use input changes to generate version.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
+         * @throws MvccException if the operation cannot complete
          */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
             if (failCommitWithStatusUnknown) {
                 throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "injected finalize failure", false, txId);
             }
@@ -1438,10 +1572,15 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 直接生成已提交测试版本。
+         * Directly generate commit test version.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
          */
         @Override
-        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
             for (Mutation mutation : mutations) {
                 detectConflict(txId, startTs, mutation.key());
             }
@@ -1449,18 +1588,24 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 清理指定事务的测试 intent。
+         * Clears the specified transaction test inent.
+         *
+         * @param txId transaction identifier
+         * @param mutations transaction write set
          */
         @Override
-        public void cleanupIntents(long txId, List<Mutation> mutations) {
+        public void cleanupIntents(final long txId, final List<Mutation> mutations) {
             intentsByTx.remove(txId);
         }
 
         /**
-         * 回滚测试事务。
+         * Roll back the test transaction.
+         *
+         * @param txId transaction identifier
+         * @throws MvccException if the operation cannot complete
          */
         @Override
-        public void abort(long txId) {
+        public void abort(final long txId) {
             abortCount++;
             if (failAbort) {
                 throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "injected abort failure", false, txId);
@@ -1469,25 +1614,37 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 查找仍有测试 intent 的事务。
+         * Finds transaction where there is still a test incent.
+         *
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public Set<Long> findPendingTransactionIds(int limit) {
+        public Set<Long> findPendingTransactionIds(final int limit) {
             return new HashSet<>(intentsByTx.keySet());
         }
 
         /**
-         * 测试存储不执行 GC。
+         * Test storage does not execute GC.
+         *
+         * @param safePoint oldest retained snapshot timestamp
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public int gc(long safePoint, int limit) {
+        public int gc(final long safePoint, final int limit) {
             return 0;
         }
 
         /**
-         * 检测写写冲突。
+         * Test writing write conflict.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param key business key
+         * @throws MvccException if the operation cannot complete
          */
-        private void detectConflict(long txId, long startTs, String key) {
+        private void detectConflict(final long txId, final long startTs, final String key) {
             for (Map.Entry<Long, Map<String, Mutation>> entry : intentsByTx.entrySet()) {
                 if (entry.getKey() != txId && entry.getValue().containsKey(key)) {
                     throw new MvccException(ErrorCode.WRITE_CONFLICT, "intent conflict on key " + key, true, txId);
@@ -1500,29 +1657,35 @@ class AzirSqlSessionTest {
         }
 
         /**
-         * 把变更转换成测试 intent 值。
+         * Converts changes to test indent values.
+         *
+         * @param mutation mutation
+         * @param readTs snapshot read timestamp
+         * @return the operation result
          */
-        private VersionedValue toIntentValue(Mutation mutation, long readTs) {
+        private VersionedValue toIntentValue(final Mutation mutation, final long readTs) {
             return new VersionedValue(
                     mutation.key(),
                     mutation.value(),
                     mutation.type() == MutationType.DELETE,
                     readTs,
-                    true
-            );
+                    true);
         }
 
         /**
-         * 把变更转换成已提交测试版本。
+         * Convert changes to commit test version.
+         *
+         * @param mutation mutation
+         * @param commitTs durable commit timestamp
+         * @return the operation result
          */
-        private VersionedValue toCommittedValue(Mutation mutation, long commitTs) {
+        private VersionedValue toCommittedValue(final Mutation mutation, final long commitTs) {
             return new VersionedValue(
                     mutation.key(),
                     mutation.value(),
                     mutation.type() == MutationType.DELETE,
                     commitTs,
-                    false
-            );
+                    false);
         }
     }
 }

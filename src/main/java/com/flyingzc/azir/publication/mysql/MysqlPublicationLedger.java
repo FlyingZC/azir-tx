@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -43,80 +59,86 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/** MySQL 持久化提交账本原型，使用独立版本表避免与现行发布协议混写。 */
+/**
+ * MySQL durable storage commit prototype, using a stand-alone version table to avoid mixing with the current release protocol.
+ */
 public final class MysqlPublicationLedger {
+
     private final DataSource dataSource;
+
     private volatile boolean atomicIntentProcedureReady;
+
     private volatile boolean beginProcedureReady;
+
     private volatile boolean localReserveProcedureReady;
+
     private volatile boolean localCompleteProcedureReady;
+
     private final LongAdder batchValidationNanos = new LongAdder();
+
     private final LongAdder batchStateWaitNanos = new LongAdder();
+
     private final LongAdder batchWriteNanos = new LongAdder();
+
     private final LongAdder batchFinishNanos = new LongAdder();
+
     private final LongAdder batchCalls = new LongAdder();
 
-    /** 一条一致读同时捕获指定决议和当前发布水位。 */
-    private record PublicationObservation(long publishedTs, long commitTs, PublicationEntryStatus status) {
-    }
-
-    /** 保留调用顺序并预先编码参与者，避免持有时间线行锁时格式化字符串。 */
-    private record IndexedIntentCommit(int index, PublicationIntentCommit request, String participants) {
-    }
-
-    /** 保存单分片预留调用顺序，持锁时只处理已校验的不可变请求。 */
-    private record IndexedLocalCommit(int index, PublicationLocalCommitRequest request) {
-    }
-
-    /** 保留本地提交证明的调用顺序并按提交时间安全获取账本行锁。 */
-    private record IndexedLocalProof(int index, PublicationLocalCommitProof proof) {
-    }
-
-    /** 保存一次无锁租约批量读取的开始快照和截止时间。 */
-    private record SnapshotLease(long readTs, long expiresAtMillis) {
-    }
-
-    /** 保存批量提交的一次锁定读取结果，供按事务编号验证全部中心元数据。 */
-    private record BatchIntentMetadata(long startTs, String status, Long commitTs, String participants) {
-    }
-
-    /** 汇报批量控制事务各阶段累计耗时，供隔离压测定位串行成本。 */
-    public record BatchTiming(long calls, long validationNanos, long stateWaitNanos,
-                              long writeNanos, long finishNanos) {
-    }
-
-    /** 返回批量控制事务的累计阶段耗时。 */
+    /**
+     * Returns the time-consuming cumulative phase of batch control transaction.
+     *
+     * @return the operation result
+     */
     public BatchTiming batchTiming() {
         return new BatchTiming(batchCalls.sum(), batchValidationNanos.sum(), batchStateWaitNanos.sum(),
                 batchWriteNanos.sum(), batchFinishNanos.sum());
     }
 
-    /** 绑定同一个 MySQL 控制数据库。 */
-    public MysqlPublicationLedger(DataSource dataSource) {
+    /**
+     * Bind the same MySQL control database.
+     *
+     * @param dataSource database connection source
+     */
+    public MysqlPublicationLedger(final DataSource dataSource) {
         this.dataSource = dataSource;
     }
 
-    /** 拒绝把账本时间线与另一控制库的事务元数据混用。 */
-    public boolean sharesMetadataAuthority(TransactionMetadataStore metadataStore) {
+    /**
+     * Rejects mixing of account time lines with transaction metadata in another control library.
+     *
+     * @param metadataStore metadata store
+     * @return the operation result
+     */
+    public boolean sharesMetadataAuthority(final TransactionMetadataStore metadataStore) {
         return metadataStore instanceof MysqlTransactionMetadataStore mysql
                 && mysql.usesDataSource(dataSource);
     }
 
-    /** 过渡期仍存在的旧控制调用只能使用同一 MySQL 数据源的 TSO。 */
-    public boolean sharesTimestampAuthority(TimestampOracle timestampOracle) {
+    /**
+     * The old controls that still exist during the transition period can only be called by TSO using the same MySQL data source.
+     *
+     * @param timestampOracle timestamp oracle
+     * @return the operation result
+     */
+    public boolean sharesTimestampAuthority(final TimestampOracle timestampOracle) {
         return timestampOracle instanceof MysqlTimestampAuthority authority
                 && authority.usesDataSource(dataSource);
     }
 
-    /** 新协调器构造前确认跨进程模式已持久切换到账本。 */
+    /**
+     * The new coordinator configuration confirms that the cross-process mode has been switched to an account book by durable.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     public void assertActivated() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement routines = connection.prepareStatement("""
-                     select routine_name from information_schema.routines
-                     where routine_schema = database()
-                       and routine_name in ('mvcc_ledger_begin_v2', 'mvcc_ledger_intent_commit_v1',
-                                            'mvcc_ledger_local_reserve_v1', 'mvcc_ledger_local_complete_v2')
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement routines = connection.prepareStatement("""
+                        select routine_name from information_schema.routines
+                        where routine_schema = database()
+                          and routine_name in ('mvcc_ledger_begin_v2', 'mvcc_ledger_intent_commit_v1',
+                                               'mvcc_ledger_local_reserve_v1', 'mvcc_ledger_local_complete_v2')
+                        """)) {
             MysqlProtocolEpoch.requireLedger(connection);
             boolean beginReady = false;
             boolean commitReady = false;
@@ -143,12 +165,14 @@ public final class MysqlPublicationLedger {
             atomicIntentProcedureReady = true;
             localReserveProcedureReady = true;
             localCompleteProcedureReady = true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("inspect publication protocol mode failed", null, ex);
         }
     }
 
-    /** 在跨进程发布锁内建立旧协议栅栏，再从旧 TSO 上界激活新时间线。 */
+    /**
+     * Creates an old protocol fence in the inter-process release lock, and activates a new time line from the old TSO upper horizon.
+     */
     public void initialize() {
         MysqlConnectionContext.withPublicationLock(dataSource, 10, () -> {
             initializeUnderPublicationLock();
@@ -156,11 +180,16 @@ public final class MysqlPublicationLedger {
         });
     }
 
-    /** 在旧快照外键栅栏已安装后推进 ACTIVATING，再原子提交账本状态和 LEDGER 模式。 */
+    /**
+     * Push ACTIVATING, atomic commit account state and LEDGER mode after the old snapshot key fence has been installed.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     private void initializeUnderPublicationLock() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             Statement statement = connection.createStatement()) {
-            // 迟到旧进程必须在 install 的任何 DDL 之前识别已切换的分段模式。
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                Statement statement = connection.createStatement()) {
+            // Late to an old process must recognize the transitioned segment mode before any DDL of install.
             try {
                 MysqlProtocolEpoch.Mode installed = MysqlProtocolEpoch.current(connection);
                 if (installed == MysqlProtocolEpoch.Mode.SEGMENT_PREPARE
@@ -168,7 +197,7 @@ public final class MysqlPublicationLedger {
                     throw new MvccException(ErrorCode.ILLEGAL_STATE,
                             "old publication ledger cannot initialize after segmented fencing", false, null);
                 }
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 if (ex.getErrorCode() != 1146) {
                     throw ex;
                 }
@@ -224,8 +253,9 @@ public final class MysqlPublicationLedger {
             localCompleteProcedureReady = true;
             ensureBeginProcedure(connection);
             beginProcedureReady = true;
-            try (ResultSet existing = statement.executeQuery(
-                    "select next_commit_ts, published_ts, safe_point from mvcc_publication_state_v1 where singleton_id = 1")) {
+            try (
+                    ResultSet existing = statement.executeQuery(
+                            "select next_commit_ts, published_ts, safe_point from mvcc_publication_state_v1 where singleton_id = 1")) {
                 if (existing.next()) {
                     long next = existing.getLong(1);
                     long published = existing.getLong(2);
@@ -251,7 +281,7 @@ public final class MysqlPublicationLedger {
                             "publication state missing while ledger rows remain", false, null);
                 }
             }
-            // 已知的旧时间线错误先拒绝，避免不必要地把可用旧协议置于 ACTIVATING。
+            // Known old time-line errors are rejected first, avoiding unnecessary placement of the used agreements in ACTIVATING.
             long checkedUpper = legacyTimestampUpper(connection);
             requireLegacyTimestampBound(connection, checkedUpper);
             requireValidLegacyUpper(checkedUpper);
@@ -288,21 +318,31 @@ public final class MysqlPublicationLedger {
                         MysqlProtocolEpoch.Mode.LEDGER);
                 return null;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("initialize publication ledger failed", null, ex);
         }
     }
 
-    /** 验证旧 TSO 上界可安全作为新账本和租约编号的初始边界。 */
-    private void requireValidLegacyUpper(long oldUpper) {
+    /**
+     * Verify The old TSO upper border is secure as the initial boundary of a new book and lease number.
+     *
+     * @param oldUpper old upper
+     * @throws MvccException if the operation cannot complete
+     */
+    private void requireValidLegacyUpper(final long oldUpper) {
         if (oldUpper < 0 || oldUpper == Long.MAX_VALUE) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "invalid old timestamp upper bound for publication migration", false, null);
         }
     }
 
-    /** 安装单次服务器调用完成的版本化意向提交例程，保持失败时整笔控制事务回滚。 */
-    private void ensureAtomicIntentProcedure(Connection connection) throws SQLException {
+    /**
+     * Install a single-time server to call completed version intent commit routine and maintain block control transaction rollback if it fails.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureAtomicIntentProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_ledger_intent_commit_v1' limit 1
@@ -394,15 +434,20 @@ public final class MysqlPublicationLedger {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 安装单次调用完成本地直接提交预留及中心候选决议的版本化例程。 */
-    private void ensureLocalReserveProcedure(Connection connection) throws SQLException {
+    /**
+     * Install a single call to complete the version routine for local direct commit reservation and centre candidate decision.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureLocalReserveProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_ledger_local_reserve_v1' limit 1
@@ -493,15 +538,20 @@ public final class MysqlPublicationLedger {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 安装本地已提交证明完成中心决议和即时水位发布的版本化例程。 */
-    private void ensureLocalCompleteProcedure(Connection connection) throws SQLException {
+    /**
+     * Install local has completed the version routines issued by Centre decision and Immediate watermark.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureLocalCompleteProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_ledger_local_complete_v2' limit 1
@@ -598,15 +648,20 @@ public final class MysqlPublicationLedger {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 安装共享行锁下读取水位和登记租约的版本化 begin 例程。 */
-    private void ensureBeginProcedure(Connection connection) throws SQLException {
+    /**
+     * Installs an version begin routine for reading watermark and registering lease under a shared line lock.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureBeginProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_ledger_begin_v2' limit 1
@@ -658,22 +713,29 @@ public final class MysqlPublicationLedger {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 旧协议仍有租约或未完成物化的事务时拒绝启动新时间线。 */
-    private void requireLegacyDrained(Connection connection) throws SQLException {
-        try (Statement statement = connection.createStatement();
-             ResultSet result = statement.executeQuery("""
-                     select (select count(*) from mvcc_txn t
-                               left join mvcc_txn_finalized f on f.tx_id = t.tx_id
-                               where f.tx_id is null)
-                          + (select count(*) from mvcc_snapshot_lease)
-                     """)) {
+    /**
+     * The old protocol still refuses to start a new time line when lease or transaction of materialization is not finished.
+     *
+     * @param connection connection
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void requireLegacyDrained(final Connection connection) throws SQLException {
+        try (
+                Statement statement = connection.createStatement();
+                ResultSet result = statement.executeQuery("""
+                        select (select count(*) from mvcc_txn t
+                                  left join mvcc_txn_finalized f on f.tx_id = t.tx_id
+                                  where f.tx_id is null)
+                             + (select count(*) from mvcc_snapshot_lease)
+                        """)) {
             if (!result.next() || result.getLong(1) != 0) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "old publication protocol must drain before migration", false, null);
@@ -681,11 +743,19 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 从旧全局 TSO 读取已分配上界，避免旧事务 ID 与新租约自动编号重用。 */
-    private long legacyTimestampUpper(Connection connection) throws SQLException {
-        try (PreparedStatement query = connection.prepareStatement(
-                "select current_value from mvcc_tso where sequence_name = 'global'");
-             ResultSet result = query.executeQuery()) {
+    /**
+     * Reads the assigned upper boundary from the old global TSO and avoids renumbering the old transaction ID with the new lease.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private long legacyTimestampUpper(final Connection connection) throws SQLException {
+        try (
+                PreparedStatement query = connection.prepareStatement(
+                        "select current_value from mvcc_tso where sequence_name = 'global'");
+                ResultSet result = query.executeQuery()) {
             if (!result.next()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE, "old TSO row missing", false, null);
             }
@@ -693,12 +763,20 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 旧元数据中的事务编号和提交版本都必须落在旧 TSO 已持久化上界内。 */
-    private void requireLegacyTimestampBound(Connection connection, long upper) throws SQLException {
-        try (PreparedStatement query = connection.prepareStatement("""
-                select coalesce(max(tx_id), 0), coalesce(max(commit_ts), 0) from mvcc_txn
-                """);
-             ResultSet result = query.executeQuery()) {
+    /**
+     * Both transaction identifier and commit version of the old metadata must be located within the upper boundary of the old TSO already durable storage.
+     *
+     * @param connection connection
+     * @param upper upper
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void requireLegacyTimestampBound(final Connection connection, final long upper) throws SQLException {
+        try (
+                PreparedStatement query = connection.prepareStatement("""
+                        select coalesce(max(tx_id), 0), coalesce(max(commit_ts), 0) from mvcc_txn
+                        """);
+                ResultSet result = query.executeQuery()) {
             if (!result.next() || result.getLong(1) > upper || result.getLong(2) > upper) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "old transaction metadata exceeds durable TSO upper bound", false, null);
@@ -706,8 +784,16 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 共享控制行锁下取得已发布快照和独立事务 ID，并在返回前持久化租约。 */
-    public BeginReservation begin(IsolationLevel isolationLevel, long timeoutMillis, boolean persistMetadata) {
+    /**
+     * The shared control line lock secures the released snapshot and independent transaction ID, before returning durable storage lease.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @param timeoutMillis timeout millis
+     * @param persistMetadata persist metadata
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public BeginReservation begin(final IsolationLevel isolationLevel, final long timeoutMillis, final boolean persistMetadata) {
         if (timeoutMillis < 1 || timeoutMillis > 86_400_000L) {
             throw new IllegalArgumentException("invalid snapshot lease timeout");
         }
@@ -765,13 +851,20 @@ public final class MysqlPublicationLedger {
                 }
                 return new BeginReservation(txId, readTs, deadline, persistMetadata);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("begin publication snapshot failed", null, ex);
         }
     }
 
-    /** 在一次共享水位快照下持久登记多个独立租约，按请求顺序返回事务编号。 */
-    public List<BeginReservation> beginBatch(int count, long timeoutMillis) {
+    /**
+     * Register more than one independent lease under shared watermark snapshot and return transaction identifier in the requested order.
+     *
+     * @param count count
+     * @param timeoutMillis timeout millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<BeginReservation> beginBatch(final int count, final long timeoutMillis) {
         if (count < 1 || count > 64 || timeoutMillis < 1 || timeoutMillis > 86_400_000L) {
             throw new IllegalArgumentException("invalid publication begin batch size or timeout");
         }
@@ -830,16 +923,26 @@ public final class MysqlPublicationLedger {
                     return List.copyOf(reservations);
                 }
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("begin publication snapshot batch failed", null, ex);
         }
     }
 
-    /** 用一次服务器调用获取共享栅栏快照和独立事务编号。 */
-    private BeginReservation callBeginProcedure(IsolationLevel isolationLevel, long timeoutMillis,
-                                                boolean persistMetadata) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement call = connection.prepareStatement("call mvcc_ledger_begin_v2(?, ?, ?)")) {
+    /**
+     * Retrieving shared fence snapshot and independent transaction identifier with one call from a server.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @param timeoutMillis timeout millis
+     * @param persistMetadata persist metadata
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private BeginReservation callBeginProcedure(final IsolationLevel isolationLevel, final long timeoutMillis,
+                                                final boolean persistMetadata) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement call = connection.prepareStatement("call mvcc_ledger_begin_v2(?, ?, ?)")) {
             call.setString(1, isolationLevel.name());
             call.setLong(2, timeoutMillis);
             call.setBoolean(3, persistMetadata);
@@ -857,7 +960,7 @@ public final class MysqlPublicationLedger {
                 return new BeginReservation(result.getLong("tx_id"), result.getLong("read_ts"),
                         result.getLong("expires_at"), persistMetadata);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() == 30201) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "publication state missing", false, null, ex);
@@ -874,13 +977,26 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 在短事务中原子预留提交时间与 PENDING 行，重复请求返回原有预留。 */
-    public long reserveCommit(long txId, long expiresAtMillis) {
+    /**
+     * In short transaction, atomic sets the commit time in line PENDING, repeats a request to return the original reservation.
+     *
+     * @param txId transaction identifier
+     * @param expiresAtMillis expires at millis
+     * @return the operation result
+     */
+    public long reserveCommit(final long txId, final long expiresAtMillis) {
         return reserveCommit(txId, expiresAtMillis, null);
     }
 
-    /** 单分片本地直接提交前，原子预留时间槽和中心 PREPARING 候选决议。 */
-    public long reserveLocalCommit(long txId, long expiresAtMillis, String participant) {
+    /**
+     * Single shard local directly before commit, atomic sets the time slot and center PREPARING candidate decision.
+     *
+     * @param txId transaction identifier
+     * @param expiresAtMillis expires at millis
+     * @param participant participant
+     * @return the operation result
+     */
+    public long reserveLocalCommit(final long txId, final long expiresAtMillis, final String participant) {
         TransactionMetadataValidation.validateParticipant(txId, participant);
         if (localReserveProcedureReady) {
             return callLocalReserveProcedure(txId, expiresAtMillis, participant);
@@ -888,8 +1004,14 @@ public final class MysqlPublicationLedger {
         return reserveCommit(txId, expiresAtMillis, participant);
     }
 
-    /** 多笔本地直接提交共享一次持久时间线预留，失败时整批不产生时间戳缺口。 */
-    public List<Long> reserveLocalCommitBatch(List<PublicationLocalCommitRequest> requests) {
+    /**
+     * Multiple local direct commit shares an durable timeline preset, and the whole batch does not create an timestamp gap when it fails.
+     *
+     * @param requests requests
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<Long> reserveLocalCommitBatch(final List<PublicationLocalCommitRequest> requests) {
         if (requests.isEmpty()) {
             return List.of();
         }
@@ -936,7 +1058,7 @@ public final class MysqlPublicationLedger {
                         select start_ts, status, commit_ts, participants from mvcc_txn
                         where tx_id = ? for update
                         """)) {
-                    // 精确主键行锁按 txId 排序，避免 IN 范围锁阻塞其他事务登记。
+                    // Precise main key line lock to txId in order to avoid the IN range lock blocking other transaction registrations.
                     for (IndexedLocalCommit item : sorted) {
                         PublicationLocalCommitRequest request = item.request();
                         SnapshotLease lease = leases.get(request.txId());
@@ -959,21 +1081,23 @@ public final class MysqlPublicationLedger {
                     }
                 }
                 long nextTs;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select next_commit_ts from mvcc_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet row = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select next_commit_ts from mvcc_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet row = state.executeQuery()) {
                     if (!row.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing for local reservation batch", false, null);
                     }
                     nextTs = row.getLong(1);
                 }
-                try (PreparedStatement clock = connection.prepareStatement("""
-                        select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                        """);
-                     ResultSet now = clock.executeQuery()) {
+                try (
+                        PreparedStatement clock = connection.prepareStatement("""
+                                select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                                """);
+                        ResultSet now = clock.executeQuery()) {
                     if (!now.next() || earliestDeadline <= now.getLong(1)) {
                         throw new MvccException(ErrorCode.TRANSACTION_ABORTED,
                                 "local batch snapshot lease expired before reservation", false, null);
@@ -984,18 +1108,19 @@ public final class MysqlPublicationLedger {
                             "local batch commit timestamp cannot pass snapshot", false, null);
                 }
                 long upper = nextTs + sorted.size();
-                try (PreparedStatement state = connection.prepareStatement("""
-                        update mvcc_publication_state_v1 set next_commit_ts = ? where singleton_id = 1
-                        """);
-                     PreparedStatement entry = connection.prepareStatement("""
-                        insert into mvcc_publication_entry_v1(commit_ts, tx_id, status, expires_at)
-                        values (?, ?, 'PENDING', ?)
-                        """);
-                     PreparedStatement metadata = connection.prepareStatement("""
-                        update mvcc_txn set status = 'PREPARING', commit_ts = ?
-                        where tx_id = ? and status = 'ACTIVE' and commit_ts is null
-                          and binary participants = binary ?
-                        """)) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                update mvcc_publication_state_v1 set next_commit_ts = ? where singleton_id = 1
+                                """);
+                        PreparedStatement entry = connection.prepareStatement("""
+                                insert into mvcc_publication_entry_v1(commit_ts, tx_id, status, expires_at)
+                                values (?, ?, 'PENDING', ?)
+                                """);
+                        PreparedStatement metadata = connection.prepareStatement("""
+                                update mvcc_txn set status = 'PREPARING', commit_ts = ?
+                                where tx_id = ? and status = 'ACTIVE' and commit_ts is null
+                                  and binary participants = binary ?
+                                """)) {
                     state.setLong(1, upper);
                     if (state.executeUpdate() != 1) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -1025,15 +1150,25 @@ public final class MysqlPublicationLedger {
                     return List.copyOf(Arrays.asList(results));
                 }
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("batch local commit reservation failed", null, ex);
         }
     }
 
-    /** 用单次服务端调用完成单分片时间槽和候选决议的原子预留。 */
-    private long callLocalReserveProcedure(long txId, long expiresAtMillis, String participant) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement call = connection.prepareStatement("call mvcc_ledger_local_reserve_v1(?, ?, ?)")) {
+    /**
+     * Call a single service-end to complete the single shard slot and decision candidate atomic reservation.
+     *
+     * @param txId transaction identifier
+     * @param expiresAtMillis expires at millis
+     * @param participant participant
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private long callLocalReserveProcedure(final long txId, final long expiresAtMillis, final String participant) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement call = connection.prepareStatement("call mvcc_ledger_local_reserve_v1(?, ?, ?)")) {
             call.setLong(1, txId);
             call.setLong(2, expiresAtMillis);
             call.setString(3, participant);
@@ -1050,7 +1185,7 @@ public final class MysqlPublicationLedger {
                 }
                 return row.getLong("commit_ts");
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() == 30402) {
                 throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         "local reservation replay differs from durable candidate", false, txId, ex);
@@ -1067,24 +1202,33 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 可选地把单分片候选时间与 PENDING 行放在同一控制事务，避免恢复中间空窗。 */
-    private long reserveCommit(long txId, long expiresAtMillis, String localParticipant) {
+    /**
+     * Optionally place single shard candidate time in the same control transaction as PENDING row to avoid an empty window in recovery.
+     *
+     * @param txId transaction identifier
+     * @param expiresAtMillis expires at millis
+     * @param localParticipant local participant
+     * @return the operation result
+     */
+    private long reserveCommit(final long txId, final long expiresAtMillis, final String localParticipant) {
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long nextTs;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select next_commit_ts from mvcc_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet result = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select next_commit_ts from mvcc_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet result = state.executeQuery()) {
                     if (!result.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing", false, txId);
                     }
                     nextTs = result.getLong(1);
                 }
-                try (PreparedStatement existing = connection.prepareStatement(
-                        "select commit_ts, status, expires_at from mvcc_publication_entry_v1 where tx_id = ?")) {
+                try (
+                        PreparedStatement existing = connection.prepareStatement(
+                                "select commit_ts, status, expires_at from mvcc_publication_entry_v1 where tx_id = ?")) {
                     existing.setLong(1, txId);
                     try (ResultSet result = existing.executeQuery()) {
                         if (result.next()) {
@@ -1107,7 +1251,7 @@ public final class MysqlPublicationLedger {
                                                 || !("PENDING".equals(entryStatus)
                                                         && "PREPARING".equals(record.getString("status"))
                                                         || "COMMITTED".equals(entryStatus)
-                                                        && "COMMITTED".equals(record.getString("status")))) {
+                                                                && "COMMITTED".equals(record.getString("status")))) {
                                             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                                                     "local reservation replay has different durable decision", false, txId);
                                         }
@@ -1119,11 +1263,12 @@ public final class MysqlPublicationLedger {
                     }
                 }
                 long startTs;
-                try (PreparedStatement lease = connection.prepareStatement(
-                        """
-                        select read_ts, expires_at from mvcc_snapshot_lease_v2
-                        where tx_id = ? and expires_at > cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                        """)) {
+                try (
+                        PreparedStatement lease = connection.prepareStatement(
+                                """
+                                        select read_ts, expires_at from mvcc_snapshot_lease_v2
+                                        where tx_id = ? and expires_at > cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                                        """)) {
                     lease.setLong(1, txId);
                     try (ResultSet result = lease.executeQuery()) {
                         if (!result.next()) {
@@ -1160,18 +1305,19 @@ public final class MysqlPublicationLedger {
                             "commit timestamp cannot advance past snapshot", false, txId);
                 }
                 long commitTs = nextTs + 1;
-                try (PreparedStatement update = connection.prepareStatement("""
-                        update mvcc_publication_state_v1 set next_commit_ts = ? where singleton_id = 1
-                        """);
-                     PreparedStatement insert = connection.prepareStatement("""
-                        insert into mvcc_publication_entry_v1(commit_ts, tx_id, status, expires_at)
-                        values (?, ?, 'PENDING', ?)
-                        """);
-                     PreparedStatement candidate = localParticipant == null ? null : connection.prepareStatement("""
-                        update mvcc_txn set status = 'PREPARING', commit_ts = ?
-                        where tx_id = ? and status = 'ACTIVE' and commit_ts is null
-                          and binary participants = binary ?
-                        """)) {
+                try (
+                        PreparedStatement update = connection.prepareStatement("""
+                                update mvcc_publication_state_v1 set next_commit_ts = ? where singleton_id = 1
+                                """);
+                        PreparedStatement insert = connection.prepareStatement("""
+                                insert into mvcc_publication_entry_v1(commit_ts, tx_id, status, expires_at)
+                                values (?, ?, 'PENDING', ?)
+                                """);
+                        PreparedStatement candidate = localParticipant == null ? null : connection.prepareStatement("""
+                                update mvcc_txn set status = 'PREPARING', commit_ts = ?
+                                where tx_id = ? and status = 'ACTIVE' and commit_ts is null
+                                  and binary participants = binary ?
+                                """)) {
                     update.setLong(1, commitTs);
                     if (update.executeUpdate() != 1) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -1193,13 +1339,21 @@ public final class MysqlPublicationLedger {
                 }
                 return commitTs;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("reserve commit timestamp failed", txId, ex);
         }
     }
 
-    /** 已预写 intent 的事务一次完成时间戳分配、中心决议与终态账本落盘。 */
-    public PublicationCommitResult commitPreparedIntents(long txId, long expiresAtMillis, Set<String> participants) {
+    /**
+     * Transaction completed timestamp distribution at one time, centre decision and terminal state ledgers.
+     *
+     * @param txId transaction identifier
+     * @param expiresAtMillis expires at millis
+     * @param participants participants
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public PublicationCommitResult commitPreparedIntents(final long txId, final long expiresAtMillis, final Set<String> participants) {
         TransactionMetadataValidation.validateParticipants(txId, participants);
         if (participants.isEmpty()) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -1213,11 +1367,12 @@ public final class MysqlPublicationLedger {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long nextTs;
                 long publishedTs;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select next_commit_ts, published_ts from mvcc_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet result = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select next_commit_ts, published_ts from mvcc_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet result = state.executeQuery()) {
                     if (!result.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing", false, txId);
@@ -1277,19 +1432,20 @@ public final class MysqlPublicationLedger {
                     }
                 }
                 long commitTs = nextTs + 1;
-                // 没有早期未决槽时，决议和发布水位在同一 MySQL 事务提交。
+                // When no early pending slot is available, decision and watermark are published in the same MySQL transaction commit.
                 long nextPublished = publishedTs == nextTs ? commitTs : publishedTs;
-                try (PreparedStatement clock = connection.prepareStatement("""
-                        update mvcc_publication_state_v1
-                        set next_commit_ts = ?, published_ts = ? where singleton_id = 1
-                        """);
-                     PreparedStatement entry = connection.prepareStatement("""
-                        insert into mvcc_publication_entry_v1(commit_ts, tx_id, status, expires_at)
-                        values (?, ?, 'COMMITTED', ?)
-                        """);
-                     PreparedStatement metadata = connection.prepareStatement("""
-                        update mvcc_txn set status = 'COMMITTED', commit_ts = ? where tx_id = ?
-                        """)) {
+                try (
+                        PreparedStatement clock = connection.prepareStatement("""
+                                update mvcc_publication_state_v1
+                                set next_commit_ts = ?, published_ts = ? where singleton_id = 1
+                                """);
+                        PreparedStatement entry = connection.prepareStatement("""
+                                insert into mvcc_publication_entry_v1(commit_ts, tx_id, status, expires_at)
+                                values (?, ?, 'COMMITTED', ?)
+                                """);
+                        PreparedStatement metadata = connection.prepareStatement("""
+                                update mvcc_txn set status = 'COMMITTED', commit_ts = ? where tx_id = ?
+                                """)) {
                     clock.setLong(1, commitTs);
                     clock.setLong(2, nextPublished);
                     clock.executeUpdate();
@@ -1303,13 +1459,19 @@ public final class MysqlPublicationLedger {
                 }
                 return new PublicationCommitResult(commitTs, nextPublished == commitTs);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("atomic intent commit failed", txId, ex);
         }
     }
 
-    /** 在一个控制数据库事务中提交有界批次，并按调用顺序返回各自的提交时间。 */
-    public List<PublicationCommitResult> commitPreparedIntentBatch(List<PublicationIntentCommit> requests) {
+    /**
+     * Commit bounded batch in a control database transaction and returns each commit time in the call order.
+     *
+     * @param requests requests
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<PublicationCommitResult> commitPreparedIntentBatch(final List<PublicationIntentCommit> requests) {
         if (requests.isEmpty()) {
             return List.of();
         }
@@ -1369,7 +1531,7 @@ public final class MysqlPublicationLedger {
                     for (int index = 0; index < sorted.size(); index++) {
                         metadata.setLong(index + 1, sorted.get(index).request().txId());
                     }
-                    // 主键顺序锁定后再逐笔验证，避免一批提交产生多次控制库往返。
+                    // The primary key sequence is locked and then the verify is written to avoid a batch of commit s producing multiple control library round-trip.
                     try (ResultSet rows = metadata.executeQuery()) {
                         while (rows.next()) {
                             long txId = rows.getLong("tx_id");
@@ -1401,11 +1563,12 @@ public final class MysqlPublicationLedger {
                 timings[0] = System.nanoTime() - entered;
                 long nextTs;
                 long publishedTs;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select next_commit_ts, published_ts from mvcc_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet row = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select next_commit_ts, published_ts from mvcc_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet row = state.executeQuery()) {
                     if (!row.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing for batch commit", false, null);
@@ -1413,11 +1576,12 @@ public final class MysqlPublicationLedger {
                     nextTs = row.getLong(1);
                     publishedTs = row.getLong(2);
                 }
-                // 获得状态行锁后重新读取数据库时钟，禁止等待期间已超时的租约提交。
-                try (PreparedStatement clock = connection.prepareStatement("""
-                        select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                        """);
-                     ResultSet now = clock.executeQuery()) {
+                // Reread database clocks after obtaining state line lock. lease commit is not allowed while waiting for timeout.
+                try (
+                        PreparedStatement clock = connection.prepareStatement("""
+                                select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                                """);
+                        ResultSet now = clock.executeQuery()) {
                     if (!now.next() || earliestDeadline <= now.getLong(1)) {
                         throw new MvccException(ErrorCode.TRANSACTION_ABORTED,
                                 "batch intent snapshot lease expired before decision", false, null);
@@ -1430,15 +1594,16 @@ public final class MysqlPublicationLedger {
                 }
                 long upper = nextTs + sorted.size();
                 long nextPublished = publishedTs == nextTs ? upper : publishedTs;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        update mvcc_publication_state_v1
-                        set next_commit_ts = ?, published_ts = ? where singleton_id = 1
-                        """);
-                     PreparedStatement entry = connection.prepareStatement("""
-                        insert into mvcc_publication_entry_v1(commit_ts, tx_id, status, expires_at)
-                        values (?, ?, 'COMMITTED', ?)
-                        """);
-                     PreparedStatement metadata = connection.prepareStatement(metadataUpdateSql)) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                update mvcc_publication_state_v1
+                                set next_commit_ts = ?, published_ts = ? where singleton_id = 1
+                                """);
+                        PreparedStatement entry = connection.prepareStatement("""
+                                insert into mvcc_publication_entry_v1(commit_ts, tx_id, status, expires_at)
+                                values (?, ?, 'COMMITTED', ?)
+                                """);
+                        PreparedStatement metadata = connection.prepareStatement(metadataUpdateSql)) {
                     state.setLong(1, upper);
                     state.setLong(2, nextPublished);
                     if (state.executeUpdate() != 1) {
@@ -1464,7 +1629,7 @@ public final class MysqlPublicationLedger {
                     for (IndexedIntentCommit item : sorted) {
                         metadata.setLong(parameter++, item.request().txId());
                     }
-                    // 已锁定的元数据必须全部转为 COMMITTED，否则整批决议和时间槽回滚。
+                    // All locked metadata must be converted to COMMITTED, otherwise the whole batch decision and the time slot rollback.
                     if (metadata.executeUpdate() != sorted.size()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "batch commit lost transaction metadata", false, null);
@@ -1480,16 +1645,26 @@ public final class MysqlPublicationLedger {
             batchWriteNanos.add(timings[2] - timings[1]);
             batchFinishNanos.add(finished - timings[2]);
             return committed;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("batch intent commit failed", null, ex);
         }
     }
 
-    /** 用单次服务器调用完成正常意向事务的原子提交与即时发布。 */
-    private PublicationCommitResult callAtomicIntentProcedure(long txId, long expiresAtMillis,
-                                                               String participants) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement call = connection.prepareStatement("call mvcc_ledger_intent_commit_v1(?, ?, ?)")) {
+    /**
+     * Call a single server to complete the atomic commit and instant release of normal intent transaction.
+     *
+     * @param txId transaction identifier
+     * @param expiresAtMillis expires at millis
+     * @param participants participants
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private PublicationCommitResult callAtomicIntentProcedure(final long txId, final long expiresAtMillis,
+                                                              final String participants) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement call = connection.prepareStatement("call mvcc_ledger_intent_commit_v1(?, ?, ?)")) {
             call.setLong(1, txId);
             call.setLong(2, expiresAtMillis);
             call.setString(3, participants);
@@ -1507,7 +1682,7 @@ public final class MysqlPublicationLedger {
                 return new PublicationCommitResult(result.getLong("commit_ts"),
                         result.getBoolean("published_immediately"));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() == 30102) {
                 throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         "existing reservation needs recovery", false, txId, ex);
@@ -1524,8 +1699,14 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 原子写入中心 COMMITTED 决议与账本终态，重复提交仅接受相同时间戳。 */
-    public void decideCommitted(long txId, long commitTs, Set<String> participants) {
+    /**
+     * Atomic Writes to COMMITTED decision and the book terminal state, repeats that commit accepts only the same timestamp.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param participants participants
+     */
+    public void decideCommitted(final long txId, final long commitTs, final Set<String> participants) {
         TransactionMetadataValidation.validateParticipants(txId, participants);
         String encoded = participants.stream().sorted().collect(Collectors.joining(","));
         try {
@@ -1566,13 +1747,14 @@ public final class MysqlPublicationLedger {
                         }
                     }
                 }
-                try (PreparedStatement metadata = connection.prepareStatement("""
-                        update mvcc_txn set status = 'COMMITTED', commit_ts = ? where tx_id = ?
-                        """);
-                     PreparedStatement ledger = connection.prepareStatement("""
-                        update mvcc_publication_entry_v1 set status = 'COMMITTED'
-                        where commit_ts = ? and tx_id = ? and status = 'PENDING'
-                        """)) {
+                try (
+                        PreparedStatement metadata = connection.prepareStatement("""
+                                update mvcc_txn set status = 'COMMITTED', commit_ts = ? where tx_id = ?
+                                """);
+                        PreparedStatement ledger = connection.prepareStatement("""
+                                update mvcc_publication_entry_v1 set status = 'COMMITTED'
+                                where commit_ts = ? and tx_id = ? and status = 'PENDING'
+                                """)) {
                     metadata.setLong(1, commitTs);
                     metadata.setLong(2, txId);
                     metadata.executeUpdate();
@@ -1585,13 +1767,22 @@ public final class MysqlPublicationLedger {
                 }
                 return null;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("persist publication decision failed", txId, ex);
         }
     }
 
-    /** 在当前数据库事务中锁定并校验预留行的事务身份。 */
-    private PublicationEntryStatus lockEntry(Connection connection, long txId, long commitTs) throws SQLException {
+    /**
+     * Lock transaction identity in current database transaction and reserve validate rows.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private PublicationEntryStatus lockEntry(final Connection connection, final long txId, final long commitTs) throws SQLException {
         try (PreparedStatement entry = connection.prepareStatement("""
                 select tx_id, status from mvcc_publication_entry_v1
                 where commit_ts = ? for update
@@ -1607,8 +1798,16 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 幂等提交只接受原有中心 COMMITTED 时间戳。 */
-    private void verifyCommittedRecord(Connection connection, long txId, long commitTs) throws SQLException {
+    /**
+     * Idempotent commit accepts only COMMITTED timestamp from the original center.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void verifyCommittedRecord(final Connection connection, final long txId, final long commitTs) throws SQLException {
         try (PreparedStatement record = connection.prepareStatement("""
                 select status, commit_ts from mvcc_txn where tx_id = ? for update
                 """)) {
@@ -1623,8 +1822,13 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 已完成参与者 fencing 后才允许把 PENDING 预留标成 ABORTED。 */
-    public void decideAbortedAfterFencing(long txId, long commitTs) {
+    /**
+     * Participant closing allows the PENDING preset to be marked ABORTED only after it has been completed.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     */
+    public void decideAbortedAfterFencing(final long txId, final long commitTs) {
         try {
             MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 PublicationEntryStatus entry = lockEntry(connection, txId, commitTs);
@@ -1679,13 +1883,20 @@ public final class MysqlPublicationLedger {
                 }
                 return null;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("abort publication reservation failed", txId, ex);
         }
     }
 
-    /** 幂等回滚必须与已持久化的中心 ABORTED 终态一致。 */
-    private void verifyAbortedRecord(Connection connection, long txId) throws SQLException {
+    /**
+     * Idempotent rollback must be consistent with ABORTED terminal state at the centre of durable storage.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void verifyAbortedRecord(final Connection connection, final long txId) throws SQLException {
         try (PreparedStatement record = connection.prepareStatement("""
                 select status from mvcc_txn where tx_id = ? for update
                 """)) {
@@ -1699,8 +1910,16 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 本地提交证明成立时，原子补齐决议并在无前置未决槽时立即发布。 */
-    public boolean completeLocalCommitAfterFencing(ParticipantRecord local, long commitTs, String participant) {
+    /**
+     * When local commit proof is established, atomic completes the decision and releases it as soon as there is no front-runner pending slot.
+     *
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public boolean completeLocalCommitAfterFencing(final ParticipantRecord local, final long commitTs, final String participant) {
         long txId = local.txId();
         TransactionMetadataValidation.validateParticipant(txId, participant);
         if (local.status() != TxStatus.COMMITTED || local.commitTs() == null
@@ -1714,11 +1933,12 @@ public final class MysqlPublicationLedger {
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long publishedTs;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select published_ts from mvcc_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet row = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select published_ts from mvcc_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet row = state.executeQuery()) {
                     if (!row.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing during local commit resolution", false, txId);
@@ -1750,13 +1970,14 @@ public final class MysqlPublicationLedger {
                         }
                     }
                 }
-                try (PreparedStatement metadata = connection.prepareStatement("""
-                        update mvcc_txn set status = 'COMMITTED' where tx_id = ?
-                        """);
-                     PreparedStatement ledger = connection.prepareStatement("""
-                        update mvcc_publication_entry_v1 set status = 'COMMITTED'
-                        where commit_ts = ? and tx_id = ? and status = 'PENDING'
-                        """)) {
+                try (
+                        PreparedStatement metadata = connection.prepareStatement("""
+                                update mvcc_txn set status = 'COMMITTED' where tx_id = ?
+                                """);
+                        PreparedStatement ledger = connection.prepareStatement("""
+                                update mvcc_publication_entry_v1 set status = 'COMMITTED'
+                                where commit_ts = ? and tx_id = ? and status = 'PENDING'
+                                """)) {
                     metadata.setLong(1, txId);
                     if (metadata.executeUpdate() != 1) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -1769,7 +1990,7 @@ public final class MysqlPublicationLedger {
                                 "local commit recovery lost pending publication", false, txId);
                     }
                 }
-                // 连续前缀已到自身前一槽时，终态与水位在同一个 MySQL 事务对外生效。
+                // Terminal state and watermark have the same MySQL transaction external effect when a continuous prefix has reached its previous slot.
                 if (publishedTs == commitTs - 1) {
                     try (PreparedStatement publish = connection.prepareStatement("""
                             update mvcc_publication_state_v1 set published_ts = ?
@@ -1786,16 +2007,26 @@ public final class MysqlPublicationLedger {
                 }
                 return false;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("complete local participant publication failed", txId, ex);
         }
     }
 
-    /** 用单次服务端调用原子补齐本地提交的中心决议和即时发布。 */
-    private boolean callLocalCompleteProcedure(ParticipantRecord local, long commitTs, String participant) {
+    /**
+     * Use a single serviceend to call atomic to complete the centre local commit and instantaneously release decision.
+     *
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private boolean callLocalCompleteProcedure(final ParticipantRecord local, final long commitTs, final String participant) {
         long txId = local.txId();
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement call = connection.prepareStatement("call mvcc_ledger_local_complete_v2(?, ?, ?, ?)")) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement call = connection.prepareStatement("call mvcc_ledger_local_complete_v2(?, ?, ?, ?)")) {
             call.setLong(1, txId);
             call.setLong(2, local.startTs());
             call.setLong(3, commitTs);
@@ -1813,7 +2044,7 @@ public final class MysqlPublicationLedger {
                 }
                 return row.getBoolean("published_immediately");
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() >= 30501 && ex.getErrorCode() <= 30504) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "local completion rejected durable participant proof", false, txId, ex);
@@ -1822,8 +2053,14 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 一个控制事务核对多份本地 COMMITTED 证明并推进连续的终态前缀。 */
-    public List<Boolean> completeLocalCommitBatch(List<PublicationLocalCommitProof> proofs) {
+    /**
+     * A control transaction check multiple local COMMITTED certificates and advance a continuous terminal state prefix.
+     *
+     * @param proofs proofs
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<Boolean> completeLocalCommitBatch(final List<PublicationLocalCommitProof> proofs) {
         if (proofs.isEmpty()) {
             return List.of();
         }
@@ -1848,32 +2085,34 @@ public final class MysqlPublicationLedger {
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long published;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select published_ts from mvcc_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet row = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select published_ts from mvcc_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet row = state.executeQuery()) {
                     if (!row.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing for local completion batch", false, null);
                     }
                     published = row.getLong(1);
                 }
-                try (PreparedStatement decision = connection.prepareStatement("""
-                        select e.tx_id, e.status as entry_status,
-                               t.start_ts, t.status as record_status, t.commit_ts, t.participants
-                        from mvcc_publication_entry_v1 e
-                        straight_join mvcc_txn t on t.tx_id = e.tx_id
-                        where e.commit_ts = ? for update
-                        """);
-                     PreparedStatement commitMetadata = connection.prepareStatement("""
-                        update mvcc_txn set status = 'COMMITTED'
-                        where tx_id = ? and status = 'PREPARING' and commit_ts = ?
-                        """);
-                     PreparedStatement commitEntry = connection.prepareStatement("""
-                        update mvcc_publication_entry_v1 set status = 'COMMITTED'
-                        where commit_ts = ? and tx_id = ? and status = 'PENDING'
-                        """)) {
+                try (
+                        PreparedStatement decision = connection.prepareStatement("""
+                                select e.tx_id, e.status as entry_status,
+                                       t.start_ts, t.status as record_status, t.commit_ts, t.participants
+                                from mvcc_publication_entry_v1 e
+                                straight_join mvcc_txn t on t.tx_id = e.tx_id
+                                where e.commit_ts = ? for update
+                                """);
+                        PreparedStatement commitMetadata = connection.prepareStatement("""
+                                update mvcc_txn set status = 'COMMITTED'
+                                where tx_id = ? and status = 'PREPARING' and commit_ts = ?
+                                """);
+                        PreparedStatement commitEntry = connection.prepareStatement("""
+                                update mvcc_publication_entry_v1 set status = 'COMMITTED'
+                                where commit_ts = ? and tx_id = ? and status = 'PENDING'
+                                """)) {
                     for (IndexedLocalProof item : sorted) {
                         PublicationLocalCommitProof proof = item.proof();
                         long txId = proof.local().txId();
@@ -1910,16 +2149,17 @@ public final class MysqlPublicationLedger {
                     commitMetadata.executeBatch();
                     commitEntry.executeBatch();
                 }
-                // Connector/J 重写批量 UPDATE 时返回的逐条计数不稳定，直接校验事务内真实终态。
+                // The number of article-by-article returns when Contractor/J rewrites batch UPDATE is unstable and real terminal state in direct validate transaction.
                 String placeholders = String.join(",", Collections.nCopies(sorted.size(), "?"));
-                try (PreparedStatement metadata = connection.prepareStatement("""
-                        select count(*) from mvcc_txn
-                        where tx_id in (%s) and status = 'COMMITTED'
-                        """.formatted(placeholders));
-                     PreparedStatement entries = connection.prepareStatement("""
-                        select count(*) from mvcc_publication_entry_v1
-                        where commit_ts in (%s) and status = 'COMMITTED'
-                        """.formatted(placeholders))) {
+                try (
+                        PreparedStatement metadata = connection.prepareStatement("""
+                                select count(*) from mvcc_txn
+                                where tx_id in (%s) and status = 'COMMITTED'
+                                """.formatted(placeholders));
+                        PreparedStatement entries = connection.prepareStatement("""
+                                select count(*) from mvcc_publication_entry_v1
+                                where commit_ts in (%s) and status = 'COMMITTED'
+                                """.formatted(placeholders))) {
                     for (int index = 0; index < sorted.size(); index++) {
                         metadata.setLong(index + 1, sorted.get(index).proof().local().txId());
                         entries.setLong(index + 1, sorted.get(index).proof().commitTs());
@@ -1947,8 +2187,7 @@ public final class MysqlPublicationLedger {
                         while (rows.next()) {
                             long candidate = rows.getLong("commit_ts");
                             if (candidate != nextPublished + 1
-                                    || PublicationEntryStatus.valueOf(rows.getString("status"))
-                                    == PublicationEntryStatus.PENDING) {
+                                    || PublicationEntryStatus.valueOf(rows.getString("status")) == PublicationEntryStatus.PENDING) {
                                 break;
                             }
                             nextPublished = candidate;
@@ -1972,13 +2211,19 @@ public final class MysqlPublicationLedger {
                 }
                 return List.copyOf(Arrays.asList(results));
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("batch local commit completion failed", null, ex);
         }
     }
 
-    /** 排他锁定控制行后只推进连续终态前缀，单次扫描保持有界。 */
-    public long advancePublished(int limit) {
+    /**
+     * Only the continuous terminal state prefix will be advanced after an exclusive locking control line, and a single scan will remain bounded.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public long advancePublished(final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("publication batch limit must be between 1 and 4096");
         }
@@ -1986,11 +2231,12 @@ public final class MysqlPublicationLedger {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long published;
                 long upper;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select published_ts, next_commit_ts from mvcc_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet result = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select published_ts, next_commit_ts from mvcc_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet result = state.executeQuery()) {
                     if (!result.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing", false, null);
@@ -2030,56 +2276,77 @@ public final class MysqlPublicationLedger {
                 }
                 return next;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("advance published watermark failed", null, ex);
         }
     }
 
-    /** 查询已发布提交水位，RC 的每条读语句应重新读取该值。 */
+    /**
+     * Query has been issued commit watermark, and each RC statement should read the value again.
+     *
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
     public long currentPublished() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement state = connection.prepareStatement("""
-                     select published_ts from mvcc_publication_state_v1 where singleton_id = 1
-                     """);
-             ResultSet result = state.executeQuery()) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement state = connection.prepareStatement("""
+                        select published_ts from mvcc_publication_state_v1 where singleton_id = 1
+                        """);
+                ResultSet result = state.executeQuery()) {
             if (!result.next()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "publication state missing", false, null);
             }
             return result.getLong(1);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read published watermark failed", null, ex);
         }
     }
 
-    /** 查询指定事务的时间戳预留和终态，供响应未知与恢复流程定位权威记录。 */
-    public Optional<PublicationEntry> findByTxId(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select tx_id, commit_ts, status, expires_at
-                     from mvcc_publication_entry_v1 where tx_id = ?
-                     """)) {
+    /**
+     * Query the timestamp preset and terminal state specified for transaction to respond to unknown and recovery process locator authority records.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    public Optional<PublicationEntry> findByTxId(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select tx_id, commit_ts, status, expires_at
+                        from mvcc_publication_entry_v1 where tx_id = ?
+                        """)) {
             query.setLong(1, txId);
             try (ResultSet result = query.executeQuery()) {
                 return result.next() ? Optional.of(mapEntry(result)) : Optional.empty();
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("load publication entry failed", txId, ex);
         }
     }
 
-    /** 返回已到期的 PENDING 批次；接管者仍须重新检查租约和参与者终态。 */
-    public List<PublicationEntry> findExpiredPending(long nowMillis, long afterCommitTs, int limit) {
+    /**
+     * Returns PENDING batch, which is due; the receiver still has to recheck lease and participant terminal state.
+     *
+     * @param nowMillis now millis
+     * @param afterCommitTs after commit ts
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<PublicationEntry> findExpiredPending(final long nowMillis, final long afterCommitTs, final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("pending scan limit must be between 1 and 4096");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select tx_id, commit_ts, status, expires_at
-                     from mvcc_publication_entry_v1
-                     where status = 'PENDING' and expires_at <= ? and commit_ts > ?
-                     order by commit_ts limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select tx_id, commit_ts, status, expires_at
+                        from mvcc_publication_entry_v1
+                        where status = 'PENDING' and expires_at <= ? and commit_ts > ?
+                        order by commit_ts limit ?
+                        """)) {
             query.setLong(1, nowMillis);
             query.setLong(2, afterCommitTs);
             query.setInt(3, limit);
@@ -2090,27 +2357,36 @@ public final class MysqlPublicationLedger {
                 }
                 return List.copyOf(entries);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("scan expired publication entries failed", null, ex);
         }
     }
 
-    /** 找出未预留且租约无效的未决或已中止事务，覆盖中止后参与者尚未回滚的崩溃。 */
-    public List<Long> findExpiredUnreserved(long nowMillis, long afterTxId, int limit) {
+    /**
+     * Finds unset and lease invalid pending or aborted transaction to overwrite the failure of participant after aborting rollback.
+     *
+     * @param nowMillis now millis
+     * @param afterTxId after tx id
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<Long> findExpiredUnreserved(final long nowMillis, final long afterTxId, final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("unreserved scan limit must be between 1 and 4096");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select t.tx_id from mvcc_txn t
-                     left join mvcc_snapshot_lease_v2 s on s.tx_id = t.tx_id
-                     left join mvcc_publication_entry_v1 e on e.tx_id = t.tx_id
-                     left join mvcc_txn_finalized f on f.tx_id = t.tx_id
-                     where t.tx_id > ? and (s.tx_id is null or s.expires_at <= ?)
-                       and e.tx_id is null and f.tx_id is null
-                       and t.status in ('ACTIVE', 'PREPARING', 'ABORTED') and t.commit_ts is null
-                     order by t.tx_id limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select t.tx_id from mvcc_txn t
+                        left join mvcc_snapshot_lease_v2 s on s.tx_id = t.tx_id
+                        left join mvcc_publication_entry_v1 e on e.tx_id = t.tx_id
+                        left join mvcc_txn_finalized f on f.tx_id = t.tx_id
+                        where t.tx_id > ? and (s.tx_id is null or s.expires_at <= ?)
+                          and e.tx_id is null and f.tx_id is null
+                          and t.status in ('ACTIVE', 'PREPARING', 'ABORTED') and t.commit_ts is null
+                        order by t.tx_id limit ?
+                        """)) {
             query.setLong(1, afterTxId);
             query.setLong(2, nowMillis);
             query.setInt(3, limit);
@@ -2121,23 +2397,31 @@ public final class MysqlPublicationLedger {
                 }
                 return List.copyOf(ids);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("scan expired unreserved transactions failed", null, ex);
         }
     }
 
-    /** 仅扫描新账本已有终态但未完成参与者物化的事务，排除迁移前旧协议记录。 */
-    public List<Long> findUnfinalizedTerminal(long afterTxId, int limit) {
+    /**
+     * Only scan terminal state of new book but transaction of participant materialization is not completed, excluding old protocol records before moving.
+     *
+     * @param afterTxId after tx id
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<Long> findUnfinalizedTerminal(final long afterTxId, final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("terminal scan limit must be between 1 and 4096");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select e.tx_id from mvcc_publication_entry_v1 e
-                     left join mvcc_txn_finalized f on f.tx_id = e.tx_id
-                     where e.tx_id > ? and e.status in ('COMMITTED', 'ABORTED') and f.tx_id is null
-                     order by e.tx_id limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select e.tx_id from mvcc_publication_entry_v1 e
+                        left join mvcc_txn_finalized f on f.tx_id = e.tx_id
+                        where e.tx_id > ? and e.status in ('COMMITTED', 'ABORTED') and f.tx_id is null
+                        order by e.tx_id limit ?
+                        """)) {
             query.setLong(1, afterTxId);
             query.setInt(2, limit);
             try (ResultSet rows = query.executeQuery()) {
@@ -2147,19 +2431,33 @@ public final class MysqlPublicationLedger {
                 }
                 return List.copyOf(ids);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("scan unfinalized publication decisions failed", null, ex);
         }
     }
 
-    /** 将 SQL 行解码为不可变的事务发布记录。 */
-    private PublicationEntry mapEntry(ResultSet result) throws SQLException {
+    /**
+     * Decoding SQL lines to immutable transaction release record.
+     *
+     * @param result result
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private PublicationEntry mapEntry(final ResultSet result) throws SQLException {
         return new PublicationEntry(result.getLong("tx_id"), result.getLong("commit_ts"),
                 PublicationEntryStatus.valueOf(result.getString("status")), result.getLong("expires_at"));
     }
 
-    /** 已提交决议只有越过发布水位后才能向业务确认，等待预算耗尽时返回状态未知。 */
-    public void awaitPublished(long txId, long commitTs, long timeoutMillis) {
+    /**
+     * Commit decision can be confirmed to business only after the release of watermark, pending an unknown return status when budget is exhausted.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param timeoutMillis timeout millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public void awaitPublished(final long txId, final long commitTs, final long timeoutMillis) {
         if (timeoutMillis < 1) {
             throw new IllegalArgumentException("publication wait timeout must be positive");
         }
@@ -2180,7 +2478,7 @@ public final class MysqlPublicationLedger {
             }
             try {
                 Thread.sleep(1);
-            } catch (InterruptedException ex) {
+            } catch (final InterruptedException ex) {
                 Thread.currentThread().interrupt();
                 throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         "publication wait interrupted after commit decision", false, txId, ex);
@@ -2188,15 +2486,22 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 在同一 MySQL 语句快照读取决议及水位，避免等待循环重复借连接。 */
-    private PublicationObservation observePublication(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select s.published_ts, e.commit_ts, e.status
-                     from mvcc_publication_state_v1 s
-                     left join mvcc_publication_entry_v1 e on e.tx_id = ?
-                     where s.singleton_id = 1
-                     """)) {
+    /**
+     * The same MySQL statement snapshot reads decision and watermark, avoiding waiting for a loop to repeat connection.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private PublicationObservation observePublication(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select s.published_ts, e.commit_ts, e.status
+                        from mvcc_publication_state_v1 s
+                        left join mvcc_publication_entry_v1 e on e.tx_id = ?
+                        where s.singleton_id = 1
+                        """)) {
             query.setLong(1, txId);
             try (ResultSet result = query.executeQuery()) {
                 if (!result.next()) {
@@ -2210,45 +2515,63 @@ public final class MysqlPublicationLedger {
                 return new PublicationObservation(result.getLong("published_ts"),
                         result.getLong("commit_ts"), PublicationEntryStatus.valueOf(result.getString("status")));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("observe publication decision failed", txId, ex);
         }
     }
 
-    /** 返回账本内的安全点，读入口与 GC 必须使用同一控制状态。 */
+    /**
+     * Returns safe point in the ledger, reading access and GC must use the same control status.
+     *
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
     public long currentSafePoint() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement state = connection.prepareStatement("""
-                     select safe_point from mvcc_publication_state_v1 where singleton_id = 1
-                     """);
-             ResultSet result = state.executeQuery()) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement state = connection.prepareStatement("""
+                        select safe_point from mvcc_publication_state_v1 where singleton_id = 1
+                        """);
+                ResultSet result = state.executeQuery()) {
             if (!result.next()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "publication state missing", false, null);
             }
             return result.getLong(1);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read publication safe point failed", null, ex);
         }
     }
 
-    /** 查询新协议租约的原始截止时间，事务入口应在每次存储操作前复核。 */
-    public OptionalLong snapshotExpiry(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement lease = connection.prepareStatement("""
-                     select expires_at from mvcc_snapshot_lease_v2 where tx_id = ?
-                     """)) {
+    /**
+     * The original deadline for searching for new protocol lease, the transaction entrance should be reviewed before each storage operation.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    public OptionalLong snapshotExpiry(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement lease = connection.prepareStatement("""
+                        select expires_at from mvcc_snapshot_lease_v2 where tx_id = ?
+                        """)) {
             lease.setLong(1, txId);
             try (ResultSet result = lease.executeQuery()) {
                 return result.next() ? OptionalLong.of(result.getLong(1)) : OptionalLong.empty();
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read publication snapshot expiry failed", txId, ex);
         }
     }
 
-    /** 共享发布水位锁下为一个协调器登记持久快照下界和固定租约。 */
-    public CoordinatorSnapshotLease acquireCoordinatorLease(long timeoutMillis) {
+    /**
+     * Share the release watermark lock to register coordinator below durable snapshot and fix lease.
+     *
+     * @param timeoutMillis timeout millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public CoordinatorSnapshotLease acquireCoordinatorLease(final long timeoutMillis) {
         if (timeoutMillis < 1 || timeoutMillis > 86_400_000L) {
             throw new IllegalArgumentException("invalid coordinator snapshot lease timeout");
         }
@@ -2289,27 +2612,37 @@ public final class MysqlPublicationLedger {
                     }
                 }
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("acquire coordinator snapshot lease failed", null, ex);
         }
     }
 
-    /** 不写每事务租约而一致读取已发布水位，要求协调器租约覆盖整笔事务期限。 */
-    public CoordinatorSnapshotView snapshotUnderCoordinatorLease(long coordinatorId, long generation,
-                                                                 long timeoutMillis) {
+    /**
+     * Do not write each transaction lease and consistently read the published watermark request that coordinator lease overwrite the whole transaction period.
+     *
+     * @param coordinatorId coordinator id
+     * @param generation generation
+     * @param timeoutMillis timeout millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public CoordinatorSnapshotView snapshotUnderCoordinatorLease(final long coordinatorId, final long generation,
+                                                                 final long timeoutMillis) {
         if (coordinatorId < 1 || generation < 1 || timeoutMillis < 1 || timeoutMillis > 86_400_000L) {
             throw new IllegalArgumentException("invalid coordinator protected begin");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select s.published_ts, s.safe_point, c.read_ts, c.expires_at, c.generation,
-                            cast(unix_timestamp(current_timestamp(3)) * 1000 as signed) + ? as deadline
-                     from mvcc_publication_state_v1 s
-                     join mvcc_protocol_epoch_v1 p on p.singleton_id = s.singleton_id
-                       and p.protocol_mode = 'LEDGER'
-                     join mvcc_coordinator_snapshot_lease_v1 c on c.coordinator_id = ?
-                     where s.singleton_id = 1
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select s.published_ts, s.safe_point, c.read_ts, c.expires_at, c.generation,
+                               cast(unix_timestamp(current_timestamp(3)) * 1000 as signed) + ? as deadline
+                        from mvcc_publication_state_v1 s
+                        join mvcc_protocol_epoch_v1 p on p.singleton_id = s.singleton_id
+                          and p.protocol_mode = 'LEDGER'
+                        join mvcc_coordinator_snapshot_lease_v1 c on c.coordinator_id = ?
+                        where s.singleton_id = 1
+                        """)) {
             query.setLong(1, timeoutMillis);
             query.setLong(2, coordinatorId);
             try (ResultSet row = query.executeQuery()) {
@@ -2332,23 +2665,34 @@ public final class MysqlPublicationLedger {
                 }
                 return new CoordinatorSnapshotView(published, deadline, leaseRead, leaseExpiry);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read coordinator protected snapshot failed", null, ex);
         }
     }
 
-    /** 一次数据库读取同时校验持久代数、快照下界及数据库时钟，减少读语句的控制面往返。 */
-    public void assertCoordinatorSnapshot(long coordinatorId, long generation, long startTs,
-                                          long deadlineMillis, long txId) {
+    /**
+     * A database reading of simultaneous validate durable algebras, snapshot lower bounds and database hours to reduce the controlled face-to-face movement of readable statements.
+     *
+     * @param coordinatorId coordinator id
+     * @param generation generation
+     * @param startTs transaction start timestamp
+     * @param deadlineMillis deadline millis
+     * @param txId transaction identifier
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public void assertCoordinatorSnapshot(final long coordinatorId, final long generation, final long startTs,
+                                          final long deadlineMillis, final long txId) {
         if (coordinatorId < 1 || generation < 1 || startTs < 0 || deadlineMillis < 1 || txId >= 0) {
             throw new IllegalArgumentException("invalid coordinator snapshot verification");
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select read_ts, expires_at, generation,
-                            cast(unix_timestamp(current_timestamp(3)) * 1000 as signed) as database_now
-                     from mvcc_coordinator_snapshot_lease_v1 where coordinator_id = ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select read_ts, expires_at, generation,
+                               cast(unix_timestamp(current_timestamp(3)) * 1000 as signed) as database_now
+                        from mvcc_coordinator_snapshot_lease_v1 where coordinator_id = ?
+                        """)) {
             query.setLong(1, coordinatorId);
             try (ResultSet row = query.executeQuery()) {
                 if (!row.next() || row.getLong("generation") != generation
@@ -2363,14 +2707,23 @@ public final class MysqlPublicationLedger {
                             "transaction lease expired", false, txId);
                 }
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("verify coordinator snapshot failed", txId, ex);
         }
     }
 
-    /** 首次写入前把本地事务号提升为独立持久租约，避免协调器租约提高后丢失恢复锚点。 */
-    public void promoteCoordinatorSnapshot(long txId, long startTs, long deadlineMillis,
-                                           long coordinatorId, long generation) {
+    /**
+     * Raise local transaction ID to independent durable lease before initial writing, avoiding the loss of an recovery anchor after coordinator lease has been raised.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param deadlineMillis deadline millis
+     * @param coordinatorId coordinator id
+     * @param generation generation
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public void promoteCoordinatorSnapshot(final long txId, final long startTs, final long deadlineMillis,
+                                           final long coordinatorId, final long generation) {
         if (txId >= 0 || startTs < 0 || deadlineMillis < 1 || coordinatorId < 1 || generation < 1) {
             throw new IllegalArgumentException("invalid coordinator transaction promotion");
         }
@@ -2380,23 +2733,35 @@ public final class MysqlPublicationLedger {
                         coordinatorId, generation);
                 return null;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("promote coordinator snapshot failed", txId, ex);
         }
     }
 
-    /** 在同一控制事务中验证协调器保护并建立独立快照租约。 */
-    private void promoteCoordinatorSnapshotInTransaction(Connection connection, long txId, long startTs,
-                                                         long deadlineMillis, long coordinatorId,
-                                                         long generation) throws SQLException {
+    /**
+     * Verify coordinator protects and establishes an independent snapshot lease in the same control transaction.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param deadlineMillis deadline millis
+     * @param coordinatorId coordinator id
+     * @param generation generation
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void promoteCoordinatorSnapshotInTransaction(final Connection connection, final long txId, final long startTs,
+                                                         final long deadlineMillis, final long coordinatorId,
+                                                         final long generation) throws SQLException {
         MysqlProtocolEpoch.requireLedger(connection);
         long published;
         long safePoint;
-        try (PreparedStatement state = connection.prepareStatement("""
-                select published_ts, safe_point from mvcc_publication_state_v1
-                where singleton_id = 1 for share
-                """);
-             ResultSet row = state.executeQuery()) {
+        try (
+                PreparedStatement state = connection.prepareStatement("""
+                        select published_ts, safe_point from mvcc_publication_state_v1
+                        where singleton_id = 1 for share
+                        """);
+                ResultSet row = state.executeQuery()) {
             if (!row.next()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "publication state missing before coordinator promotion", false, txId);
@@ -2424,10 +2789,11 @@ public final class MysqlPublicationLedger {
             }
         }
         long now;
-        try (PreparedStatement clock = connection.prepareStatement("""
-                select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                """);
-             ResultSet row = clock.executeQuery()) {
+        try (
+                PreparedStatement clock = connection.prepareStatement("""
+                        select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                        """);
+                ResultSet row = clock.executeQuery()) {
             if (!row.next()) {
                 throw new SQLException("database clock returned no promotion time");
             }
@@ -2452,7 +2818,7 @@ public final class MysqlPublicationLedger {
             insert.setLong(3, deadlineMillis);
             try {
                 insert.executeUpdate();
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 if (ex.getErrorCode() != 1062) {
                     throw ex;
                 }
@@ -2476,11 +2842,23 @@ public final class MysqlPublicationLedger {
         }
     }
 
-    /** 将首次写入的独立租约与完整参与者元数据一起提交，避免中间状态和第二次连接往返。 */
-    public TxRecord promoteAndRegisterCoordinatorSnapshot(long txId, long startTs,
-                                                          long deadlineMillis, long coordinatorId,
-                                                          long generation, IsolationLevel isolationLevel,
-                                                          Set<String> participants) {
+    /**
+     * The independent lease that will be written for the first time with complete participant metadata is commit, avoiding the middle state and a second connection round trip.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param deadlineMillis deadline millis
+     * @param coordinatorId coordinator id
+     * @param generation generation
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public TxRecord promoteAndRegisterCoordinatorSnapshot(final long txId, final long startTs,
+                                                          final long deadlineMillis, final long coordinatorId,
+                                                          final long generation, final IsolationLevel isolationLevel,
+                                                          final Set<String> participants) {
         if (txId >= 0 || startTs < 0 || deadlineMillis < 1 || coordinatorId < 1 || generation < 1) {
             throw new IllegalArgumentException("invalid coordinator transaction registration");
         }
@@ -2502,7 +2880,7 @@ public final class MysqlPublicationLedger {
                     insert.setString(4, encoded);
                     try {
                         insert.executeUpdate();
-                    } catch (SQLException ex) {
+                    } catch (final SQLException ex) {
                         if (ex.getErrorCode() != 1062) {
                             throw ex;
                         }
@@ -2521,7 +2899,7 @@ public final class MysqlPublicationLedger {
                                     || !encoded.equals(row.getString("participants"))
                                     || row.getObject("commit_ts") != null
                                     || !("ACTIVE".equals(row.getString("status"))
-                                    || "PREPARING".equals(row.getString("status")))) {
+                                            || "PREPARING".equals(row.getString("status")))) {
                                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                         "coordinator write registration conflicts with durable transaction", false, txId);
                             }
@@ -2532,14 +2910,23 @@ public final class MysqlPublicationLedger {
                 }
                 return new TxRecord(txId, startTs, isolationLevel, participants, TxStatus.ACTIVE, null);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("register coordinator write transaction failed", txId, ex);
         }
     }
 
-    /** 按代数 fencing 续租并只允许提高最老快照下界。 */
-    public CoordinatorSnapshotLease renewCoordinatorLease(long coordinatorId, long expectedGeneration,
-                                                          long nextReadTs, long timeoutMillis) {
+    /**
+     * The algebra fencing lease is renewed and only the oldest snapshot lower bounds are allowed.
+     *
+     * @param coordinatorId coordinator id
+     * @param expectedGeneration expected generation
+     * @param nextReadTs next read ts
+     * @param timeoutMillis timeout millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public CoordinatorSnapshotLease renewCoordinatorLease(final long coordinatorId, final long expectedGeneration,
+                                                          final long nextReadTs, final long timeoutMillis) {
         if (coordinatorId < 1 || expectedGeneration < 1 || nextReadTs < 0
                 || timeoutMillis < 1 || timeoutMillis > 86_400_000L) {
             throw new IllegalArgumentException("invalid coordinator lease renewal");
@@ -2548,11 +2935,12 @@ public final class MysqlPublicationLedger {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long published;
                 long safePoint;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select published_ts, safe_point from mvcc_publication_state_v1
-                        where singleton_id = 1 for share
-                        """);
-                     ResultSet row = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select published_ts, safe_point from mvcc_publication_state_v1
+                                where singleton_id = 1 for share
+                                """);
+                        ResultSet row = state.executeQuery()) {
                     if (!row.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing during coordinator renewal", false, null);
@@ -2580,10 +2968,11 @@ public final class MysqlPublicationLedger {
                     }
                 }
                 long now;
-                try (PreparedStatement clock = connection.prepareStatement("""
-                        select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                        """);
-                     ResultSet row = clock.executeQuery()) {
+                try (
+                        PreparedStatement clock = connection.prepareStatement("""
+                                select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                                """);
+                        ResultSet row = clock.executeQuery()) {
                     if (!row.next()) {
                         throw new SQLException("database clock returned no coordinator lease time");
                     }
@@ -2616,36 +3005,50 @@ public final class MysqlPublicationLedger {
                 }
                 return new CoordinatorSnapshotLease(coordinatorId, nextReadTs, nextExpiry, generation + 1);
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("renew coordinator snapshot lease failed", null, ex);
         }
     }
 
-    /** 查询协调器租约的当前代数，缺失时由调用方停止服务。 */
-    public Optional<CoordinatorSnapshotLease> coordinatorLease(long coordinatorId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select coordinator_id, read_ts, expires_at, generation
-                     from mvcc_coordinator_snapshot_lease_v1 where coordinator_id = ?
-                     """)) {
+    /**
+     * Ask for the current algebra of coordinator lease and stop service by the caller when it is missing.
+     *
+     * @param coordinatorId coordinator id
+     * @return the operation result
+     */
+    public Optional<CoordinatorSnapshotLease> coordinatorLease(final long coordinatorId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select coordinator_id, read_ts, expires_at, generation
+                        from mvcc_coordinator_snapshot_lease_v1 where coordinator_id = ?
+                        """)) {
             query.setLong(1, coordinatorId);
             try (ResultSet row = query.executeQuery()) {
                 return row.next() ? Optional.of(new CoordinatorSnapshotLease(row.getLong("coordinator_id"),
                         row.getLong("read_ts"), row.getLong("expires_at"), row.getLong("generation")))
                         : Optional.empty();
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("read coordinator snapshot lease failed", null, ex);
         }
     }
 
-    /** 只有当前代数的协调器可释放租约，重复释放已删除的行无副作用。 */
-    public boolean releaseCoordinatorLease(long coordinatorId, long generation) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement delete = connection.prepareStatement("""
-                     delete from mvcc_coordinator_snapshot_lease_v1
-                     where coordinator_id = ? and generation = ?
-                     """)) {
+    /**
+     * Only the coordinator of the current algebra can release lease, with no side effects on deleted lines.
+     *
+     * @param coordinatorId coordinator id
+     * @param generation generation
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public boolean releaseCoordinatorLease(final long coordinatorId, final long generation) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement delete = connection.prepareStatement("""
+                        delete from mvcc_coordinator_snapshot_lease_v1
+                        where coordinator_id = ? and generation = ?
+                        """)) {
             delete.setLong(1, coordinatorId);
             delete.setLong(2, generation);
             if (delete.executeUpdate() == 1) {
@@ -2656,35 +3059,45 @@ public final class MysqlPublicationLedger {
                         "stale coordinator lease generation cannot release current owner", false, null);
             }
             return false;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("release coordinator snapshot lease failed", null, ex);
         }
     }
 
-    /** 事务结束后幂等释放新协议租约，GC 并发时至多保守延后本轮回收。 */
-    public void releaseSnapshot(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement delete = connection.prepareStatement("""
-                     delete from mvcc_snapshot_lease_v2 where tx_id = ?
-                     """)) {
+    /**
+     * After transaction new release idempotently protocol lease, GC concurrent to more conservatively delay this round collection.
+     *
+     * @param txId transaction identifier
+     */
+    public void releaseSnapshot(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement delete = connection.prepareStatement("""
+                        delete from mvcc_snapshot_lease_v2 where tx_id = ?
+                        """)) {
             delete.setLong(1, txId);
             delete.executeUpdate();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("release publication snapshot failed", txId, ex);
         }
     }
 
-    /** 与 begin 共享同一控制行栅栏后推进安全点，保留最老读者及未物化决议。 */
+    /**
+     * Share fence control line with begin and advance safe point, keeping the oldest reader and unx3 decision.
+     *
+     * @return the operation result
+     */
     public long advanceSafePoint() {
         try {
             return MysqlConnectionContext.inTransaction(dataSource, connection -> {
                 long published;
                 long current;
-                try (PreparedStatement state = connection.prepareStatement("""
-                        select published_ts, safe_point from mvcc_publication_state_v1
-                        where singleton_id = 1 for update
-                        """);
-                     ResultSet result = state.executeQuery()) {
+                try (
+                        PreparedStatement state = connection.prepareStatement("""
+                                select published_ts, safe_point from mvcc_publication_state_v1
+                                where singleton_id = 1 for update
+                                """);
+                        ResultSet result = state.executeQuery()) {
                     if (!result.next()) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE,
                                 "publication state missing", false, null);
@@ -2697,20 +3110,21 @@ public final class MysqlPublicationLedger {
                             "safe point already exceeds published watermark", false, null);
                 }
                 Long oldest = null;
-                try (PreparedStatement active = connection.prepareStatement("""
-                        select min(read_ts) from (
-                          select read_ts from mvcc_snapshot_lease_v2
-                            where expires_at > cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                          union all
-                          select read_ts from mvcc_coordinator_snapshot_lease_v1
-                            where expires_at > cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                          union all
-                          select t.start_ts as read_ts from mvcc_txn t
-                            left join mvcc_txn_finalized f on f.tx_id = t.tx_id
-                            where f.tx_id is null
-                        ) protected_snapshots
-                        """);
-                     ResultSet result = active.executeQuery()) {
+                try (
+                        PreparedStatement active = connection.prepareStatement("""
+                                select min(read_ts) from (
+                                  select read_ts from mvcc_snapshot_lease_v2
+                                    where expires_at > cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                                  union all
+                                  select read_ts from mvcc_coordinator_snapshot_lease_v1
+                                    where expires_at > cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                                  union all
+                                  select t.start_ts as read_ts from mvcc_txn t
+                                    left join mvcc_txn_finalized f on f.tx_id = t.tx_id
+                                    where f.tx_id is null
+                                ) protected_snapshots
+                                """);
+                        ResultSet result = active.executeQuery()) {
                     if (result.next() && result.getObject(1) != null) {
                         oldest = result.getLong(1);
                     }
@@ -2728,30 +3142,48 @@ public final class MysqlPublicationLedger {
                 }
                 return next;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("advance publication safe point failed", null, ex);
         }
     }
 
-    /** 按数据库时钟有界删除过期租约，未决元数据和账本仍独立保护恢复。 */
-    public int expireSnapshots(int limit) {
+    /**
+     * Press database clock bounded to remove expired lease, pending metadata and books of accounts are still independently protected recovery.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    public int expireSnapshots(final int limit) {
         checkGcLimit(limit);
         return expireLeasesByPrimaryKey("mvcc_snapshot_lease_v2", "tx_id", limit);
     }
 
-    /** 按数据库时钟有界清除失联协调器租约，删除后旧代数不可续租。 */
-    public int expireCoordinatorLeases(int limit) {
+    /**
+     * Press database clock bounded to clear the missing coordinator lease and remove old algebras from lease.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    public int expireCoordinatorLeases(final int limit) {
         checkGcLimit(limit);
         return expireLeasesByPrimaryKey("mvcc_coordinator_snapshot_lease_v1", "coordinator_id", limit);
     }
 
-    /** 先无锁选出到期编号，再按主键删行，统一前台释放与后台 GC 的索引锁顺序。 */
-    private int expireLeasesByPrimaryKey(String table, String idColumn, int limit) {
+    /**
+     * Selecting the due number without lock, then pressing the main key to delete and unify the index lock order of foreground release with background GC.
+     *
+     * @param table table
+     * @param idColumn id column
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    private int expireLeasesByPrimaryKey(final String table, final String idColumn, final int limit) {
         String candidatesSql = "select " + idColumn + " from " + table
                 + " where expires_at <= cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)"
                 + " order by expires_at, " + idColumn + " limit ?";
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement candidates = connection.prepareStatement(candidatesSql)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement candidates = connection.prepareStatement(candidatesSql)) {
             candidates.setInt(1, limit);
             List<Long> ids = new ArrayList<>(limit);
             try (ResultSet rows = candidates.executeQuery()) {
@@ -2773,45 +3205,137 @@ public final class MysqlPublicationLedger {
                 }
                 return delete.executeUpdate();
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("expire publication leases by primary key failed", null, ex);
         }
     }
 
-    /** 仅在中心元数据已清除、终态早于安全点和保留截止后回收账本。 */
-    public int purgeTerminal(long safePoint, long expiredBeforeMillis, int limit) {
+    /**
+     * Only after the central metadata has been cleared, terminal state is earlier than safe point and the collection account book has been kept.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param expiredBeforeMillis expired before millis
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public int purgeTerminal(final long safePoint, final long expiredBeforeMillis, final int limit) {
         checkGcLimit(limit);
         if (safePoint > currentSafePoint()) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "publication purge cannot exceed durable safe point", false, null);
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement delete = connection.prepareStatement("""
-                     delete from mvcc_publication_entry_v1
-                     where commit_ts < ? and status in ('COMMITTED', 'ABORTED')
-                       and expires_at < ?
-                       and not exists (select 1 from mvcc_txn
-                                       where mvcc_txn.tx_id = mvcc_publication_entry_v1.tx_id)
-                     order by commit_ts limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement delete = connection.prepareStatement("""
+                        delete from mvcc_publication_entry_v1
+                        where commit_ts < ? and status in ('COMMITTED', 'ABORTED')
+                          and expires_at < ?
+                          and not exists (select 1 from mvcc_txn
+                                          where mvcc_txn.tx_id = mvcc_publication_entry_v1.tx_id)
+                        order by commit_ts limit ?
+                        """)) {
             delete.setLong(1, safePoint);
             delete.setLong(2, expiredBeforeMillis);
             delete.setInt(3, limit);
             return delete.executeUpdate();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError("purge terminal publication entries failed", null, ex);
         }
     }
 
-    /** 限制每轮 GC 对控制面表的单次负载。 */
-    private void checkGcLimit(int limit) {
+    /**
+     * Limit the single load of the control sheet per round GC.
+     *
+     * @param limit maximum number of items
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private void checkGcLimit(final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("publication GC limit must be between 1 and 4096");
         }
     }
 
-    /** 统一把数据库异常转换为存储不可用，并保留事务上下文。 */
-    private MvccException storageError(String message, Long txId, SQLException ex) {
+    /**
+     * Harmonizes to convert database anomalies to non-usable storage and keeps the transaction context.
+     *
+     * @param message message
+     * @param txId transaction identifier
+     * @param ex ex
+     * @return the operation result
+     */
+    private MvccException storageError(final String message, final Long txId, final SQLException ex) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, txId, ex);
+    }
+
+    /**
+     * A consistent reading captures the specified decision and current release watermark.
+     *
+     * @param publishedTs published ts
+     * @param commitTs durable commit timestamp
+     * @param status status
+     */
+    private record PublicationObservation(long publishedTs, long commitTs, PublicationEntryStatus status) {
+    }
+
+    /**
+     * Keeps the call order and pre-codes participant to avoid formatting strings when holding a time line lock.
+     *
+     * @param index index
+     * @param request request
+     * @param participants participants
+     */
+    private record IndexedIntentCommit(int index, PublicationIntentCommit request, String participants) {
+    }
+
+    /**
+     * Save list shard pre-altered call order, only immutable requests of validate are processed when locking.
+     *
+     * @param index index
+     * @param request request
+     */
+    private record IndexedLocalCommit(int index, PublicationLocalCommitRequest request) {
+    }
+
+    /**
+     * Keep local commit proof call order and secure the account book lock by commit time.
+     *
+     * @param index index
+     * @param proof proof
+     */
+    private record IndexedLocalProof(int index, PublicationLocalCommitProof proof) {
+    }
+
+    /**
+     * Saves the start snapshot and cut-off of a lockless lease batch reading.
+     *
+     * @param readTs snapshot read timestamp
+     * @param expiresAtMillis expires at millis
+     */
+    private record SnapshotLease(long readTs, long expiresAtMillis) {
+    }
+
+    /**
+     * Saves a lock reading result for batch commit to press all centre metadata for transaction identifier verify.
+     *
+     * @param startTs transaction start timestamp
+     * @param status status
+     * @param commitTs durable commit timestamp
+     * @param participants participants
+     */
+    private record BatchIntentMetadata(long startTs, String status, Long commitTs, String participants) {
+    }
+
+    /**
+     * Reporting batch Control transaction Stages Accumulated time-consuming costs for segregating bits.
+     *
+     * @param calls calls
+     * @param validationNanos validation nanos
+     * @param stateWaitNanos state wait nanos
+     * @param writeNanos write nanos
+     * @param finishNanos finish nanos
+     */
+    public record BatchTiming(long calls, long validationNanos, long stateWaitNanos,
+            long writeNanos, long finishNanos) {
     }
 }

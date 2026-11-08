@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -29,26 +45,32 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 基于 Apache Calcite 的 SQL 计划器，负责语法解析、关系类型校验和逻辑计划生成。
+ * SQL programr based on Apache Calcite, responsible for syntax resolution, relationship type validate and logical plan generation.
  */
 public final class CalciteSqlPlanner implements SqlPlanner {
+
     private static final Pattern BEGIN = Pattern.compile("^\\s*BEGIN\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
+
     private static final Pattern BEGIN_RC = Pattern.compile(
             "^\\s*BEGIN\\s+(?:TRANSACTION\\s+ISOLATION\\s+LEVEL\\s+)?READ\\s+COMMITTED\\s*;?\\s*$",
-            Pattern.CASE_INSENSITIVE
-    );
+            Pattern.CASE_INSENSITIVE);
+
     private static final Pattern BEGIN_RR = Pattern.compile(
             "^\\s*BEGIN\\s+(?:TRANSACTION\\s+ISOLATION\\s+LEVEL\\s+)?REPEATABLE\\s+READ\\s*;?\\s*$",
-            Pattern.CASE_INSENSITIVE
-    );
+            Pattern.CASE_INSENSITIVE);
+
     private static final Pattern COMMIT = Pattern.compile("^\\s*COMMIT\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
+
     private static final Pattern ROLLBACK = Pattern.compile("^\\s*ROLLBACK\\s*;?\\s*$", Pattern.CASE_INSENSITIVE);
 
     /**
-     * 使用 Calcite 解析、校验并生成 SQL 计划。
+     * Use Calcite to parse, validate and generate SQL plans.
+     *
+     * @param sql sql
+     * @return the operation result
      */
     @Override
-    public SqlPlan plan(String sql) {
+    public SqlPlan plan(final String sql) {
         if (sql == null || sql.isBlank()) {
             throw unsupported(sql, null);
         }
@@ -76,15 +98,18 @@ public final class CalciteSqlPlanner implements SqlPlanner {
             SqlNode validated = planner.validate(parsed);
             List<String> tableNames = resolveTableNames(planner, validated, statementType, candidates);
             return new SqlPlan.CalcitePlan(calciteSql, statementType, tableNames);
-        } catch (Exception ex) {
+        } catch (final Exception ex) {
             throw unsupported(sql, ex);
         }
     }
 
     /**
-     * 识别 Calcite 本身不负责执行的事务控制语句。
+     * Recognizes the transaction control statement that Calcite does not own.
+     *
+     * @param sql sql
+     * @return the operation result
      */
-    private SqlPlan transactionPlan(String sql) {
+    private SqlPlan transactionPlan(final String sql) {
         if (BEGIN.matcher(sql).matches() || BEGIN_RC.matcher(sql).matches()) {
             return new SqlPlan.BeginTransactionPlan(IsolationLevel.READ_COMMITTED);
         }
@@ -101,20 +126,25 @@ public final class CalciteSqlPlanner implements SqlPlanner {
     }
 
     /**
-     * 创建兼容常见 MySQL 标识符和大小写习惯的解析配置。
+     * Creates a resolution configuration that is compatible with common MySQL identifiers and case habits.
+     *
+     * @return the operation result
      */
     private SqlParser.Config parserConfig() {
         return SqlParser.config().withLex(Lex.MYSQL).withCaseSensitive(false);
     }
 
     /**
-     * 将现有 SQL 模型中的 value 列自动转义，兼容 Calcite 把 VALUE 视为保留字的语法规则。
+     * Automatically transposes the value column in the existing SQL model to meet Calcite's syntax rule for using VALUE as a word retention.
+     *
+     * @param sql sql
+     * @return the operation result
      */
-    private String quoteValueIdentifier(String sql) {
+    private String quoteValueIdentifier(final String sql) {
         StringBuilder result = new StringBuilder(sql.length() + 16);
         boolean singleQuoted = false;
         boolean backtickQuoted = false;
-        for (int index = 0; index < sql.length(); ) {
+        for (int index = 0; index < sql.length();) {
             char current = sql.charAt(index);
             if (current == '\'' && !backtickQuoted) {
                 result.append(current);
@@ -150,9 +180,12 @@ public final class CalciteSqlPlanner implements SqlPlanner {
     }
 
     /**
-     * 把 Calcite 语句分类映射为执行器支持的类型。
+     * Catalogues Calcite statements into the types supported by the controller.
+     *
+     * @param kind kind
+     * @return the operation result
      */
-    private CalciteStatementType statementType(SqlKind kind) {
+    private CalciteStatementType statementType(final SqlKind kind) {
         if (kind.belongsTo(SqlKind.QUERY)) {
             return CalciteStatementType.SELECT;
         }
@@ -165,16 +198,23 @@ public final class CalciteSqlPlanner implements SqlPlanner {
     }
 
     /**
-     * 首次解析后收集可能的表标识符，为 Calcite 校验阶段提供动态 id/value 表元数据。
+     * Collection of possible table identifiers after first decomposition to provide dynamic id/value table metadata for the Calcite validate phase.
+     *
+     * @param parsed parsed
+     * @return the operation result
      */
-    private Set<String> collectIdentifierCandidates(SqlNode parsed) {
+    private Set<String> collectIdentifierCandidates(final SqlNode parsed) {
         Set<String> result = new LinkedHashSet<>();
         parsed.accept(new SqlShuttle() {
+
             /**
-             * 收集简单标识符以及限定标识符的首段和末段。
+             * Collects simple identifiers, as well as qualifying the head and end of identifiers.
+             *
+             * @param identifier identifier
+             * @return the operation result
              */
             @Override
-            public SqlNode visit(SqlIdentifier identifier) {
+            public SqlNode visit(final SqlIdentifier identifier) {
                 if (!identifier.names.isEmpty()) {
                     result.add(identifier.names.getFirst().toLowerCase(Locale.ROOT));
                     result.add(identifier.names.getLast().toLowerCase(Locale.ROOT));
@@ -186,12 +226,19 @@ public final class CalciteSqlPlanner implements SqlPlanner {
     }
 
     /**
-     * 从查询关系树提取真实表名；DML 则使用校验前收集的候选标识符并排除固定列名。
+     * The real name is taken from the query relationship tree; DML uses the candidate identifier collected before validate and excludes fixed listings.
+     *
+     * @param planner planner
+     * @param validated validated
+     * @param statementType statement type
+     * @param candidates candidates
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
-    private List<String> resolveTableNames(Planner planner,
-                                           SqlNode validated,
-                                           CalciteStatementType statementType,
-                                           Set<String> candidates) throws Exception {
+    private List<String> resolveTableNames(final Planner planner,
+                                           final SqlNode validated,
+                                           final CalciteStatementType statementType,
+                                           final Set<String> candidates) throws Exception {
         if (statementType == CalciteStatementType.SELECT) {
             RelRoot relRoot = planner.rel(validated);
             return RelOptUtil.findAllTables(relRoot.rel).stream()
@@ -206,30 +253,39 @@ public final class CalciteSqlPlanner implements SqlPlanner {
     }
 
     /**
-     * 创建统一的非法 SQL 异常并保留 Calcite 根因。
+     * Creates a uniform illegal SQL anomaly and retains Calcite root cause.
+     *
+     * @param sql sql
+     * @param cause cause
+     * @return the operation result
      */
-    private MvccException unsupported(String sql, Exception cause) {
+    private MvccException unsupported(final String sql, final Exception cause) {
         return cause == null
                 ? new MvccException(ErrorCode.ILLEGAL_STATE, "unsupported sql: " + sql, false, null)
                 : new MvccException(ErrorCode.ILLEGAL_STATE, "unsupported sql: " + sql, false, null, cause);
     }
 
     /**
-     * Calcite 校验阶段使用的可修改键值表元数据，真实 DML 仍由 MVCC 执行器处理。
+     * The modified key-value table metadata used for Calcite validate, the real DML is still processed by the MVCC Executor.
      */
     private static final class PlanningTable extends AbstractTable {
 
         /**
-         * 构造指定名称的规划表。
+         * Constructs a plan sheet for the given name.
+         *
+         * @param tableName table name
          */
-        private PlanningTable(String tableName) {
+        private PlanningTable(final String tableName) {
         }
 
         /**
-         * 返回当前 SQL 层固定的 id/value 字符串行类型。
+         * Returns the current SQL layer to a fixed id/value string type.
+         *
+         * @param typeFactory type factory
+         * @return the operation result
          */
         @Override
-        public RelDataType getRowType(RelDataTypeFactory typeFactory) {
+        public RelDataType getRowType(final RelDataTypeFactory typeFactory) {
             return typeFactory.builder()
                     .add("id", SqlTypeName.VARCHAR)
                     .add("value", SqlTypeName.VARCHAR)

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication;
 
 import com.flyingzc.azir.common.BackgroundTaskStats;
@@ -10,28 +26,54 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** 周期驱动新账本的恢复和 GC，两个任务分别使用独立守护线程。 */
+/**
+ * Periodically drive recovery and GCs for new books, with independent daemons used for each of the two tasks.
+ */
 public final class PublicationMaintenanceScheduler implements AutoCloseable {
+
     private final PublicationRecoveryRunner recoveryRunner;
+
     private final PublicationGcManager gcManager;
+
     private final int recoveryBatchSize;
+
     private final int gcBatchSize;
+
     private final long recoveryIntervalMillis;
+
     private final long gcIntervalMillis;
+
     private final ScheduledExecutorService recoveryExecutor;
+
     private final ScheduledExecutorService gcExecutor;
+
     private final BackgroundTaskStats recoveryStats = new BackgroundTaskStats();
+
     private final BackgroundTaskStats gcStats = new BackgroundTaskStats();
+
     private final AtomicReference<RuntimeException> lastRecoveryFailure = new AtomicReference<>();
+
     private final AtomicReference<RuntimeException> lastGcFailure = new AtomicReference<>();
+
     private final AtomicBoolean started = new AtomicBoolean();
+
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    /** 建立有界周期调度；调用者应为后台任务提供独立连接池预算。 */
-    public PublicationMaintenanceScheduler(PublicationRecoveryRunner recoveryRunner,
-                                           PublicationGcManager gcManager,
-                                           int recoveryBatchSize, int gcBatchSize,
-                                           long recoveryIntervalMillis, long gcIntervalMillis) {
+    /**
+     * Create bounded cycle schedule; callers should provide an independent background task connection pool budget.
+     *
+     * @param recoveryRunner recovery runner
+     * @param gcManager gc manager
+     * @param recoveryBatchSize recovery batch size
+     * @param gcBatchSize gc batch size
+     * @param recoveryIntervalMillis recovery interval millis
+     * @param gcIntervalMillis gc interval millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public PublicationMaintenanceScheduler(final PublicationRecoveryRunner recoveryRunner,
+                                           final PublicationGcManager gcManager,
+                                           final int recoveryBatchSize, final int gcBatchSize,
+                                           final long recoveryIntervalMillis, final long gcIntervalMillis) {
         if (recoveryBatchSize < 1 || recoveryBatchSize > 4096 || gcBatchSize < 1 || gcBatchSize > 4096
                 || recoveryIntervalMillis < 1 || gcIntervalMillis < 1) {
             throw new IllegalArgumentException("invalid publication maintenance limits");
@@ -46,7 +88,11 @@ public final class PublicationMaintenanceScheduler implements AutoCloseable {
         this.gcExecutor = Executors.newSingleThreadScheduledExecutor(daemonFactory("mvcc-ledger-gc"));
     }
 
-    /** 启动一次性周期注册，重复启动不会叠加扫描任务。 */
+    /**
+     * Starts a one-time cycle of registration, and repeated start does not superimpose scanning tasks.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     public synchronized void start() {
         if (closed.get()) {
             throw new IllegalStateException("publication maintenance scheduler is closed");
@@ -59,27 +105,45 @@ public final class PublicationMaintenanceScheduler implements AutoCloseable {
         }
     }
 
-    /** 返回周期恢复任务的执行和异常统计。 */
+    /**
+     * Returns the recovery -cycle performance of tasks and unusual statistics.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats recoveryStats() {
         return recoveryStats;
     }
 
-    /** 返回周期 GC 任务的执行和异常统计。 */
+    /**
+     * Returns GC tasks performed and unusual statistics.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats gcStats() {
         return gcStats;
     }
 
-    /** 返回最近一次恢复轮次的顶层失败。 */
+    /**
+     * Could not close temporary folder: %s.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastRecoveryFailure() {
         return lastRecoveryFailure.get();
     }
 
-    /** 返回最近一次 GC 轮次的顶层失败。 */
+    /**
+     * Returns the top layer of the last GC rotation failed.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastGcFailure() {
         return lastGcFailure.get();
     }
 
-    /** 停止未来轮次并等待当前数据库任务结束，超时后中断后台线程。 */
+    /**
+     * Stops the next rotation and waits for the end of the current database task, aborting the background thread after timeout.
+     */
     @Override
     public synchronized void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -91,40 +155,53 @@ public final class PublicationMaintenanceScheduler implements AutoCloseable {
         awaitStop(gcExecutor);
     }
 
-    /** 单轮恢复失败保留下一轮机会，并暴露周期级失败统计。 */
+    /**
+     * Single-wheel recovery failure preserves the next round of opportunity and exposes periodic failure statistics.
+     */
     private void runRecoverySafely() {
         try {
             recoveryStats.recordSuccess(recoveryRunner.recoverOnce(recoveryBatchSize));
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             recoveryStats.recordFailure();
             lastRecoveryFailure.set(ex);
         }
     }
 
-    /** 单轮 GC 失败保留持久游标与安全点，并暴露周期级失败统计。 */
+    /**
+     * Single-wheel GC failed to keep durable cursor and safe point and to expose periodic failure statistics.
+     */
     private void runGcSafely() {
         try {
             gcStats.recordSuccess(gcManager.gcOnce(gcBatchSize));
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             gcStats.recordFailure();
             lastGcFailure.set(ex);
         }
     }
 
-    /** 等待一条任务线程退出，合作式预算之外的单次 JDBC 调用仍依赖驱动超时。 */
-    private void awaitStop(ScheduledExecutorService executor) {
+    /**
+     * Waiting for a task thread to exit, single JDBC calls outside the cooperative budget still depend on driver timeout.
+     *
+     * @param executor executor
+     */
+    private void awaitStop(final ScheduledExecutorService executor) {
         try {
             if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
                 executor.shutdownNow();
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             executor.shutdownNow();
             Thread.currentThread().interrupt();
         }
     }
 
-    /** 为每类周期任务创建独立的守护线程。 */
-    private static ThreadFactory daemonFactory(String name) {
+    /**
+     * Creates a separate daemon for each type of periodic task.
+     *
+     * @param name name
+     * @return the operation result
+     */
+    private static ThreadFactory daemonFactory(final String name) {
         return runnable -> {
             Thread thread = Thread.ofPlatform().daemon().name(name).unstarted(runnable);
             return thread;

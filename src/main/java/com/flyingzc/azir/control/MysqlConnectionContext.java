@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.control;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -26,29 +42,40 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
-/** MySQL 控制面发布锁与连接上下文；同库元数据、TSO 和安全点复用持锁连接。 */
+/**
+ * MySQL control release lock and connection context; same database metadata, TSO and safe point reuse locked connection.
+ */
 public final class MysqlConnectionContext {
+
     private static final Map<DataSource, Domain> DOMAINS = Collections.synchronizedMap(new WeakHashMap<>());
+
     private static final ThreadLocal<Scope> CURRENT = new ThreadLocal<>();
+
     private static final Map<Domain, ReentrantLock> LOCAL_LOCKS = new ConcurrentHashMap<>();
+
     private static final Map<Domain, Set<ConnectionGuard>> QUARANTINED = new ConcurrentHashMap<>();
 
-    /** 仅提供静态连接协调能力。 */
+    /**
+     * Provide static connection coordination capacity only.
+     */
     private MysqlConnectionContext() {
     }
 
-    /** 使用服务器 UUID 和实际数据库绑定域，让不同 JDBC 地址别名也共用进程内锁。 */
-    private record Domain(String serverId, String database) {
-    }
-
-    /** 获取控制面连接；屏障内返回关闭无副作用的借用视图，禁止再次等待同池连接。 */
-    public static Connection connection(DataSource dataSource) throws SQLException {
+    /**
+     * Get control connection; the barrier is returned to close a non-side effect borrowed view, and it is forbidden to wait for co-pool connection.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    public static Connection connection(final DataSource dataSource) throws SQLException {
         requireAvailable(DOMAINS.get(dataSource));
         Scope current = CURRENT.get();
         if (current != null) {
             Domain domain = DOMAINS.get(dataSource);
             if (!current.domain.equals(domain)) {
-                // 数据源必须在进入屏障前通过 initialize 绑定，无法确认同库时失败关闭。
+                // The data source must be bound by initialize before entering barrier, and the same database cannot be confirmed without closing.
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "control datasource must be initialized in the same database domain before publication", false, null);
             }
@@ -57,8 +84,9 @@ public final class MysqlConnectionContext {
         }
         Connection connection = dataSource.getConnection();
         try {
-            try (PreparedStatement statement = connection.prepareStatement("select @@server_uuid, database()");
-                 ResultSet result = statement.executeQuery()) {
+            try (
+                    PreparedStatement statement = connection.prepareStatement("select @@server_uuid, database()");
+                    ResultSet result = statement.executeQuery()) {
                 if (!result.next() || result.getString(1) == null || result.getString(2) == null) {
                     throw new SQLException("control connection requires a server identity and selected database");
                 }
@@ -66,18 +94,29 @@ public final class MysqlConnectionContext {
             }
             requireAvailable(DOMAINS.get(dataSource));
             return connection;
-        } catch (SQLException | RuntimeException | Error ex) {
+        } catch (final SQLException | RuntimeException | Error ex) {
             try {
                 connection.close();
-            } catch (SQLException closeFailure) {
+            } catch (final SQLException closeFailure) {
                 ex.addSuppressed(closeFailure);
             }
             throw ex;
         }
     }
 
-    /** 使用数据库域命名锁串行发布；同线程同域重入不重复 GET_LOCK。 */
-    public static <T> T withPublicationLock(DataSource dataSource, int timeoutSeconds, Supplier<T> action) {
+    /**
+     * Use the database domain to name lockstring lines for release; re-entry is not duplicated by the same threaded field.
+     *
+     * @param <T> value type
+     * @param dataSource database connection source
+     * @param timeoutSeconds timeout seconds
+     * @param action action
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    public static <T> T withPublicationLock(final DataSource dataSource, final int timeoutSeconds, final Supplier<T> action) {
         if (timeoutSeconds < 0) {
             throw new IllegalArgumentException("publication lock timeout must be >= 0");
         }
@@ -88,7 +127,7 @@ public final class MysqlConnectionContext {
             }
             try {
                 current.requireOwnership();
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "publication connection lost", false, null, ex);
             }
             return action.get();
@@ -96,11 +135,11 @@ public final class MysqlConnectionContext {
         Domain domain = domain(dataSource);
         ReentrantLock localLock = LOCAL_LOCKS.computeIfAbsent(domain, ignored -> new ReentrantLock(true));
         try {
-            // 必须先等待进程内域锁，再借控制池连接；每进程仅一条连接等待同域 GET_LOCK。
+            // You must wait for the internal lock of the process and then borrow the control pool connection; there is only one connection per process waiting for the same area GET_LONK.
             if (!localLock.tryLock(timeoutSeconds, TimeUnit.SECONDS)) {
                 throw new MvccException(ErrorCode.LOCK_WAIT_TIMEOUT, "local publication lock timed out", true, null);
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "publication lock wait interrupted", true, null, ex);
         }
@@ -117,7 +156,7 @@ public final class MysqlConnectionContext {
                 try (PreparedStatement lock = connection.prepareStatement("select get_lock(?, ?)")) {
                     lock.setString(1, lockName);
                     lock.setInt(2, timeoutSeconds);
-                    // 请求发出后即可能已获得锁，连结果集关闭异常也必须进入释放路径。
+                    // The lock may have been obtained after the request has been sent, and a chain of results closure anomalies must also enter the release path.
                     scope.mayHoldLock = true;
                     try (ResultSet result = lock.executeQuery()) {
                         if (!result.next() || result.getObject(1) == null) {
@@ -135,16 +174,27 @@ public final class MysqlConnectionContext {
                 scope.requireOwnership();
                 return result;
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "publication lock failed", true, null, ex);
         } finally {
             localLock.unlock();
         }
     }
 
-    /** 让服务器端例程在同一连接内获取和释放命名锁，进程内仍只允许一条连接等待。 */
-    public static <T> T withPublicationProcedure(DataSource dataSource, int timeoutSeconds,
-                                                 SqlAction<T> action) throws SQLException {
+    /**
+     * Allows the server to access and release naming locks in the same connection, where only one connection is allowed to wait.
+     *
+     * @param <T> value type
+     * @param dataSource database connection source
+     * @param timeoutSeconds timeout seconds
+     * @param action action
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    public static <T> T withPublicationProcedure(final DataSource dataSource, final int timeoutSeconds,
+                                                 final SqlAction<T> action) throws SQLException {
         if (timeoutSeconds < 0) {
             throw new IllegalArgumentException("publication lock timeout must be >= 0");
         }
@@ -159,7 +209,7 @@ public final class MysqlConnectionContext {
             if (!localLock.tryLock(timeoutSeconds, TimeUnit.SECONDS)) {
                 throw new MvccException(ErrorCode.LOCK_WAIT_TIMEOUT, "local publication lock timed out", true, null);
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "publication lock wait interrupted", true, null, ex);
         }
@@ -172,8 +222,8 @@ public final class MysqlConnectionContext {
                 T result = action.execute(connection);
                 ensureProcedureReleasedLock(connection, lockName(domain.database()));
                 return result;
-            } catch (SQLException | RuntimeException | Error ex) {
-                // 例程可能已经取得锁或提交决议，不能把结果未知的连接归还普通请求。
+            } catch (final SQLException | RuntimeException | Error ex) {
+                // The routine may have been locked or commit decision and unknown outcome connection cannot be returned to the normal request.
                 guard.discard(ex);
                 throw ex;
             }
@@ -182,16 +232,28 @@ public final class MysqlConnectionContext {
         }
     }
 
-    /** 当前线程已持同库发布屏障时，调用方须选用不重复获取命名锁的旧版例程。 */
-    public static boolean hasPublicationScope(DataSource dataSource) {
+    /**
+     * When the current thread is already same database, the caller has to choose an old version routine that does not duplicate a naming lock.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     */
+    public static boolean hasPublicationScope(final DataSource dataSource) {
         Scope current = CURRENT.get();
         return current != null && current.domain.equals(DOMAINS.get(dataSource));
     }
 
-    /** 返回前确认例程未把本连接取得的命名锁遗留在池中。 */
-    private static void ensureProcedureReleasedLock(Connection connection, String lockName) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select is_used_lock(?) = connection_id()")) {
+    /**
+     * Confirms that this connection acquired name lock is not left in the pool before returning.
+     *
+     * @param connection connection
+     * @param lockName lock name
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void ensureProcedureReleasedLock(final Connection connection, final String lockName) throws SQLException {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select is_used_lock(?) = connection_id()")) {
             statement.setString(1, lockName);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next() || result.getObject(1) != null && result.getInt(1) == 1) {
@@ -199,42 +261,54 @@ public final class MysqlConnectionContext {
                 }
             }
         }
-        // MySQL 响应包状态由驱动维护；这里不额外执行会改变控制面成本的探测 SQL。
+        // MySQL response package state is driver-maintenance; no additional execution here will change the detection of control cost SQL.
         JdbcConnection mysql = connection.unwrap(JdbcConnection.class);
         if (mysql.getSession().getServerSession().inTransactionOnServer()) {
             throw new SQLException("publication procedure retained a database transaction");
         }
     }
 
-    /** 首次使用先短暂绑定数据库身份，不持有池连接等待进程内发布锁。 */
-    private static Domain domain(DataSource dataSource) {
+    /**
+     * For the first time, use a short binding database identity without holding a pool connection waiting to release locks in the process.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private static Domain domain(final DataSource dataSource) {
         Domain domain = DOMAINS.get(dataSource);
         if (domain != null) {
             return domain;
         }
         try (Connection ignored = connection(dataSource)) {
             return DOMAINS.get(dataSource);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "bind publication database failed", true, null, ex);
         }
     }
 
-    /** 无法确认销毁连接的数据库域停止全部控制操作，直到运维修复并重建进程。 */
-    private static void requireAvailable(Domain domain) throws SQLException {
+    /**
+     * The database domain for the destruction of connection could not be confirmed to have ceased all control operations until it was repaired and rebuilt.
+     *
+     * @param domain domain
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void requireAvailable(final Domain domain) throws SQLException {
         if (domain != null && QUARANTINED.containsKey(domain)) {
             throw new SQLException("control database domain quarantined after connection disposal failure");
         }
     }
 
-    /** JDBC 事务函数，异常交由统一清理路径处理。 */
-    @FunctionalInterface
-    public interface SqlAction<T> {
-        /** 使用当前控制面连接完成一段数据库事务。 */
-        T execute(Connection connection) throws SQLException;
-    }
-
-    /** 在借用或独占连接上执行短事务，回滚失败时销毁连接而不是通过 autoCommit 隐式提交。 */
-    public static <T> T inTransaction(DataSource dataSource, SqlAction<T> action) throws SQLException {
+    /**
+     * Destroy connection when the short transaction and rollback implementation on loan or exclusive connection failed instead of using an autoCommit hidden commit.
+     *
+     * @param <T> value type
+     * @param dataSource database connection source
+     * @param action action
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    public static <T> T inTransaction(final DataSource dataSource, final SqlAction<T> action) throws SQLException {
         Scope scope = CURRENT.get();
         if (scope != null) {
             return executeTransaction(connection(dataSource), scope.guard, action);
@@ -245,8 +319,17 @@ public final class MysqlConnectionContext {
         }
     }
 
-    /** 原始连接的归还权仅由 guard 管理，借用连接回滚失败也必须污染外层发布作用域。 */
-    private static <T> T executeTransaction(Connection connection, ConnectionGuard guard, SqlAction<T> action) throws SQLException {
+    /**
+     * The original connection right of restitution is managed only by guard, and the use of connection rollback failed to do so must also pollute the outer release domain.
+     *
+     * @param <T> value type
+     * @param connection connection
+     * @param guard guard
+     * @param action action
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static <T> T executeTransaction(final Connection connection, final ConnectionGuard guard, final SqlAction<T> action) throws SQLException {
         if (!connection.getAutoCommit()) {
             throw new SQLException("nested control SQL transactions are not supported");
         }
@@ -256,11 +339,11 @@ public final class MysqlConnectionContext {
             connection.commit();
             connection.setAutoCommit(true);
             return result;
-        } catch (SQLException | RuntimeException | Error ex) {
+        } catch (final SQLException | RuntimeException | Error ex) {
             try {
                 connection.rollback();
                 connection.setAutoCommit(true);
-            } catch (SQLException | RuntimeException | Error rollbackFailure) {
+            } catch (final SQLException | RuntimeException | Error rollbackFailure) {
                 if (rollbackFailure != ex) {
                     ex.addSuppressed(rollbackFailure);
                 }
@@ -270,71 +353,29 @@ public final class MysqlConnectionContext {
         }
     }
 
-    /** 管理原始池连接的归还权，弃用后绝不走普通 close 回池路径。 */
-    private static final class ConnectionGuard implements AutoCloseable {
-        private final DataSource dataSource;
-        private final Connection connection;
-        private final Domain domain;
-        private boolean discarded;
-
-        /** 保存实际借出该连接的池，淘汰时不能把借用视图传给池。 */
-        private ConnectionGuard(DataSource dataSource, Connection connection, Domain domain) {
-            this.dataSource = dataSource;
-            this.connection = connection;
-            this.domain = domain;
-        }
-
-        /** 先中止会话，再显式淘汰 Hikari 代理；通用池无法淘汰时保留连接并隔离域。 */
-        private void discard(Throwable failure) {
-            if (discarded) {
-                return;
-            }
-            discarded = true;
-            try {
-                connection.abort(Runnable::run);
-            } catch (SQLException | RuntimeException | Error abortFailure) {
-                if (abortFailure != failure) {
-                    failure.addSuppressed(abortFailure);
-                }
-            }
-            try {
-                // evictConnection 对非 Hikari 代理会静默不处理，必须检查池和原始代理类型。
-                if (dataSource instanceof HikariDataSource hikari && connection instanceof ProxyConnection
-                        && connection.getClass().getName().startsWith("com.zaxxer.hikari.")
-                        && !hikari.isClosed() && hikari.getHikariPoolMXBean() != null) {
-                    hikari.evictConnection(connection);
-                    return;
-                }
-            } catch (RuntimeException | Error evictionFailure) {
-                if (evictionFailure != failure) {
-                    failure.addSuppressed(evictionFailure);
-                }
-            }
-            // 强引用保留原始连接，防止普通归还路径把仍持锁或事务未结束的连接交给其他请求。
-            QUARANTINED.computeIfAbsent(domain, ignored -> ConcurrentHashMap.newKeySet()).add(this);
-        }
-
-        /** 只有确认未被弃用的正常连接可以归还到池。 */
-        @Override
-        public void close() throws SQLException {
-            if (!discarded) {
-                connection.close();
-            }
-        }
-    }
-
-    /** 以数据库名摘要构造不超过 MySQL 64 字符限制的锁名。 */
-    private static String lockName(String database) {
+    /**
+     * Construct a lockname not exceeding the MySQL 64 character limit by database.
+     *
+     * @param database database
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static String lockName(final String database) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(database.getBytes(StandardCharsets.UTF_8));
             return "mvcc:pub:" + HexFormat.of().formatHex(digest, 0, 24);
-        } catch (NoSuchAlgorithmException ex) {
+        } catch (final NoSuchAlgorithmException ex) {
             throw new IllegalStateException("SHA-256 unavailable", ex);
         }
     }
 
-    /** 返回借用连接；close 不归还池，unwrap 不暴露持锁连接。 */
-    private static Connection borrowed(Scope scope) {
+    /**
+     * Returns to borrow connection; close does not return the pool, unwrap does not expose locked connection.
+     *
+     * @param scope scope
+     * @return the operation result
+     */
+    private static Connection borrowed(final Scope scope) {
         return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class},
                 (proxy, method, args) -> {
                     if (method.getName().equals("close")) {
@@ -355,30 +396,148 @@ public final class MysqlConnectionContext {
                     }
                     try {
                         return method.invoke(scope.connection, args);
-                    } catch (InvocationTargetException ex) {
+                    } catch (final InvocationTargetException ex) {
                         throw ex.getCause();
                     }
                 });
     }
 
-    /** 屏障退出时清理线程上下文，并在释放失败时销毁连接以免锁随连接回池。 */
-    private static final class Scope implements AutoCloseable {
-        private final ConnectionGuard guard;
+    /**
+     * Use the server UUID and actual database to bind the field so that different JDBC addresses have their aliases locked in the process.
+     *
+     * @param serverId server id
+     * @param database database
+     */
+    private record Domain(String serverId, String database) {
+    }
+
+    /**
+     * The JDBC transaction function, the anomaly is handled by a unified cleanup path.
+     *
+     * @param <T> value type
+     */
+    @FunctionalInterface
+    public interface SqlAction<T> {
+
+        /**
+         * Use the current control connection to complete a paragraph database transaction.
+         *
+         * @param connection connection
+         * @return the operation result
+         * @throws SQLException if the operation cannot complete
+         */
+        T execute(Connection connection) throws SQLException;
+    }
+
+    /**
+     * Manages the restitution rights of the original pool connection, which will never be followed by a normal close back-to-pool path when discarded.
+     */
+    private static final class ConnectionGuard implements AutoCloseable {
+
+        private final DataSource dataSource;
+
         private final Connection connection;
+
         private final Domain domain;
+
+        private boolean discarded;
+
+        /**
+         * Saves the actual loan from the connection pool and cannot pass the borrowed view to it at the time of phase-out.
+         *
+         * @param dataSource database connection source
+         * @param connection connection
+         * @param domain domain
+         */
+        private ConnectionGuard(final DataSource dataSource, final Connection connection, final Domain domain) {
+            this.dataSource = dataSource;
+            this.connection = connection;
+            this.domain = domain;
+        }
+
+        /**
+         * Abort session first, then visibly phase out Hikari proxy; keep connection and separate if the common pool cannot be phased out.
+         *
+         * @param failure failure
+         */
+        private void discard(final Throwable failure) {
+            if (discarded) {
+                return;
+            }
+            discarded = true;
+            try {
+                connection.abort(Runnable::run);
+            } catch (final SQLException | RuntimeException | Error abortFailure) {
+                if (abortFailure != failure) {
+                    failure.addSuppressed(abortFailure);
+                }
+            }
+            try {
+                // EvictConnect does not deal with non-Hikari agents in silence and must check the pool and original agent type.
+                if (dataSource instanceof HikariDataSource hikari && connection instanceof ProxyConnection
+                        && connection.getClass().getName().startsWith("com.zaxxer.hikari.")
+                        && !hikari.isClosed() && hikari.getHikariPoolMXBean() != null) {
+                    hikari.evictConnection(connection);
+                    return;
+                }
+            } catch (final RuntimeException | Error evictionFailure) {
+                if (evictionFailure != failure) {
+                    failure.addSuppressed(evictionFailure);
+                }
+            }
+            // Use the original connection to prevent ordinary return paths from being handed over to other requests that remain locked or transaction has not been terminated.
+            QUARANTINED.computeIfAbsent(domain, ignored -> ConcurrentHashMap.newKeySet()).add(this);
+        }
+
+        /**
+         * Only normal connection can be returned to the pool if it is confirmed that it has not been discarded.
+         *
+         * @throws SQLException if the operation cannot complete
+         */
+        @Override
+        public void close() throws SQLException {
+            if (!discarded) {
+                connection.close();
+            }
+        }
+    }
+
+    /**
+     * Barrier clears the context of the thread at exit and destroys connection when release fails in order to avoid locking with connection back into the pool.
+     */
+    private static final class Scope implements AutoCloseable {
+
+        private final ConnectionGuard guard;
+
+        private final Connection connection;
+
+        private final Domain domain;
+
         private final String lockName;
+
         private boolean mayHoldLock;
+
         private boolean broken;
 
-        /** 保存持锁连接及其唯一数据库域。 */
-        private Scope(ConnectionGuard guard, Domain domain, String lockName) {
+        /**
+         * Saves locked connection and its only database domain.
+         *
+         * @param guard guard
+         * @param domain domain
+         * @param lockName lock name
+         */
+        private Scope(final ConnectionGuard guard, final Domain domain, final String lockName) {
             this.guard = guard;
             this.connection = guard.connection;
             this.domain = domain;
             this.lockName = lockName;
         }
 
-        /** 每次借用校验会话仍持有命名锁；失效后本次屏障永不换连接继续执行。 */
+        /**
+         * Validate session still holds a name lock every time it is borrowed; this barrier never changes connection to continue after it has expired.
+         *
+         * @throws SQLException if the operation cannot complete
+         */
         private void requireOwnership() throws SQLException {
             requireAvailable(domain);
             if (broken || guard.discarded || connection.isClosed()) {
@@ -392,13 +551,17 @@ public final class MysqlConnectionContext {
                         throw new SQLException("publication connection no longer owns GET_LOCK");
                     }
                 }
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 broken = true;
                 throw ex;
             }
         }
 
-        /** 异常路径也释放命名锁，保留调用失败和释放失败的异常链。 */
+        /**
+         * Unusual paths also release naming locks, and maintain an abnormal chain of failed calls and failed releases.
+         *
+         * @throws SQLException if the operation cannot complete
+         */
         @Override
         public void close() throws SQLException {
             CURRENT.remove();
@@ -412,7 +575,7 @@ public final class MysqlConnectionContext {
                         throw new SQLException("RELEASE_LOCK did not confirm publication lock release");
                     }
                 }
-            } catch (SQLException | RuntimeException | Error ex) {
+            } catch (final SQLException | RuntimeException | Error ex) {
                 guard.discard(ex);
                 throw ex;
             }

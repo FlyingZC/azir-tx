@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.flyingzc.azir.common.BackgroundTaskStats;
@@ -23,76 +39,56 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-/** 本地跨批次分配持久时间槽，并协调决议、owner 续租与安全封存。 */
+/**
+ * Local cross batch allocates the durable slot and coordinates decision and owner lease renewals and secure storage.
+ */
 final class PublicationSegmentOwnerRegistry implements AutoCloseable {
+
     private final MysqlSegmentPublicationLedger foregroundLedger;
+
     private final MysqlSegmentPublicationLedger backgroundLedger;
+
     private final String ownerId = UUID.randomUUID().toString();
+
     private final int segmentSize;
+
     private final long leaseMillis;
+
     private final long idleSealNanos;
+
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
+
     private final Map<Long, SegmentState> segments = new HashMap<>();
+
     private final ScheduledExecutorService refresher;
+
     private final BackgroundTaskStats refreshStats = new BackgroundTaskStats();
+
     private final AtomicReference<RuntimeException> lastRefreshFailure = new AtomicReference<>();
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private volatile SegmentState current;
+
     private String pendingReservationKey;
+
     private long reservationSequence;
 
-    /** 保存一段当前持久代数、下一个本地槽与尚未证实终态的数量。 */
-    private static final class SegmentState {
-        private volatile PublicationSegmentLease lease;
-        private final AtomicInteger unresolved = new AtomicInteger();
-        private final AtomicLong nextTs;
-        private volatile long lastAssignedNanos;
-        private volatile boolean unsafe;
-
-        /** 从持久预留的第一槽开始分配。 */
-        private SegmentState(PublicationSegmentLease lease) {
-            this.lease = lease;
-            this.nextTs = new AtomicLong(lease.firstTs());
-        }
-    }
-
-    /** 一笔业务提交已领取但还没有终态证明的时间槽。 */
-    static final class Assignment {
-        private final long segmentStart;
-        private final long commitTs;
-        private final AtomicBoolean resolved = new AtomicBoolean();
-
-        /** 保存分段身份与全局提交时间戳。 */
-        private Assignment(long segmentStart, long commitTs) {
-            this.segmentStart = segmentStart;
-            this.commitTs = commitTs;
-        }
-
-        /** 返回持久分段的第一时间戳。 */
-        long segmentStart() {
-            return segmentStart;
-        }
-
-        /** 返回此事务唯一领取的提交时间戳。 */
-        long commitTs() {
-            return commitTs;
-        }
-    }
-
-    /** 一笔已预写事务及其本地分配的待决议时间槽。 */
-    record CommitRequest(Assignment assignment, long txId, long deadlineMillis, Set<String> participants) {
-        /** 固定参与者身份，避免入队后业务线程修改写集合。 */
-        CommitRequest {
-            Objects.requireNonNull(assignment, "assignment");
-            participants = Set.copyOf(participants);
-        }
-    }
-
-    /** 建立受限分段、后台租约期限和正常空闲封存周期。 */
-    PublicationSegmentOwnerRegistry(MysqlSegmentPublicationLedger foregroundLedger,
-                                    MysqlSegmentPublicationLedger backgroundLedger,
-                                    int segmentSize, long leaseMillis,
-                                    long refreshMillis, long idleSealMillis) {
+    /**
+     * Creates restricted segments, background lease duration and normal free storage cycles.
+     *
+     * @param foregroundLedger foreground ledger
+     * @param backgroundLedger background ledger
+     * @param segmentSize segment size
+     * @param leaseMillis lease millis
+     * @param refreshMillis refresh millis
+     * @param idleSealMillis idle seal millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    PublicationSegmentOwnerRegistry(final MysqlSegmentPublicationLedger foregroundLedger,
+                                    final MysqlSegmentPublicationLedger backgroundLedger,
+                                    final int segmentSize, final long leaseMillis,
+                                    final long refreshMillis, final long idleSealMillis) {
         if (segmentSize < 1 || segmentSize > 4096 || leaseMillis < 3
                 || leaseMillis > 86_400_000 || refreshMillis < 1
                 || refreshMillis >= leaseMillis / 2 || idleSealMillis < 1) {
@@ -103,14 +99,19 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         this.segmentSize = segmentSize;
         this.leaseMillis = leaseMillis;
         this.idleSealNanos = TimeUnit.MILLISECONDS.toNanos(idleSealMillis);
-        this.refresher = Executors.newSingleThreadScheduledExecutor(task ->
-                Thread.ofPlatform().daemon().name("mvcc-segment-owner-refresh").unstarted(task));
+        this.refresher = Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform().daemon().name("mvcc-segment-owner-refresh").unstarted(task));
         refresher.scheduleWithFixedDelay(this::refreshSafely, refreshMillis,
                 refreshMillis, TimeUnit.MILLISECONDS);
     }
 
-    /** 仅在本地段耗尽时持久预留新范围，事务编号与时间槽仍彼此独立。 */
-    Assignment allocate(long startTs) {
+    /**
+     * Durable reserves a new range only when the local segment is exhausted, and the transaction identifier and the time slots remain independent of each other.
+     *
+     * @param startTs transaction start timestamp
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    Assignment allocate(final long startTs) {
         lock.readLock().lock();
         try {
             requireOpen();
@@ -150,8 +151,14 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 共享栅栏下用 CAS 取得段内空槽，续租写栅栏仍等待登记完成。 */
-    private Assignment tryAllocate(SegmentState segment, long startTs) {
+    /**
+     * Share fence to get empty slots in the sector with CAS, and renewing lease fence is still waiting for registration to be completed.
+     *
+     * @param segment segment
+     * @param startTs transaction start timestamp
+     * @return the operation result
+     */
+    private Assignment tryAllocate(final SegmentState segment, final long startTs) {
         if (segment == null || segment.unsafe) {
             return null;
         }
@@ -168,8 +175,16 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 用当前代数写持久中心决议，异常时停止续租该段并交由恢复确认结果。 */
-    long decide(Assignment assignment, long txId, long deadlineMillis, Set<String> participants) {
+    /**
+     * Write durable Center decision with the current algebra and stop renewing this paragraph in case of an anomaly and submit it to recovery for confirmation.
+     *
+     * @param assignment assignment
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @param participants participants
+     * @return the operation result
+     */
+    long decide(final Assignment assignment, final long txId, final long deadlineMillis, final Set<String> participants) {
         Objects.requireNonNull(assignment, "assignment");
         lock.readLock().lock();
         try {
@@ -179,7 +194,7 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
                         assignment.commitTs(), txId, deadlineMillis, participants);
                 resolve(segment, assignment);
                 return commitTs;
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 segment.unsafe = true;
                 resolve(segment, assignment);
                 throw ex;
@@ -189,10 +204,19 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 中心持久提交后返回分片物化凭据，未知结果仍 fencing 本地 owner。 */
-    MysqlSegmentPublicationLedger.CommittedProof decideWithProof(Assignment assignment, long txId,
-                                                                 long startTs, long deadlineMillis,
-                                                                 Set<String> participants) {
+    /**
+     * Center durable commit returns shard materialization receipt, the unknown result is still funcing local owner.
+     *
+     * @param assignment assignment
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param deadlineMillis deadline millis
+     * @param participants participants
+     * @return the operation result
+     */
+    MysqlSegmentPublicationLedger.CommittedProof decideWithProof(final Assignment assignment, final long txId,
+                                                                 final long startTs, final long deadlineMillis,
+                                                                 final Set<String> participants) {
         Objects.requireNonNull(assignment, "assignment");
         lock.readLock().lock();
         try {
@@ -202,7 +226,7 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
                         assignment.commitTs(), txId, startTs, deadlineMillis, participants);
                 resolve(segment, assignment);
                 return proof;
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 segment.unsafe = true;
                 resolve(segment, assignment);
                 throw ex;
@@ -212,8 +236,13 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 同一分段的一批决议持本地读栅栏直到整批控制事务落盘。 */
-    void decideBatch(List<CommitRequest> requests) {
+    /**
+     * A batch of decision s in the same segment holds local to read fence until the whole batch controls transaction drops.
+     *
+     * @param requests requests
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    void decideBatch(final List<CommitRequest> requests) {
         if (requests.isEmpty()) {
             return;
         }
@@ -234,8 +263,8 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
                 for (CommitRequest request : requests) {
                     resolve(segment, request.assignment());
                 }
-            } catch (RuntimeException ex) {
-                // 批次可能已提交或已回滚，整体失去本地 owner 权限并交由持久恢复核对。
+            } catch (final RuntimeException ex) {
+                // Batch may have been commit or rollback, and the entire body lost local owner privileges and submitted to durable recovery for verification.
                 for (CommitRequest request : requests) {
                     SegmentState segment = segments.get(request.assignment().segmentStart());
                     if (segment != null) {
@@ -250,8 +279,16 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 首次物理提交前在当前 owner 代数内持久认领本地候选槽。 */
-    long claimLocal(Assignment assignment, long txId, long deadlineMillis, String participant) {
+    /**
+     * The durable candidate for local before the first physical commit is in the current own algebra.
+     *
+     * @param assignment assignment
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @param participant participant
+     * @return the operation result
+     */
+    long claimLocal(final Assignment assignment, final long txId, final long deadlineMillis, final String participant) {
         Objects.requireNonNull(assignment, "assignment");
         lock.readLock().lock();
         try {
@@ -259,7 +296,7 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
             try {
                 return foregroundLedger.claimLocalPending(segment.lease,
                         assignment.commitTs(), txId, deadlineMillis, participant);
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 segment.unsafe = true;
                 resolve(segment, assignment);
                 throw ex;
@@ -269,19 +306,41 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 本地 COMMITTED 证明即使在 owner 过期后仍可补齐相同中心决议。 */
-    boolean completeLocalCommit(Assignment assignment, ParticipantRecord local, String participant) {
+    /**
+     * Local COMMITTED certifies that the same centre decision can be completed even after its owner has expired.
+     *
+     * @param assignment assignment
+     * @param local local
+     * @param participant participant
+     * @return the operation result
+     */
+    boolean completeLocalCommit(final Assignment assignment, final ParticipantRecord local, final String participant) {
         return completeLocal(assignment, local, participant, true);
     }
 
-    /** 本地 ABORTED 证明释放候选时间槽而不覆盖可能存在的提交。 */
-    boolean completeLocalAbort(Assignment assignment, ParticipantRecord local, String participant) {
+    /**
+     * Local ABORTED proves that the release of the candidate slot does not cover the possible commit.
+     *
+     * @param assignment assignment
+     * @param local local
+     * @param participant participant
+     * @return the operation result
+     */
+    boolean completeLocalAbort(final Assignment assignment, final ParticipantRecord local, final String participant) {
         return completeLocal(assignment, local, participant, false);
     }
 
-    /** 本地终态补决议不依赖当前 owner 代数，只依赖持久分片证明。 */
-    private boolean completeLocal(Assignment assignment, ParticipantRecord local,
-                                  String participant, boolean committed) {
+    /**
+     * Local terminal state plus decision does not depend on the current homeer algebra, but only on the durable shard certificate.
+     *
+     * @param assignment assignment
+     * @param local local
+     * @param participant participant
+     * @param committed committed
+     * @return the operation result
+     */
+    private boolean completeLocal(final Assignment assignment, final ParticipantRecord local,
+                                  final String participant, final boolean committed) {
         Objects.requireNonNull(assignment, "assignment");
         lock.readLock().lock();
         try {
@@ -296,7 +355,7 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
                     resolve(segment, assignment);
                 }
                 return changed;
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 if (segment != null) {
                     segment.unsafe = true;
                     resolve(segment, assignment);
@@ -308,8 +367,15 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 已完成参与者 fencing 后在当前代数内原子中止此槽。 */
-    boolean abort(Assignment assignment, long txId, long deadlineMillis) {
+    /**
+     * Abort this slot after participant closing in the current algebra.
+     *
+     * @param assignment assignment
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @return the operation result
+     */
+    boolean abort(final Assignment assignment, final long txId, final long deadlineMillis) {
         Objects.requireNonNull(assignment, "assignment");
         lock.readLock().lock();
         try {
@@ -319,7 +385,7 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
                         assignment.commitTs(), txId, deadlineMillis);
                 resolve(segment, assignment);
                 return aborted;
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 segment.unsafe = true;
                 resolve(segment, assignment);
                 throw ex;
@@ -329,7 +395,11 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 后台续租在本地排他栅栏内更新代数，读侧决议不会拿到混合代数。 */
+    /**
+     * Background is renewed to update the algebra in local row fence, reading side decision does not get a hybrid algebra.
+     *
+     * @return the operation result
+     */
     int refresh() {
         lock.writeLock().lock();
         try {
@@ -366,12 +436,12 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
                     SegmentState segment = new SegmentState(recovered);
                     segments.put(recovered.firstTs(), segment);
                     current = segment;
-                    // 未交付给前台的范围没有在途决议，应立即封存而非等租约自然到期。
+                    // The range not delivered to foreground is not in transit decision and should be immediately sealed instead of equal lease natural maturity.
                     backgroundLedger.sealOwnedSegment(recovered);
                     segments.remove(recovered.firstTs());
                     current = null;
                     progressed++;
-                } catch (MvccException ex) {
+                } catch (final MvccException ex) {
                     if (ex.errorCode() == ErrorCode.TRANSACTION_STATUS_UNKNOWN
                             || ex.errorCode() == ErrorCode.TRANSACTION_ABORTED) {
                         pendingReservationKey = null;
@@ -387,17 +457,27 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 返回后台代数更新和主动封存的轮次统计。 */
+    /**
+     * Returns the round count of background algebra updates and active storage.
+     *
+     * @return the operation result
+     */
     BackgroundTaskStats refreshStats() {
         return refreshStats;
     }
 
-    /** 返回最近一次后台续租或封存失败。 */
+    /**
+     * Returns the latest background renewal or storage failed.
+     *
+     * @return the operation result
+     */
     RuntimeException lastRefreshFailure() {
         return lastRefreshFailure.get();
     }
 
-    /** 关闭后停止新分配；已决议段封存尾槽，未知决议留待持久到期接管。 */
+    /**
+     * Stops the new distribution after closing; the tailings slot has been sealed in decision and unknown decision is reserved for durable due to take over.
+     */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -413,7 +493,7 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
                 }
                 try {
                     backgroundLedger.sealOwnedSegment(segment.lease);
-                } catch (RuntimeException ex) {
+                } catch (final RuntimeException ex) {
                     if (failure == null) {
                         failure = ex;
                     } else if (failure != ex) {
@@ -429,7 +509,11 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 同一个请求键在响应丢失后重试，不会重复预留时间范围。 */
+    /**
+     * The same requested key will not be repeated after the retry key has been lost.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     private void reserveNextSegment() {
         if (pendingReservationKey == null) {
             if (reservationSequence == Long.MAX_VALUE) {
@@ -445,7 +529,7 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
             SegmentState segment = new SegmentState(lease);
             segments.put(lease.firstTs(), segment);
             current = segment;
-        } catch (MvccException ex) {
+        } catch (final MvccException ex) {
             if (ex.errorCode() == ErrorCode.TRANSACTION_STATUS_UNKNOWN
                     || ex.errorCode() == ErrorCode.TRANSACTION_ABORTED) {
                 pendingReservationKey = null;
@@ -454,12 +538,16 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 任何未完成分段在 owner 响应未知时停止续租，由持久到期接管终结。 */
-    private void renewOrFence(SegmentState segment) {
+    /**
+     * Any uncompleted segment stops the renewal of the lease when the owner responds to unknown information and is terminated by durable due take-over.
+     *
+     * @param segment segment
+     */
+    private void renewOrFence(final SegmentState segment) {
         PublicationSegmentLease previous = segment.lease;
         try {
             segment.lease = backgroundLedger.renewSegment(previous, leaseMillis);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             try {
                 PublicationSegmentLease durable = backgroundLedger.segmentLease(previous.firstTs()).orElse(null);
                 if (durable != null && durable.ownerId().equals(ownerId)
@@ -469,7 +557,7 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
                 } else {
                     segment.unsafe = true;
                 }
-            } catch (RuntimeException inspectFailure) {
+            } catch (final RuntimeException inspectFailure) {
                 segment.unsafe = true;
                 ex.addSuppressed(inspectFailure);
             }
@@ -477,15 +565,26 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 同一分段的提交和中止确认只能释放一次本地在途名额。 */
-    private void resolve(SegmentState segment, Assignment assignment) {
+    /**
+     * Commit in the same sub-paragraph and suspension of confirmation of release of local places only once.
+     *
+     * @param segment segment
+     * @param assignment assignment
+     */
+    private void resolve(final SegmentState segment, final Assignment assignment) {
         if (assignment.resolved.compareAndSet(false, true)) {
             segment.unresolved.decrementAndGet();
         }
     }
 
-    /** 拒绝关闭、失联或已经交由恢复接管的时间槽。 */
-    private SegmentState requireAssignment(Assignment assignment) {
+    /**
+     * A slot that refuses to close, is missing or has been handed over to recovery for take-over.
+     *
+     * @param assignment assignment
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private SegmentState requireAssignment(final Assignment assignment) {
         requireOpen();
         SegmentState segment = segments.get(assignment.segmentStart());
         if (segment == null || segment.unsafe || assignment.resolved.get()) {
@@ -495,7 +594,11 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         return segment;
     }
 
-    /** 关闭后的前台请求不再取得新的分段决议权。 */
+    /**
+     * After-closing foreground requests no new subparagraph decision rights.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     private void requireOpen() {
         if (closed.get()) {
             throw new MvccException(ErrorCode.TRANSACTION_ABORTED,
@@ -503,13 +606,106 @@ final class PublicationSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 周期失败保留下一次重试机会并公开异常。 */
+    /**
+     * The cycle failed to keep the next retry opportunity open and abnormal.
+     */
     private void refreshSafely() {
         try {
             refreshStats.recordSuccess(refresh());
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             lastRefreshFailure.set(ex);
             refreshStats.recordFailure();
+        }
+    }
+
+    /**
+     * Saves a current durable algebra, the next local slot and an unverified number of terminal state.
+     */
+    private static final class SegmentState {
+
+        private volatile PublicationSegmentLease lease;
+
+        private final AtomicInteger unresolved = new AtomicInteger();
+
+        private final AtomicLong nextTs;
+
+        private volatile long lastAssignedNanos;
+
+        private volatile boolean unsafe;
+
+        /**
+         * Distribution starts from the first slot set aside for durable.
+         *
+         * @param lease lease
+         */
+        private SegmentState(final PublicationSegmentLease lease) {
+            this.lease = lease;
+            this.nextTs = new AtomicLong(lease.firstTs());
+        }
+    }
+
+    /**
+     * A business commit has been received but not yet the terminal proof slot.
+     */
+    static final class Assignment {
+
+        private final long segmentStart;
+
+        private final long commitTs;
+
+        private final AtomicBoolean resolved = new AtomicBoolean();
+
+        /**
+         * Save session identity with global commit timestamp.
+         *
+         * @param segmentStart segment start
+         * @param commitTs durable commit timestamp
+         */
+        private Assignment(final long segmentStart, final long commitTs) {
+            this.segmentStart = segmentStart;
+            this.commitTs = commitTs;
+        }
+
+        /**
+         * Returns the first timestamp of the durable segment.
+         *
+         * @return the operation result
+         */
+        long segmentStart() {
+            return segmentStart;
+        }
+
+        /**
+         * Returns this transaction only received commit timestamp.
+         *
+         * @return the operation result
+         */
+        long commitTs() {
+            return commitTs;
+        }
+    }
+
+    /**
+     * An prewrite transaction and its local assigned to the decision slot.
+     *
+     * @param assignment assignment
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @param participants participants
+     */
+    record CommitRequest(Assignment assignment, long txId, long deadlineMillis, Set<String> participants) {
+
+        /**
+         * Fixed participant identity to avoid retweeting write set.
+         *
+         * @param assignment assignment
+         * @param txId transaction identifier
+         * @param deadlineMillis deadline millis
+         * @param participants participants
+         */
+        CommitRequest {
+            Objects.requireNonNull(assignment, "assignment");
+            participants = Set.copyOf(participants);
         }
     }
 }

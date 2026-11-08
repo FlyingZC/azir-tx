@@ -1,4 +1,24 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.api.Transaction;
 import com.flyingzc.azir.common.IsolationLevel;
@@ -18,16 +38,15 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /**
- * 事务管理器 no-op metrics 热路径测试。
+ * Transaction manager no-op metrics thermal path testing.
  */
 class TransactionManagerNoOpHotPathTest {
+
     /**
-     * 验证事务管理器不再使用旧的 recordStage 包装热路径。
+     * The verify transaction manager no longer uses the old recordStage package heat path.
+     *
+     * @throws Exception if the operation cannot complete
      */
     @Test
     void noOpHotPathShouldNotUseGenericRecordStageWrapper() throws Exception {
@@ -37,7 +56,9 @@ class TransactionManagerNoOpHotPathTest {
     }
 
     /**
-     * 验证事务入口不会直接进入计量包装方法。
+     * The verify transaction entrance does not enter directly to measure packing methods.
+     *
+     * @throws Exception if the operation cannot complete
      */
     @Test
     void publicHotPathShouldNotCallMeasuredStageDirectly() throws Exception {
@@ -48,7 +69,9 @@ class TransactionManagerNoOpHotPathTest {
     }
 
     /**
-     * 验证所有计量 helper 都先短路默认 no-op metrics。
+     * Verify All measuring helper default no-op metrics.
+     *
+     * @throws Exception if the operation cannot complete
      */
     @Test
     void measuredStageHelpersShouldGuardNoOpMetricsBeforeWrappingAction() throws Exception {
@@ -76,7 +99,7 @@ class TransactionManagerNoOpHotPathTest {
     }
 
     /**
-     * 验证默认 no-op metrics 仍能提交单分片事务。
+     * Verify More key direct committee check to use a single bar in query.
      */
     @Test
     void defaultNoOpMetricsShouldStillCommitSingleShardTransaction() {
@@ -85,20 +108,19 @@ class TransactionManagerNoOpHotPathTest {
                 new AtomicTimestampOracle(100L),
                 new InMemoryTransactionMetadataStore(),
                 TransactionOptions.defaults(),
-                Map.of(shard.shardId(), shard)
-        );
+                Map.of(shard.shardId(), shard));
 
         Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
         manager.put(tx, "shard-1", "k1", new byte[]{1});
         manager.commit(tx);
 
-        assertEquals(0, shard.directCommitCount());
-        assertEquals(1, shard.prewriteCount);
-        assertEquals(1, shard.commitCount());
+        Assertions.assertEquals(0, shard.directCommitCount());
+        Assertions.assertEquals(1, shard.prewriteCount);
+        Assertions.assertEquals(1, shard.commitCount());
     }
 
     /**
-     * 验证默认 no-op metrics 仍能提交跨分片事务。
+     * Verify More key direct committee check to use a single bar in query.
      */
     @Test
     void defaultNoOpMetricsShouldStillCommitCrossShardTransaction() {
@@ -108,20 +130,19 @@ class TransactionManagerNoOpHotPathTest {
                 new AtomicTimestampOracle(100L),
                 new InMemoryTransactionMetadataStore(),
                 TransactionOptions.defaults(),
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
 
         Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
         manager.put(tx, "shard-1", "k1", new byte[]{1});
         manager.put(tx, "shard-2", "k2", new byte[]{2});
         manager.commit(tx);
 
-        assertEquals(1, shard1.commitCount());
-        assertEquals(1, shard2.commitCount());
+        Assertions.assertEquals(1, shard1.commitCount());
+        Assertions.assertEquals(1, shard2.commitCount());
     }
 
     /**
-     * 验证默认 no-op metrics 仍能回滚参与分片。
+     * Verify More key direct committee check to use a single bar in query.
      */
     @Test
     void defaultNoOpMetricsShouldStillRollbackParticipants() {
@@ -130,27 +151,32 @@ class TransactionManagerNoOpHotPathTest {
                 new AtomicTimestampOracle(100L),
                 new InMemoryTransactionMetadataStore(),
                 TransactionOptions.failFastDefaults(),
-                Map.of(shard.shardId(), shard)
-        );
+                Map.of(shard.shardId(), shard));
 
         Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
         manager.put(tx, "shard-1", "k1", new byte[]{1});
         manager.rollback(tx);
 
-        assertEquals(1, shard.abortCount());
+        Assertions.assertEquals(1, shard.abortCount());
     }
 
     /**
-     * 读取事务管理器源码。
+     * Reads the transaction manager source code.
+     *
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
     private static String readTransactionManagerSource() throws Exception {
         return Files.readString(Path.of("src/main/java/com/flyingzc/azir/txn/TransactionManager.java"));
     }
 
     /**
-     * 断言计量 helper 在包装业务动作前先判断 no-op metrics。
+     * It is asserted that the measurement of the helper judge no-op metrics before the packaging business action.
+     *
+     * @param source database connection source
+     * @param signature signature
      */
-    private static void assertMeasuredStageGuard(String source, String signature) {
+    private static void assertMeasuredStageGuard(final String source, final String signature) {
         String methodSource = extractMethodSource(source, signature);
         int guardIndex = methodSource.indexOf("if (!metricsEnabled())");
         int measuredIndex = methodSource.indexOf("recordMeasuredStage(");
@@ -161,9 +187,14 @@ class TransactionManagerNoOpHotPathTest {
     }
 
     /**
-     * 从源码中截取指定方法体。
+     * Intercepts the specified method from the source code.
+     *
+     * @param source database connection source
+     * @param signature signature
+     * @return the operation result
+     * @throws AssertionError if the operation cannot complete
      */
-    private static String extractMethodSource(String source, String signature) {
+    private static String extractMethodSource(final String source, final String signature) {
         int signatureIndex = source.indexOf(signature);
         assertTrue(signatureIndex >= 0, signature + " should exist");
         int bodyStart = source.indexOf('{', signatureIndex);
@@ -185,24 +216,33 @@ class TransactionManagerNoOpHotPathTest {
     }
 
     /**
-     * 记录调用次数的测试存储适配器。
+     * Test storage adapter to record the number of calls.
      */
     private static final class RecordingStorageAdapter implements StorageAdapter {
+
         private final String shardId;
+
         private int prewriteCount;
+
         private int commitCount;
+
         private int directCommitCount;
+
         private int abortCount;
 
         /**
-         * 构造测试存储适配器。
+         * Construct to test storage adaptor.
+         *
+         * @param shardId logical shard identifier
          */
-        private RecordingStorageAdapter(String shardId) {
+        private RecordingStorageAdapter(final String shardId) {
             this.shardId = shardId;
         }
 
         /**
-         * 仅模拟跨分片可见性能力，使计数测试能够进入参与者调用路径。
+         * Simulates only the cross-shard Visibility capability to enable count tests to enter the participant call path.
+         *
+         * @return the operation result
          */
         @Override
         public boolean supportsCommittedIntentResolution() {
@@ -210,28 +250,36 @@ class TransactionManagerNoOpHotPathTest {
         }
 
         /**
-         * 返回直接提交次数。
+         * Returns the number of direct commit times.
+         *
+         * @return the operation result
          */
         private int directCommitCount() {
             return directCommitCount;
         }
 
         /**
-         * 返回普通提交次数。
+         * Returns normal commit times.
+         *
+         * @return the operation result
          */
         private int commitCount() {
             return commitCount;
         }
 
         /**
-         * 返回回滚次数。
+         * Returns rollback times.
+         *
+         * @return the operation result
          */
         private int abortCount() {
             return abortCount;
         }
 
         /**
-         * 返回当前分片编号。
+         * Return the shard identifier.
+         *
+         * @return the operation result
          */
         @Override
         public String shardId() {
@@ -239,96 +287,136 @@ class TransactionManagerNoOpHotPathTest {
         }
 
         /**
-         * 初始化测试存储。
+         * Initialised test storage.
          */
         @Override
         public void initialize() {
         }
 
         /**
-         * 读取测试值。
+         * Reads the test value.
+         *
+         * @param context context
+         * @param key business key
+         * @return the operation result
          */
         @Override
-        public Optional<VersionedValue> get(ReadContext context, String key) {
+        public Optional<VersionedValue> get(final ReadContext context, final String key) {
             return Optional.empty();
         }
 
         /**
-         * 扫描测试值。
+         * Scan test values.
+         *
+         * @param context context
+         * @param keyRange key range
+         * @return the operation result
          */
         @Override
-        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+        public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
             return List.of();
         }
 
         /**
-         * 写入测试 intent。
+         * Writing test inent.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
          */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
             prewriteCount++;
         }
 
         /**
-         * 准备测试事务。
+         * Prepare the test transaction.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
         }
 
         /**
-         * 提交测试 intent。
+         * Commit Test inent.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
          */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
             commitCount++;
         }
 
         /**
-         * 提交测试写集合。
+         * Commit Test write set.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
          */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
             commitCount++;
         }
 
         /**
-         * 直接提交测试写集合。
+         * Direct commit test write set.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @throws AssertionError if the operation cannot complete
          */
         @Override
-        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
             directCommitCount++;
             throw new AssertionError("counting adapter does not implement atomic direct commit");
         }
 
         /**
-         * 清理测试 intent。
+         * Clear test indent.
+         *
+         * @param txId transaction identifier
+         * @param mutations transaction write set
          */
         @Override
-        public void cleanupIntents(long txId, List<Mutation> mutations) {
+        public void cleanupIntents(final long txId, final List<Mutation> mutations) {
         }
 
         /**
-         * 回滚测试事务。
+         * Roll back the test transaction.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void abort(long txId) {
+        public void abort(final long txId) {
             abortCount++;
         }
 
         /**
-         * 查找待恢复事务编号。
+         * Find to recovery transaction identifier.
+         *
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public Set<Long> findPendingTransactionIds(int limit) {
+        public Set<Long> findPendingTransactionIds(final int limit) {
             return Set.of();
         }
 
         /**
-         * 清理测试历史版本。
+         * Clear test history version.
+         *
+         * @param safePoint oldest retained snapshot timestamp
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public int gc(long safePoint, int limit) {
+        public int gc(final long safePoint, final int limit) {
             return 0;
         }
     }

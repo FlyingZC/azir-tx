@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import java.io.BufferedOutputStream;
@@ -14,16 +30,30 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 回环二进制切面端点以单次写出长度与正文，避免 HTTP 头与正文分开发送。 */
+/**
+ * Backring binary cut-side points write the length and text in a single time to avoid HTTP headers being separated from the body.
+ */
 final class MysqlVectorCutTcpServer implements AutoCloseable {
+
     private final MysqlVectorCutLeaderRuntime runtime;
+
     private final ServerSocket listener;
+
     private final ExecutorService requests = Executors.newVirtualThreadPerTaskExecutor();
+
     private final AtomicBoolean running = new AtomicBoolean();
+
     private volatile Thread acceptor;
 
-    /** 只绑定本机回环地址，监听端口须与中心租约的 ownerId 相同。 */
-    MysqlVectorCutTcpServer(MysqlVectorCutLeaderRuntime runtime, int port) throws IOException {
+    /**
+     * Only binds the CDA back to the ring address, and the listening port must be the same as the central lease ownerId.
+     *
+     * @param runtime runtime
+     * @param port port
+     * @throws IOException if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    MysqlVectorCutTcpServer(final MysqlVectorCutLeaderRuntime runtime, final int port) throws IOException {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
         if (port < 0 || port > 65535) {
             throw new IllegalArgumentException("invalid vector cut TCP port");
@@ -33,12 +63,20 @@ final class MysqlVectorCutTcpServer implements AutoCloseable {
         listener.bind(new InetSocketAddress("127.0.0.1", port), 32);
     }
 
-    /** 取得系统分配的实际回环端口。 */
+    /**
+     * Get the actual loop port assigned by the system.
+     *
+     * @return the operation result
+     */
     int port() {
         return listener.getLocalPort();
     }
 
-    /** 只有发布运行时已取得有效租约，才开始接收远端切面请求。 */
+    /**
+     * Only when a valid lease has been made available at the time of release will remote requests start to be received.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     void start() {
         if (!runtime.isServing() || !running.compareAndSet(false, true)) {
             throw new IllegalStateException("vector cut TCP endpoint requires an active leader");
@@ -46,23 +84,25 @@ final class MysqlVectorCutTcpServer implements AutoCloseable {
         acceptor = Thread.ofVirtual().name("azir-vector-cut-tcp-accept").start(this::acceptLoop);
     }
 
-    /** 每次复用连接仍重新验证领导者资格，避免高频 RC 读耗尽临时端口。 */
+    /**
+     * Every time connection is reused, verify leaders are re-qualified to avoid HF RC reading out temporary ports.
+     */
     private void acceptLoop() {
         while (running.get()) {
             try {
                 Socket socket = listener.accept();
                 requests.submit(() -> serveOne(socket));
-            } catch (SocketException ex) {
+            } catch (final SocketException ex) {
                 if (running.get()) {
                     runtime.endpointUnavailable(ex);
                     running.set(false);
                 }
-            } catch (IOException ex) {
+            } catch (final IOException ex) {
                 if (running.get()) {
                     runtime.endpointUnavailable(ex);
                     running.set(false);
                 }
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 if (running.get()) {
                     runtime.endpointUnavailable(ex);
                     running.set(false);
@@ -71,18 +111,23 @@ final class MysqlVectorCutTcpServer implements AutoCloseable {
         }
     }
 
-    /** 每个请求码后都返回有符号长度与完整切面，失去租约则回错误并关闭连接。 */
-    private void serveOne(Socket socket) {
-        try (socket;
-             var input = new DataInputStream(socket.getInputStream());
-             var output = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()))) {
+    /**
+     * Each request code returns a symbol length and full side, while the loss of lease goes back to error and closes connection.
+     *
+     * @param socket socket
+     */
+    private void serveOne(final Socket socket) {
+        try (
+                socket;
+                var input = new DataInputStream(socket.getInputStream());
+                var output = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()))) {
             socket.setTcpNoDelay(true);
             socket.setSoTimeout(2_000);
             while (running.get()) {
                 int command;
                 try {
                     command = input.readUnsignedByte();
-                } catch (EOFException ex) {
+                } catch (final EOFException ex) {
                     break;
                 }
                 if (command != 1) {
@@ -95,18 +140,22 @@ final class MysqlVectorCutTcpServer implements AutoCloseable {
                     output.writeInt(body.length);
                     output.write(body);
                     output.flush();
-                } catch (RuntimeException ex) {
+                } catch (final RuntimeException ex) {
                     output.writeInt(-1);
                     output.flush();
                     break;
                 }
             }
-        } catch (IOException ignored) {
-            // 对端断开只影响本次只读请求，不改变领导者租约或发布状态。
+        } catch (final IOException ignored) {
+            // This read-only request is only affected by the end-to-end break, without changing the leader 's lease or release status.
         }
     }
 
-    /** 停止监听并回收请求线程，旧领导者仍由运行时租约栅栏拒绝。 */
+    /**
+     * Stop listening and requesting collection threads, while the old leader is still rejected by run-time lease fence.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Override
     public void close() throws Exception {
         runtime.close();

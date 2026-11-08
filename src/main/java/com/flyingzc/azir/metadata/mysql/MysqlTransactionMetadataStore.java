@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metadata.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -36,27 +52,45 @@ import static com.flyingzc.azir.metadata.TransactionMetadataValidation.validateP
 import static com.flyingzc.azir.metadata.TransactionMetadataValidation.validateParticipants;
 
 /**
- * 基于 MySQL 的事务元数据存储实现，负责事务状态表的读写。
+ * Persists the default coordinator's transaction decisions and publication metadata in MySQL.
  */
-public final class MysqlTransactionMetadataStore implements TransactionMetadataStore,
-        FastTransactionBegin, FastTransactionCommit {
+public final class MysqlTransactionMetadataStore
+        implements
+            TransactionMetadataStore,
+            FastTransactionBegin,
+            FastTransactionCommit {
+
     private final DataSource dataSource;
+
     private final int publicationLockTimeoutSeconds;
+
     private volatile boolean beginProcedureReady;
+
     private volatile boolean beginProcedureV2Ready;
+
     private volatile boolean commitProcedureReady;
+
     private volatile boolean commitProcedureV2Ready;
+
     private volatile boolean proceduresChecked;
 
     /**
-     * 构造 MysqlTransactionMetadataStore 实例。
+     * Construct a MysqlTransactionMetadataStore instance.
+     *
+     * @param dataSource database connection source
      */
-    public MysqlTransactionMetadataStore(DataSource dataSource) {
+    public MysqlTransactionMetadataStore(final DataSource dataSource) {
         this(dataSource, 10);
     }
 
-    /** 配置发布锁等待秒数；主备不丢失已确认控制面写是部署前提，本类不实现 HA。 */
-    public MysqlTransactionMetadataStore(DataSource dataSource, int publicationLockTimeoutSeconds) {
+    /**
+     * Configure the release lock waiting seconds; master not to lose confirmed control script is a prerequisite for deployment and this category does not meet HA.
+     *
+     * @param dataSource database connection source
+     * @param publicationLockTimeoutSeconds publication lock timeout seconds
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public MysqlTransactionMetadataStore(final DataSource dataSource, final int publicationLockTimeoutSeconds) {
         if (publicationLockTimeoutSeconds < 0) {
             throw new IllegalArgumentException("publicationLockTimeoutSeconds must be >= 0");
         }
@@ -64,19 +98,29 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         this.publicationLockTimeoutSeconds = publicationLockTimeoutSeconds;
     }
 
-    /** 新旧控制组件只在确认为同一数据源实例时才能共享事务权威。 */
-    public boolean usesDataSource(DataSource candidate) {
+    /**
+     * Transaction authority can only be shared if the old and new control component is identified as an example of the same data source.
+     *
+     * @param candidate candidate
+     * @return the operation result
+     */
+    public boolean usesDataSource(final DataSource candidate) {
         return dataSource == candidate;
     }
 
-    /** 旧事务管理器启动时确认控制库未进入账本或分段模式。 */
+    /**
+     * Confirms that the control library is not entered in book or segment mode when the old transaction manager starts.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     public void assertLegacyProtocolActive() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement tables = connection.prepareStatement("""
-                     select table_name from information_schema.tables
-                     where table_schema = database()
-                       and table_name in ('mvcc_protocol_epoch_v1', 'mvcc_legacy_lease_gate_v1')
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement tables = connection.prepareStatement("""
+                        select table_name from information_schema.tables
+                        where table_schema = database()
+                          and table_name in ('mvcc_protocol_epoch_v1', 'mvcc_legacy_lease_gate_v1')
+                        """)) {
             boolean epochExists = false;
             boolean gateExists = false;
             try (ResultSet rows = tables.executeQuery()) {
@@ -111,39 +155,55 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                             "legacy snapshot lease gate is not active", false, null);
                 }
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "inspect legacy publication mode failed", ex);
         }
     }
 
-    /** 按数据库域串行发布，嵌套调用共享持锁连接。 */
+    /**
+     * Press database -string to release, embezzled to share locked connection.
+     *
+     * @param <T> value type
+     * @param action action
+     * @return the operation result
+     */
     @Override
-    public <T> T withPublicationLock(Supplier<T> action) {
+    public <T> T withPublicationLock(final Supplier<T> action) {
         return MysqlConnectionContext.withPublicationLock(dataSource, publicationLockTimeoutSeconds, action);
     }
 
-    /** 用数据库毫秒墙钟统一不同协调节点的租约和恢复判断。 */
+    /**
+     * The lease and recovery determinations of the different coordination nodes are aligned with the database millisecond wall clock.
+     *
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
     @Override
     public long currentTimeMillis() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement(
-                     "select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)");
-             ResultSet result = statement.executeQuery()) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement(
+                        "select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)");
+                ResultSet result = statement.executeQuery()) {
             if (!result.next()) {
                 throw new SQLException("database clock returned no row");
             }
             return result.getLong(1);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "load database clock failed", ex);
         }
     }
 
-    /** 在远端单分片提交前持久化占位，GET_LOCK 丢失时仍阻止其他节点发新快照。 */
+    /**
+     * The durable storage position before the remote list shard commit still prevents new snapshot s from being sent to other nodes when GET_LOCK is lost.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     */
     @Override
-    public void markLocalCommitPending(long txId, long commitTs) {
+    public void markLocalCommitPending(final long txId, final long commitTs) {
         withPublicationLock(() -> {
-            TxRecord record = get(txId).orElseThrow(() ->
-                    new MvccException(ErrorCode.ILLEGAL_STATE, "transaction not found: " + txId, false, txId));
+            TxRecord record = get(txId).orElseThrow(() -> new MvccException(ErrorCode.ILLEGAL_STATE, "transaction not found: " + txId, false, txId));
             validateCommitTs(txId, record.startTs(), commitTs);
             if (record.participants().size() != 1 || record.status() == TxStatus.ABORTED
                     || record.status() == TxStatus.COMMITTED
@@ -157,57 +217,64 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         });
     }
 
-    /** 本地提交未知槽存在时拒绝发布，不标记可重试以免业务自动重新执行。 */
+    /**
+     * The release of an unknown local commit slot is refused when it exists, and the unmarkable retry does not allow business to be automatically restarted.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
     public void assertNoPendingPublications() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement(
-                     "select tx_id from mvcc_txn where status = 'PREPARING' and commit_ts is not null limit 1");
-             ResultSet result = statement.executeQuery()) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement(
+                        "select tx_id from mvcc_txn where status = 'PREPARING' and commit_ts is not null limit 1");
+                ResultSet result = statement.executeQuery()) {
             if (result.next()) {
                 throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         "local publication requires recovery", false, result.getLong(1));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "inspect pending publications failed", ex);
         }
     }
 
     /**
-     * 初始化所需的数据库表结构或运行环境。
+     * Initialize the required database tables or runtime environment.
      */
     public void initialize() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement("""
-                     create table if not exists mvcc_txn (
-                       tx_id bigint not null primary key,
-                       start_ts bigint not null,
-                       isolation_level varchar(32) not null,
-                       status varchar(32) not null,
-                       commit_ts bigint null,
-                       participants text not null,
-                       index mvcc_txn_status_commit (status, commit_ts, tx_id),
-                       index mvcc_txn_status_start (status, start_ts, tx_id)
-                     ) engine=InnoDB
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement("""
+                        create table if not exists mvcc_txn (
+                          tx_id bigint not null primary key,
+                          start_ts bigint not null,
+                          isolation_level varchar(32) not null,
+                          status varchar(32) not null,
+                          commit_ts bigint null,
+                          participants text not null,
+                          index mvcc_txn_status_commit (status, commit_ts, tx_id),
+                          index mvcc_txn_status_start (status, start_ts, tx_id)
+                        ) engine=InnoDB
+                        """)) {
             statement.execute();
-            try (PreparedStatement snapshots = connection.prepareStatement("""
-                    create table if not exists mvcc_snapshot_lease (
-                      tx_id bigint not null primary key,
-                      read_ts bigint not null,
-                      expires_at bigint not null,
-                      index mvcc_snapshot_expiry (expires_at, tx_id),
-                      index mvcc_snapshot_read (read_ts)
-                    ) engine=InnoDB
-                    """);
-                 PreparedStatement finalized = connection.prepareStatement("""
-                    create table if not exists mvcc_txn_finalized (
-                      tx_id bigint not null primary key,
-                      finalized_at bigint not null,
-                      index mvcc_finalized_time (finalized_at, tx_id),
-                      constraint mvcc_finalized_tx_fk foreign key (tx_id) references mvcc_txn(tx_id) on delete cascade
-                    ) engine=InnoDB
-                    """)) {
+            try (
+                    PreparedStatement snapshots = connection.prepareStatement("""
+                            create table if not exists mvcc_snapshot_lease (
+                              tx_id bigint not null primary key,
+                              read_ts bigint not null,
+                              expires_at bigint not null,
+                              index mvcc_snapshot_expiry (expires_at, tx_id),
+                              index mvcc_snapshot_read (read_ts)
+                            ) engine=InnoDB
+                            """);
+                    PreparedStatement finalized = connection.prepareStatement("""
+                            create table if not exists mvcc_txn_finalized (
+                              tx_id bigint not null primary key,
+                              finalized_at bigint not null,
+                              index mvcc_finalized_time (finalized_at, tx_id),
+                              constraint mvcc_finalized_tx_fk foreign key (tx_id) references mvcc_txn(tx_id) on delete cascade
+                            ) engine=InnoDB
+                            """)) {
                 snapshots.execute();
                 finalized.execute();
             }
@@ -221,24 +288,27 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
             commitProcedureReady = true;
             commitProcedureV2Ready = true;
             proceduresChecked = true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "initialize metadata schema failed", ex);
         }
     }
 
-    /** 重启后新建的控制面实例只探测一次已有例程，无需重复执行模式初始化。 */
+    /**
+     * The newly created control side example after restart only detects the existing routine once and does not need to repeat the initialization of the implementation mode.
+     */
     private synchronized void detectInstalledProcedures() {
         if (proceduresChecked) {
             return;
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement query = connection.prepareStatement("""
-                     select routine_name from information_schema.routines
-                     where routine_schema = database()
-                       and routine_name in ('mvcc_begin_v1', 'mvcc_begin_v2',
-                                            'mvcc_commit_v1', 'mvcc_commit_v2')
-                     """);
-             ResultSet result = query.executeQuery()) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement query = connection.prepareStatement("""
+                        select routine_name from information_schema.routines
+                        where routine_schema = database()
+                          and routine_name in ('mvcc_begin_v1', 'mvcc_begin_v2',
+                                               'mvcc_commit_v1', 'mvcc_commit_v2')
+                        """);
+                ResultSet result = query.executeQuery()) {
             while (result.next()) {
                 if ("mvcc_begin_v1".equalsIgnoreCase(result.getString(1))) {
                     beginProcedureReady = true;
@@ -251,13 +321,18 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 }
             }
             proceduresChecked = true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "inspect control procedures failed", ex);
         }
     }
 
-    /** 安装版本化的 MySQL 事务开始例程，独立实例并发初始化时接受已创建结果。 */
-    private void ensureBeginProcedure(Connection connection) throws SQLException {
+    /**
+     * Install MySQL transaction to start the routine, and accept the created result when a stand-alone instance concurrent is initiated.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureBeginProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_begin_v1' limit 1
@@ -302,15 +377,20 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 新版 begin 在服务器端获取同名发布锁，避免客户端逐条取锁与归属探测。 */
-    private void ensureBeginProcedureV2(Connection connection) throws SQLException {
+    /**
+     * A new version of begin takes the same name release lock at the end of the server to avoid the client's article-by-article locking and ownership detection.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureBeginProcedureV2(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_begin_v2' limit 1
@@ -374,15 +454,20 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 安装提交决议例程；编号变化时可并存旧版本供滚动升级。 */
-    private void ensureCommitProcedure(Connection connection) throws SQLException {
+    /**
+     * Install commit decision routines; old version can be added to the numbering changes for rolling upgrade.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureCommitProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_commit_v1' limit 1
@@ -443,15 +528,20 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 新版提交在服务器端完成命名锁、时间戳、决议与锁释放。 */
-    private void ensureCommitProcedureV2(Connection connection) throws SQLException {
+    /**
+     * A new version of commit completes the name lock, timestamp, decision and lock release at the server end.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureCommitProcedureV2(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_commit_v2' limit 1
@@ -533,17 +623,26 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 仅在 TSO 与元数据共用同一数据源且例程已初始化时使用服务器端原子开始。 */
+    /**
+     * Use server atomic only when TSO shares the same data source with metadata and the routine is initiated.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param isolationLevel global transaction isolation level
+     * @param timeoutMillis timeout millis
+     * @param persistMetadata persist metadata
+     * @param beforePublish before publish
+     * @return the operation result
+     */
     @Override
-    public Optional<BeginReservation> tryBegin(TimestampOracle timestampOracle, IsolationLevel isolationLevel,
-                                               long timeoutMillis, boolean persistMetadata, Runnable beforePublish) {
+    public Optional<BeginReservation> tryBegin(final TimestampOracle timestampOracle, final IsolationLevel isolationLevel,
+                                               final long timeoutMillis, final boolean persistMetadata, final Runnable beforePublish) {
         if (!(timestampOracle instanceof MysqlTimestampAuthority authority)
                 || !authority.usesDataSource(dataSource)) {
             return Optional.empty();
@@ -560,7 +659,7 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                             return callBeginProcedure(connection, isolationLevel, timeoutMillis,
                                     persistMetadata, true);
                         }));
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw storageError(null, "server-side publication connection failed", ex);
             }
         }
@@ -568,15 +667,26 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
             beforePublish.run();
             try (Connection connection = MysqlConnectionContext.connection(dataSource)) {
                 return callBeginProcedure(connection, isolationLevel, timeoutMillis, persistMetadata, false);
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw storageError(null, "server-side transaction begin failed", ex);
             }
         }));
     }
 
-    /** 在持锁连接上执行一次控制操作，只有租约和可选元数据提交后才返回事务编号。 */
-    private BeginReservation callBeginProcedure(Connection connection, IsolationLevel isolationLevel,
-                                                long timeoutMillis, boolean persistMetadata, boolean serverLock) {
+    /**
+     * Run a control operation on the locked connection, only lease and optional metadata commit return transaction identifier.
+     *
+     * @param connection connection
+     * @param isolationLevel global transaction isolation level
+     * @param timeoutMillis timeout millis
+     * @param persistMetadata persist metadata
+     * @param serverLock server lock
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private BeginReservation callBeginProcedure(final Connection connection, final IsolationLevel isolationLevel,
+                                                final long timeoutMillis, final boolean persistMetadata, final boolean serverLock) {
         String sql = serverLock ? "call mvcc_begin_v2(?, ?, ?, ?)" : "call mvcc_begin_v1(?, ?, ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, isolationLevel.name());
@@ -599,7 +709,7 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 long txId = result.getLong("tx_id");
                 return new BeginReservation(txId, txId, result.getLong("expires_at"), persistMetadata);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() == 30001) {
                 throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         "local publication requires recovery", false, null, ex);
@@ -616,10 +726,19 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
-    /** 同权威跨分片提交通过服务器端事务原子记录唯一决议。 */
+    /**
+     * Same authority cross-shard commit logs only decision via server-end transaction atomic.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param beforePublish before publish
+     * @param afterCommitted after committed
+     * @return the operation result
+     */
     @Override
-    public OptionalLong tryCommit(TimestampOracle timestampOracle, long txId, Set<String> participants,
-                                  Runnable beforePublish, LongConsumer afterCommitted) {
+    public OptionalLong tryCommit(final TimestampOracle timestampOracle, final long txId, final Set<String> participants,
+                                  final Runnable beforePublish, final LongConsumer afterCommitted) {
         if (!(timestampOracle instanceof MysqlTimestampAuthority authority)
                 || !authority.usesDataSource(dataSource)) {
             return OptionalLong.empty();
@@ -639,7 +758,7 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                             afterCommitted.accept(timestamp);
                             return timestamp;
                         }));
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw storageError(txId, "server-side commit connection failed", ex);
             }
         }
@@ -649,15 +768,25 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 long timestamp = callCommitProcedure(connection, txId, encodedParticipants, false);
                 afterCommitted.accept(timestamp);
                 return timestamp;
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw storageError(txId, "server-side commit connection failed", ex);
             }
         });
         return OptionalLong.of(commitTs);
     }
 
-    /** 读取存储过程返回的已提交时间戳，丢失响应时调用方必须查询持久决议。 */
-    private long callCommitProcedure(Connection connection, long txId, String participants, boolean serverLock) {
+    /**
+     * Read commit timestamp returned from storage. The caller must look for durable decision when the response is lost.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param serverLock server lock
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private long callCommitProcedure(final Connection connection, final long txId, final String participants, final boolean serverLock) {
         String sql = serverLock ? "call mvcc_commit_v2(?, ?, ?)" : "call mvcc_commit_v1(?, ?)";
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setLong(1, txId);
@@ -678,7 +807,7 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 }
                 return result.getLong("commit_ts");
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() == 30002 || ex.getErrorCode() == 30003 || ex.getErrorCode() == 30005) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE, "server-side commit rejected", false, txId, ex);
             }
@@ -694,16 +823,28 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
-    /** 为已有元数据表补充提交占位和事务下界索引。 */
-    private void ensureMetadataIndexes(Connection connection) throws SQLException {
+    /**
+     * Supplements the commit placeholder and transaction lower bound index to an existing metadata table.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureMetadataIndexes(final Connection connection) throws SQLException {
         ensureMetadataIndex(connection, "mvcc_txn_status_commit",
                 "create index mvcc_txn_status_commit on mvcc_txn(status, commit_ts, tx_id)");
         ensureMetadataIndex(connection, "mvcc_txn_status_start",
                 "create index mvcc_txn_status_start on mvcc_txn(status, start_ts, tx_id)");
     }
 
-    /** 按名称检查并创建固定定义的索引，允许独立节点并发初始化。 */
-    private void ensureMetadataIndex(Connection connection, String indexName, String createSql) throws SQLException {
+    /**
+     * Check by name and create a fixed defined index that allows the initialization of separate nodes concurrent.
+     *
+     * @param connection connection
+     * @param indexName index name
+     * @param createSql create sql
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureMetadataIndex(final Connection connection, final String indexName, final String createSql) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.statistics
                 where table_schema = database() and table_name = 'mvcc_txn'
@@ -718,7 +859,7 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
         try (PreparedStatement create = connection.prepareStatement(createSql)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1061) {
                 throw ex;
             }
@@ -726,35 +867,61 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
     }
 
     /**
-     * 创建组件实例或事务记录。
+     * Create the component or transaction record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
      */
     @Override
-    public TxRecord create(long txId, long startTs, IsolationLevel isolationLevel) {
+    public TxRecord create(final long txId, final long startTs, final IsolationLevel isolationLevel) {
         return withPublicationLock(() -> insertRecord(txId, startTs, isolationLevel, Set.of(), TxStatus.ACTIVE, null));
     }
 
-    /** 在首个持久化记录中原子保存完整参与者，省去同一事务的读锁与二次更新。 */
+    /**
+     * Atomic saves the full participant in the first durable storage record, saves the same transaction read lock and double update.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @return the operation result
+     */
     @Override
-    public TxRecord createWithParticipants(long txId, long startTs, IsolationLevel isolationLevel,
-                                           Set<String> participants) {
+    public TxRecord createWithParticipants(final long txId, final long startTs, final IsolationLevel isolationLevel,
+                                           final Set<String> participants) {
         validateParticipants(txId, participants);
         return insertRecord(txId, startTs, isolationLevel, participants, TxStatus.ACTIVE, null);
     }
 
     /**
-     * 创建 PREPARING 状态的事务元数据记录。
+     * Create a PREPARING transaction metadata record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @return the operation result
      */
     @Override
-    public TxRecord createPreparing(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants) {
+    public TxRecord createPreparing(final long txId, final long startTs, final IsolationLevel isolationLevel, final Set<String> participants) {
         validateParticipants(txId, participants);
         return withPublicationLock(() -> insertRecord(txId, startTs, isolationLevel, participants, TxStatus.PREPARING, null));
     }
 
     /**
-     * 创建 COMMITTED 状态的事务元数据记录。
+     * Create a COMMITTED transaction metadata record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     @Override
-    public TxRecord createCommitted(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants, long commitTs) {
+    public TxRecord createCommitted(final long txId, final long startTs, final IsolationLevel isolationLevel, final Set<String> participants, final long commitTs) {
         validateCommitTs(txId, startTs, commitTs);
         validateParticipants(txId, participants);
         return withPublicationLock(() -> {
@@ -772,20 +939,29 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
     }
 
     /**
-     * 插入一条事务元数据记录。
+     * Inserts an transaction metadata record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @param status status
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
-    private TxRecord insertRecord(long txId,
-                                  long startTs,
-                                  IsolationLevel isolationLevel,
-                                  Set<String> participants,
-                                  TxStatus status,
-                                  Long commitTs) {
+    private TxRecord insertRecord(final long txId,
+                                  final long startTs,
+                                  final IsolationLevel isolationLevel,
+                                  final Set<String> participants,
+                                  final TxStatus status,
+                                  final Long commitTs) {
         TxRecord record = new TxRecord(txId, startTs, isolationLevel, participants, status, commitTs);
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement("""
-                     insert into mvcc_txn(tx_id, start_ts, isolation_level, status, commit_ts, participants)
-                     values (?, ?, ?, ?, ?, ?)
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement("""
+                        insert into mvcc_txn(tx_id, start_ts, isolation_level, status, commit_ts, participants)
+                        values (?, ?, ?, ?, ?, ?)
+                        """)) {
             statement.setLong(1, txId);
             statement.setLong(2, startTs);
             statement.setString(3, isolationLevel.name());
@@ -798,22 +974,26 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
             statement.setString(6, encodeParticipants(txId, record.participants()));
             statement.executeUpdate();
             return record;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(txId, "create tx metadata failed", ex);
         }
     }
 
     /**
-     * 读取指定键或事务的当前可见数据。
+     * Read the currently visible data for the key or transaction.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
      */
     @Override
-    public Optional<TxRecord> get(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement("""
-                     select tx_id, start_ts, isolation_level, status, commit_ts, participants
-                     from mvcc_txn
-                     where tx_id = ?
-                     """)) {
+    public Optional<TxRecord> get(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement("""
+                        select tx_id, start_ts, isolation_level, status, commit_ts, participants
+                        from mvcc_txn
+                        where tx_id = ?
+                        """)) {
             statement.setLong(1, txId);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
@@ -821,119 +1001,166 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 }
                 return Optional.of(mapRecord(resultSet));
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(txId, "load tx metadata failed", ex);
         }
     }
 
     /**
-     * 将事务标记为 PREPARING 状态。
+     * Mark the transaction PREPARING.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @return the operation result
      */
     @Override
-    public TxRecord markPreparing(long txId, Set<String> participants) {
+    public TxRecord markPreparing(final long txId, final Set<String> participants) {
         validateParticipants(txId, participants);
         return withPublicationLock(() -> updateRecord(txId, participants, TxStatus.PREPARING, null, false));
     }
 
     /**
-     * 将事务标记为 COMMITTED 状态。
+     * Mark the transaction COMMITTED.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     @Override
-    public TxRecord markCommitted(long txId, long commitTs) {
+    public TxRecord markCommitted(final long txId, final long commitTs) {
         return withPublicationLock(() -> updateRecord(txId, null, TxStatus.COMMITTED, commitTs, true));
     }
 
     /**
-     * 将事务标记为 COMMITTED 状态。
+     * Mark the transaction COMMITTED.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     @Override
-    public TxRecord markCommitted(long txId, Set<String> participants, long commitTs) {
+    public TxRecord markCommitted(final long txId, final Set<String> participants, final long commitTs) {
         return withPublicationLock(() -> updateRecord(txId, participants, TxStatus.COMMITTED, commitTs, true));
     }
 
     /**
-     * 快速持久化 PREPARING 状态。
+     * Persist PREPARING through the fast path.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
      */
     @Override
-    public void persistPreparing(long txId, Set<String> participants) {
+    public void persistPreparing(final long txId, final Set<String> participants) {
         validateParticipants(txId, participants);
         fastUpdateStatus(txId, participants, TxStatus.PREPARING, null, false);
     }
 
     /**
-     * 快速持久化 COMMITTED 状态。
+     * Persist the COMMITTED state through the fast path.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
      */
     @Override
-    public void persistCommitted(long txId, long commitTs) {
+    public void persistCommitted(final long txId, final long commitTs) {
         fastUpdateStatus(txId, null, TxStatus.COMMITTED, commitTs, true);
     }
 
     /**
-     * 快速持久化 COMMITTED 状态。
+     * Persist the COMMITTED state through the fast path.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param commitTs durable commit timestamp
      */
     @Override
-    public void persistCommitted(long txId, Set<String> participants, long commitTs) {
+    public void persistCommitted(final long txId, final Set<String> participants, final long commitTs) {
         fastUpdateStatus(txId, participants, TxStatus.COMMITTED, commitTs, true);
     }
 
     /**
-     * 将单分片事务标记为已提交。
+     * Mark the single-shard transaction committed.
+     *
+     * @param txId transaction identifier
+     * @param participant participant
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     @Override
-    public TxRecord markSingleShardCommitted(long txId, String participant, long commitTs) {
+    public TxRecord markSingleShardCommitted(final long txId, final String participant, final long commitTs) {
         validateParticipant(txId, participant);
         return withPublicationLock(() -> updateRecord(txId, Set.of(participant), TxStatus.COMMITTED, commitTs, true));
     }
 
-    /** 本地参与者提交后的中心决议复用条件更新；重放和不匹配仍进入原状态机。 */
+    /**
+     * Centre decision after local participant commit is updated; replay and mismatches remain in the original state machine.
+     *
+     * @param txId transaction identifier
+     * @param participant participant
+     * @param commitTs durable commit timestamp
+     */
     @Override
-    public void persistSingleShardCommitted(long txId, String participant, long commitTs) {
+    public void persistSingleShardCommitted(final long txId, final String participant, final long commitTs) {
         validateParticipant(txId, participant);
         fastUpdateStatus(txId, Set.of(participant), TxStatus.COMMITTED, commitTs, true);
     }
 
     /**
-     * 将事务标记为 ABORTED 状态。
+     * Mark the transaction ABORTED.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
      */
     @Override
-    public TxRecord markAborted(long txId) {
+    public TxRecord markAborted(final long txId) {
         return withPublicationLock(() -> updateRecord(txId, null, TxStatus.ABORTED, null, false));
     }
 
     /**
-     * 查询快照和未完成物化事务的最小下界；已 finalized 的历史决议不阻挡 GC。
+     * Query snapshot and uncompleted materialization transaction minimum level; already Finalized history decision does not block GC.
+     *
+     * @return the operation result
      */
     @Override
     public Optional<Long> oldestActiveStartTs() {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement("""
-                     select min(start_ts) as oldest_start_ts
-                     from (
-                       select t.start_ts from mvcc_txn t
-                       left join mvcc_txn_finalized f on f.tx_id = t.tx_id
-                       where f.tx_id is null
-                       union all
-                       select read_ts as start_ts from mvcc_snapshot_lease
-                     ) active_snapshots
-                     """);
-             ResultSet resultSet = statement.executeQuery()) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement("""
+                        select min(start_ts) as oldest_start_ts
+                        from (
+                          select t.start_ts from mvcc_txn t
+                          left join mvcc_txn_finalized f on f.tx_id = t.tx_id
+                          where f.tx_id is null
+                          union all
+                          select read_ts as start_ts from mvcc_snapshot_lease
+                        ) active_snapshots
+                        """);
+                ResultSet resultSet = statement.executeQuery()) {
             if (!resultSet.next() || resultSet.getObject("oldest_start_ts") == null) {
                 return Optional.empty();
             }
             return Optional.of(resultSet.getLong("oldest_start_ts"));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "load oldest active start ts failed", ex);
         }
     }
 
     /**
-     * 在事务内锁定并更新事务元数据记录。
+     * Lock and update transaction metadata records in transaction.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param targetStatus target status
+     * @param commitTs durable commit timestamp
+     * @param setCommitTs set commit ts
+     * @return the operation result
      */
-    private TxRecord updateRecord(long txId,
-                                  Set<String> participants,
-                                  TxStatus targetStatus,
-                                  Long commitTs,
-                                  boolean setCommitTs) {
+    private TxRecord updateRecord(final long txId,
+                                  final Set<String> participants,
+                                  final TxStatus targetStatus,
+                                  final Long commitTs,
+                                  final boolean setCommitTs) {
         if (participants != null) {
             validateParticipants(txId, participants);
         }
@@ -952,7 +1179,7 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                             && (current.status() == TxStatus.ABORTED || !Objects.equals(current.commitTs(), commitTs))) {
                         throw new MvccException(ErrorCode.ILLEGAL_STATE, "commit decision mismatch: " + txId, false, txId);
                     }
-                    // 返回真实终态，禁止 COMMITTED 回退以及重复提交更换时间戳。
+                    // Returns real terminal state, prevents COMMITTED and repeat commit replacement timestamp.
                     return current;
                 }
 
@@ -988,52 +1215,65 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                         current.isolationLevel(),
                         nextParticipants,
                         targetStatus,
-                        targetStatus == TxStatus.ABORTED ? null : setCommitTs ? commitTs : current.commitTs()
-                );
+                        targetStatus == TxStatus.ABORTED ? null : setCommitTs ? commitTs : current.commitTs());
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(txId, "update tx metadata failed", ex);
         }
     }
 
     /**
-     * 保留快速入口兼容性，使用行锁实现与 CAS 等价的终态校验。
+     * Keeps quick access compatibility and uses line locks to achieve terminal state validate equivalent to CAS.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param targetStatus target status
+     * @param commitTs durable commit timestamp
+     * @param setCommitTs set commit ts
      */
-    private void fastUpdateStatus(long txId,
-                                  Set<String> participants,
-                                  TxStatus targetStatus,
-                                  Long commitTs,
-                                  boolean setCommitTs) {
+    private void fastUpdateStatus(final long txId,
+                                  final Set<String> participants,
+                                  final TxStatus targetStatus,
+                                  final Long commitTs,
+                                  final boolean setCommitTs) {
         withPublicationLock(() -> {
             if (targetStatus == TxStatus.COMMITTED && setCommitTs && commitTs != null
                     && tryPersistFreshCommit(txId, participants, commitTs)) {
                 return null;
             }
-            // 重放或状态不匹配时仍由原状态机判定真实终态，不能宽松覆盖。
+            // Replay or a non-matched state is still determined by the original status machine as true terminal state and cannot be easily covered.
             updateRecord(txId, participants, targetStatus, commitTs, setCommitTs);
             return null;
         });
     }
 
-    /** 对参与者和未决状态完全匹配的首次提交使用单条原子更新。 */
-    private boolean tryPersistFreshCommit(long txId, Set<String> participants, long commitTs) {
+    /**
+     * Use a single atomic update for the first commit full match of participant and pending states.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param commitTs durable commit timestamp
+     * @return the operation result
+     */
+    private boolean tryPersistFreshCommit(final long txId, final Set<String> participants, final long commitTs) {
         if (participants != null) {
             validateParticipants(txId, participants);
         }
         String sql = participants == null
                 ? """
-                  update mvcc_txn set status = 'COMMITTED', commit_ts = ?
-                  where tx_id = ? and status in ('ACTIVE', 'PREPARING')
-                    and (commit_ts is null or commit_ts = ?) and start_ts < ?
-                  """
+                        update mvcc_txn set status = 'COMMITTED', commit_ts = ?
+                        where tx_id = ? and status in ('ACTIVE', 'PREPARING')
+                          and (commit_ts is null or commit_ts = ?) and start_ts < ?
+                        """
                 : """
-                  update mvcc_txn set status = 'COMMITTED', commit_ts = ?
-                  where tx_id = ? and status in ('ACTIVE', 'PREPARING')
-                    and (commit_ts is null or commit_ts = ?) and start_ts < ?
-                    and binary participants = binary ?
-                  """;
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement(sql)) {
+                        update mvcc_txn set status = 'COMMITTED', commit_ts = ?
+                        where tx_id = ? and status in ('ACTIVE', 'PREPARING')
+                          and (commit_ts is null or commit_ts = ?) and start_ts < ?
+                          and binary participants = binary ?
+                        """;
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setLong(1, commitTs);
             statement.setLong(2, txId);
             statement.setLong(3, commitTs);
@@ -1042,15 +1282,21 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 statement.setString(5, encodeParticipants(txId, participants));
             }
             return statement.executeUpdate() == 1;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(txId, "persist committed decision failed", ex);
         }
     }
 
     /**
-     * 锁定并读取指定事务元数据记录。
+     * Lock and read the specified transaction metadata record.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
      */
-    private TxRecord lockRecord(Connection connection, long txId) throws SQLException {
+    private TxRecord lockRecord(final Connection connection, final long txId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select tx_id, start_ts, isolation_level, status, commit_ts, participants
                 from mvcc_txn
@@ -1068,9 +1314,13 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
     }
 
     /**
-     * 将结果集映射为事务元数据对象。
+     * Maps the results to transaction metadata objects.
+     *
+     * @param resultSet result set
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
      */
-    private static TxRecord mapRecord(ResultSet resultSet) throws SQLException {
+    private static TxRecord mapRecord(final ResultSet resultSet) throws SQLException {
         long txId = resultSet.getLong("tx_id");
         Long commitTs = resultSet.getObject("commit_ts") == null ? null : resultSet.getLong("commit_ts");
         return new TxRecord(
@@ -1079,22 +1329,30 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 IsolationLevel.valueOf(resultSet.getString("isolation_level")),
                 decodeParticipants(txId, resultSet.getString("participants")),
                 TxStatus.valueOf(resultSet.getString("status")),
-                commitTs
-        );
+                commitTs);
     }
 
     /**
-     * 将参与分片集合编码为存储字符串。
+     * Encoding participation shard as a storage string.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @return the operation result
      */
-    private static String encodeParticipants(long txId, Set<String> participants) {
+    private static String encodeParticipants(final long txId, final Set<String> participants) {
         validateParticipants(txId, participants);
         return participants.stream().sorted().collect(Collectors.joining(","));
     }
 
     /**
-     * 兼容旧 CSV 和空集合，拒绝空白片段，避免恢复路由被静默丢弃。
+     * Compatible with old CSV and empty collections, rejecting blank segments and avoiding the silent abandonment of recovery route.
+     *
+     * @param txId transaction identifier
+     * @param value value to write
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private static Set<String> decodeParticipants(long txId, String value) {
+    private static Set<String> decodeParticipants(final long txId, final String value) {
         if (value == null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "participant encoding must not be null", false, txId);
         }
@@ -1107,35 +1365,43 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         return participants;
     }
 
-    /** 登记固定截止租约，重复调用只允许降低受保护的快照下界。 */
+    /**
+     * A fixed registration deadline of lease, and repeated calls allow only the lower protected snapshot boundary to be lowered.
+     *
+     * @param txId transaction identifier
+     * @param readTs snapshot read timestamp
+     * @param expiresAtMillis expires at millis
+     */
     @Override
-    public void registerSnapshot(long txId, long readTs, long expiresAtMillis) {
+    public void registerSnapshot(final long txId, final long readTs, final long expiresAtMillis) {
         withPublicationLock(() -> {
-            try (Connection connection = MysqlConnectionContext.connection(dataSource);
-                 PreparedStatement statement = connection.prepareStatement("""
-                         insert into mvcc_snapshot_lease(tx_id, read_ts, expires_at) values (?, ?, ?)
-                         """)) {
+            try (
+                    Connection connection = MysqlConnectionContext.connection(dataSource);
+                    PreparedStatement statement = connection.prepareStatement("""
+                            insert into mvcc_snapshot_lease(tx_id, read_ts, expires_at) values (?, ?, ?)
+                            """)) {
                 statement.setLong(1, txId);
                 statement.setLong(2, readTs);
                 statement.setLong(3, expiresAtMillis);
                 statement.executeUpdate();
                 return null;
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 if (ex.getErrorCode() == 1062) {
-                    // 仅重复登记才读取旧租约；截止时间不可延长，快照下界只能降低。
+                    // Reads old lease only after repeating; the deadline cannot be extended and the lower bound of snapshot can only be lowered.
                     Optional<Long> previous = snapshotExpiry(txId);
                     if (previous.isPresent() && previous.get() == expiresAtMillis) {
-                        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-                             PreparedStatement update = connection.prepareStatement("""
-                                     update mvcc_snapshot_lease set read_ts = least(read_ts, ?)
-                                     where tx_id = ? and expires_at = ?
-                                     """)) {
+                        try (
+                                Connection connection = MysqlConnectionContext.connection(dataSource);
+                                PreparedStatement update = connection.prepareStatement("""
+                                        update mvcc_snapshot_lease set read_ts = least(read_ts, ?)
+                                        where tx_id = ? and expires_at = ?
+                                        """)) {
                             update.setLong(1, readTs);
                             update.setLong(2, txId);
                             update.setLong(3, expiresAtMillis);
                             update.executeUpdate();
                             return null;
-                        } catch (SQLException updateFailure) {
+                        } catch (final SQLException updateFailure) {
                             throw storageError(txId, "register snapshot failed", updateFailure);
                         }
                     }
@@ -1147,75 +1413,105 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         });
     }
 
-    /** 返回原始截止时间，过期记录也保留到有界清理时删除。 */
+    /**
+     * Returns the original cut-off, and expired records are also saved to be deleted when bounded is cleared.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
     @Override
-    public Optional<Long> snapshotExpiry(long txId) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement(
-                     "select expires_at from mvcc_snapshot_lease where tx_id = ?")) {
+    public Optional<Long> snapshotExpiry(final long txId) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement(
+                        "select expires_at from mvcc_snapshot_lease where tx_id = ?")) {
             statement.setLong(1, txId);
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? Optional.of(result.getLong(1)) : Optional.empty();
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(txId, "load snapshot expiry failed", ex);
         }
     }
 
-    /** 在同次数据库查询中核对固定截止时间与权威时钟，避免热路径两次借连接和往返。 */
+    /**
+     * Checks the fixed cut-off time with the authority clock in the same database query to avoid double borrowing of the connection and rounding on the heat path.
+     *
+     * @param txId transaction identifier
+     * @param expectedExpiresAtMillis expected expires at millis
+     * @return the operation result
+     */
     @Override
-    public boolean isSnapshotLeaseValid(long txId, long expectedExpiresAtMillis) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement("""
-                     select 1 from mvcc_snapshot_lease
-                     where tx_id = ? and expires_at = ?
-                       and expires_at > cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
-                     """)) {
+    public boolean isSnapshotLeaseValid(final long txId, final long expectedExpiresAtMillis) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement("""
+                        select 1 from mvcc_snapshot_lease
+                        where tx_id = ? and expires_at = ?
+                          and expires_at > cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
+                        """)) {
             statement.setLong(1, txId);
             statement.setLong(2, expectedExpiresAtMillis);
             try (ResultSet result = statement.executeQuery()) {
                 return result.next();
             }
-        } catch (SQLException ex) {
-            // 查询失败必须保留存储异常，不能把无法确认的租约误当作有效。
+        } catch (final SQLException ex) {
+            // The search failure must keep the storage anomaly and cannot be validated by an unconfirmable lease error.
             throw storageError(txId, "validate snapshot lease failed", ex);
         }
     }
 
-    /** 幂等释放独立于元数据存在的快照租约。 */
+    /**
+     * Release idempotently exists independently of metadata snapshot lease.
+     *
+     * @param txId transaction identifier
+     */
     @Override
-    public void releaseSnapshot(long txId) {
-        // 只删除已结束事务的保护；与安全点计算并发时至多使本轮 GC 保守滞后。
+    public void releaseSnapshot(final long txId) {
+        // Delete only the protection of closed transaction; and calculate concurrent with safe point to more in order to keep the current round GC behind.
         executeUpdate("delete from mvcc_snapshot_lease where tx_id = ?", txId);
     }
 
-    /** 在预写前合并参与者，维持 ACTIVE 或 PREPARING 状态且不覆盖终态。 */
+    /**
+     * Merge participant before prewrite, maintain ACTIVE or PREPARING and do not overwrite terminal state.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @return the operation result
+     */
     @Override
-    public TxRecord registerParticipants(long txId, Set<String> participants) {
+    public TxRecord registerParticipants(final long txId, final Set<String> participants) {
         validateParticipants(txId, participants);
-        // 只修改当前事务行；行锁与恢复并发时会合并最新参与者或返回真实终态。
-        TxRecord record = get(txId).orElseThrow(() ->
-                new MvccException(ErrorCode.ILLEGAL_STATE, "transaction not found: " + txId, false, txId));
+        // Only modify the current transaction row; the latest participant or real terminal state returns when the line locks are merged with recovery concurrent.
+        TxRecord record = get(txId).orElseThrow(() -> new MvccException(ErrorCode.ILLEGAL_STATE, "transaction not found: " + txId, false, txId));
         return updateRecord(txId, participants, record.status(), record.commitTs(), false);
     }
 
-    /** 有序批次发现未物化终态和无有效租约的未决事务。 */
+    /**
+     * Ordered batch found no materialization terminal state and no valid lease pending transaction.
+     *
+     * @param nowMillis now millis
+     * @param afterTxId after tx id
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public List<TxRecord> findRecoveryCandidates(long nowMillis, long afterTxId, int limit) {
+    public List<TxRecord> findRecoveryCandidates(final long nowMillis, final long afterTxId, final int limit) {
         if (limit <= 0) {
             return List.of();
         }
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement("""
-                     select t.tx_id, t.start_ts, t.isolation_level, t.status, t.commit_ts, t.participants
-                     from mvcc_txn t
-                     left join mvcc_snapshot_lease s on s.tx_id = t.tx_id
-                     left join mvcc_txn_finalized f on f.tx_id = t.tx_id
-                     where t.tx_id > ? and f.tx_id is null
-                       and (t.status in ('COMMITTED', 'ABORTED')
-                            or (t.status in ('ACTIVE', 'PREPARING') and (s.tx_id is null or s.expires_at <= ?)))
-                     order by t.tx_id limit ?
-                     """)) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement("""
+                        select t.tx_id, t.start_ts, t.isolation_level, t.status, t.commit_ts, t.participants
+                        from mvcc_txn t
+                        left join mvcc_snapshot_lease s on s.tx_id = t.tx_id
+                        left join mvcc_txn_finalized f on f.tx_id = t.tx_id
+                        where t.tx_id > ? and f.tx_id is null
+                          and (t.status in ('COMMITTED', 'ABORTED')
+                               or (t.status in ('ACTIVE', 'PREPARING') and (s.tx_id is null or s.expires_at <= ?)))
+                        order by t.tx_id limit ?
+                        """)) {
             statement.setLong(1, afterTxId);
             statement.setLong(2, nowMillis);
             statement.setInt(3, limit);
@@ -1226,15 +1522,20 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 }
                 return List.copyOf(records);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "find recovery candidates failed", ex);
         }
     }
 
-    /** 仅记录终态首次完成物化的时间；已被 GC 删除的记录无需复活。 */
+    /**
+     * Only the time when terminal state first completes materialization is recorded; records that have been removed from GC do not need to be revived.
+     *
+     * @param txId transaction identifier
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
-    public void markFinalized(long txId) {
-        // 物化已经完成时才写入；GC 与该语句并发只会看到旧保护或新终态。
+    public void markFinalized(final long txId) {
+        // Materialization is written only when it has been completed; GC and this statement concurrent can only see old or new terminal state.
         int inserted = executeUpdate("""
                 insert into mvcc_txn_finalized(tx_id, finalized_at)
                 select tx_id, cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
@@ -1250,23 +1551,31 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
         }
     }
 
-    /** 有界清理严格早于安全点和保留时间的已完成事务，外键同时移除物化标志。 */
+    /**
+     * Bounded clears completed transaction that is strictly earlier than safe point and during retention time, with the external key removing the materialization sign.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param finalizedBeforeMillis finalized before millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public int purgeFinalized(long safePoint, long finalizedBeforeMillis, int limit) {
+    public int purgeFinalized(final long safePoint, final long finalizedBeforeMillis, final int limit) {
         if (limit <= 0) {
             return 0;
         }
         return withPublicationLock(() -> {
             List<Long> ids = new ArrayList<>();
-            try (Connection connection = MysqlConnectionContext.connection(dataSource);
-                 PreparedStatement statement = connection.prepareStatement("""
-                         select t.tx_id from mvcc_txn t
-                         join mvcc_txn_finalized f on f.tx_id = t.tx_id
-                         left join mvcc_snapshot_lease s on s.tx_id = t.tx_id
-                         where s.tx_id is null and f.finalized_at < ? and t.start_ts < ?
-                           and (t.status = 'ABORTED' or (t.status = 'COMMITTED' and t.commit_ts < ?))
-                         order by t.tx_id limit ?
-                         """)) {
+            try (
+                    Connection connection = MysqlConnectionContext.connection(dataSource);
+                    PreparedStatement statement = connection.prepareStatement("""
+                            select t.tx_id from mvcc_txn t
+                            join mvcc_txn_finalized f on f.tx_id = t.tx_id
+                            left join mvcc_snapshot_lease s on s.tx_id = t.tx_id
+                            where s.tx_id is null and f.finalized_at < ? and t.start_ts < ?
+                              and (t.status = 'ABORTED' or (t.status = 'COMMITTED' and t.commit_ts < ?))
+                            order by t.tx_id limit ?
+                            """)) {
                 statement.setLong(1, finalizedBeforeMillis);
                 statement.setLong(2, safePoint);
                 statement.setLong(3, safePoint);
@@ -1281,15 +1590,21 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                     deleted += executeUpdate("delete from mvcc_txn where tx_id = ?", txId);
                 }
                 return deleted;
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw storageError(null, "purge finalized metadata failed", ex);
             }
         });
     }
 
-    /** 分批删除已到期租约，不改变未决事务，剩余租约继续保守阻挡安全点。 */
+    /**
+     * Batch removal of expired lease, do not change pending transaction, and the remaining lease continues to hold back on safe point.
+     *
+     * @param nowMillis now millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public int expireSnapshots(long nowMillis, int limit) {
+    public int expireSnapshots(final long nowMillis, final int limit) {
         if (limit <= 0) {
             return 0;
         }
@@ -1297,23 +1612,35 @@ public final class MysqlTransactionMetadataStore implements TransactionMetadataS
                 "delete from mvcc_snapshot_lease where expires_at <= ? order by expires_at, tx_id limit ?", nowMillis, limit));
     }
 
-    /** 在当前连接上下文中执行只含整型绑定参数的控制面更新。 */
-    private int executeUpdate(String sql, long... parameters) {
-        try (Connection connection = MysqlConnectionContext.connection(dataSource);
-             PreparedStatement statement = connection.prepareStatement(sql)) {
+    /**
+     * Implements a control face update in the current connection context that contains only integer binding parameters.
+     *
+     * @param sql sql
+     * @param parameters parameters
+     * @return the operation result
+     */
+    private int executeUpdate(final String sql, final long... parameters) {
+        try (
+                Connection connection = MysqlConnectionContext.connection(dataSource);
+                PreparedStatement statement = connection.prepareStatement(sql)) {
             for (int i = 0; i < parameters.length; i++) {
                 statement.setLong(i + 1, parameters[i]);
             }
             return statement.executeUpdate();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "control metadata update failed", ex);
         }
     }
 
     /**
-     * 将底层存储异常包装为 MVCC 异常。
+     * Map the storage failure to an MVCC exception.
+     *
+     * @param txId transaction identifier
+     * @param message message
+     * @param ex ex
+     * @return the operation result
      */
-    private MvccException storageError(Long txId, String message, SQLException ex) {
+    private MvccException storageError(final Long txId, final String message, final SQLException ex) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, txId, ex);
     }
 }

@@ -1,4 +1,24 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.api.Transaction;
 import com.flyingzc.azir.common.IsolationLevel;
@@ -19,16 +39,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 /**
- * 事务管理器参与者阶段并行执行测试。
+ * Transaction Manager participant performs the test in parallel.
  */
 class TransactionManagerParticipantParallelismTest {
+
     /**
-     * 验证开启并行预写时，两个参与分片也会并发执行。
+     * When verify opens the parallel prewrite, two participating shard will also execute concurrent.
      */
     @Test
     void twoParticipantPrewriteShouldRunConcurrentlyWhenParallelPrewriteEnabled() {
@@ -41,26 +58,24 @@ class TransactionManagerParticipantParallelismTest {
                 CrossShardCommitPolicy.asyncParallel(2),
                 true,
                 true,
-                false
-        );
+                false);
         TransactionManager manager = new TransactionManager(
                 new AtomicTimestampOracle(100L),
                 new InMemoryTransactionMetadataStore(),
                 options,
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
 
         Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
         manager.put(tx, "shard-1", "parallel:1", new byte[]{1});
         manager.put(tx, "shard-2", "parallel:2", new byte[]{2});
 
         assertDoesNotThrow(() -> manager.commit(tx));
-        assertEquals(1, shard1.prewriteCalls());
-        assertEquals(1, shard2.prewriteCalls());
+        Assertions.assertEquals(1, shard1.prewriteCalls());
+        Assertions.assertEquals(1, shard2.prewriteCalls());
     }
 
     /**
-     * 验证并行参与者抛出的 Error 不会被吞掉。
+     * Verify Parallel participant Throw Error will not be swallowed.
      */
     @Test
     void parallelParticipantErrorShouldPropagateToCaller() {
@@ -72,25 +87,23 @@ class TransactionManagerParticipantParallelismTest {
                 CrossShardCommitPolicy.asyncParallel(2),
                 true,
                 true,
-                false
-        );
+                false);
         TransactionManager manager = new TransactionManager(
                 new AtomicTimestampOracle(100L),
                 new InMemoryTransactionMetadataStore(),
                 options,
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
 
         Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
         manager.put(tx, "shard-1", "parallel:error:1", new byte[]{1});
         manager.put(tx, "shard-2", "parallel:error:2", new byte[]{2});
 
         AssertionError actual = assertThrows(AssertionError.class, () -> manager.commit(tx));
-        assertEquals("participant error", actual.getMessage());
+        Assertions.assertEquals("participant error", actual.getMessage());
     }
 
     /**
-     * 验证并行参与者抛出的 RuntimeException 不会被 CompletableFuture 包装后吞掉。
+     * Verify Parallel participant Throws RuntimeException will not be swallowed by Completable Future.
      */
     @Test
     void parallelParticipantRuntimeExceptionShouldPropagateToCaller() {
@@ -102,41 +115,47 @@ class TransactionManagerParticipantParallelismTest {
                 CrossShardCommitPolicy.asyncParallel(2),
                 true,
                 true,
-                false
-        );
+                false);
         TransactionManager manager = new TransactionManager(
                 new AtomicTimestampOracle(100L),
                 new InMemoryTransactionMetadataStore(),
                 options,
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
 
         Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
         manager.put(tx, "shard-1", "parallel:runtime:1", new byte[]{1});
         manager.put(tx, "shard-2", "parallel:runtime:2", new byte[]{2});
 
         IllegalStateException actual = assertThrows(IllegalStateException.class, () -> manager.commit(tx));
-        assertEquals("participant runtime failure", actual.getMessage());
+        Assertions.assertEquals("participant runtime failure", actual.getMessage());
     }
 
     /**
-     * 会在预写阶段等待另一个分片同时进入的存储适配器。
+     * Waits for another storage adapter to go into shard at the same time in phase prewrite.
      */
     private static final class BlockingPrewriteStorageAdapter implements StorageAdapter {
+
         private final String shardId;
+
         private final CountDownLatch enteredPrewrite;
+
         private final AtomicInteger prewriteCalls = new AtomicInteger();
 
         /**
-         * 构造阻塞预写适配器。
+         * Construct a block prewrite adapter.
+         *
+         * @param shardId logical shard identifier
+         * @param enteredPrewrite entered prewrite
          */
-        private BlockingPrewriteStorageAdapter(String shardId, CountDownLatch enteredPrewrite) {
+        private BlockingPrewriteStorageAdapter(final String shardId, final CountDownLatch enteredPrewrite) {
             this.shardId = shardId;
             this.enteredPrewrite = enteredPrewrite;
         }
 
         /**
-         * 模拟跨分片可见性能力，仅验证并行预写调度。
+         * Simulates cross-shard Visibility capability, verify parallel prewrite schedule only.
+         *
+         * @return the operation result
          */
         @Override
         public boolean supportsCommittedIntentResolution() {
@@ -144,7 +163,9 @@ class TransactionManagerParticipantParallelismTest {
         }
 
         /**
-         * 返回当前分片编号。
+         * Return the shard identifier.
+         *
+         * @return the operation result
          */
         @Override
         public String shardId() {
@@ -152,91 +173,125 @@ class TransactionManagerParticipantParallelismTest {
         }
 
         /**
-         * 初始化测试适配器。
+         * Initialization test adapter.
          */
         @Override
         public void initialize() {
         }
 
         /**
-         * 读取指定键。
+         * Reads the specified key.
+         *
+         * @param context context
+         * @param key business key
+         * @return the operation result
          */
         @Override
-        public Optional<VersionedValue> get(ReadContext context, String key) {
+        public Optional<VersionedValue> get(final ReadContext context, final String key) {
             return Optional.empty();
         }
 
         /**
-         * 扫描指定范围。
+         * Scans the specified range.
+         *
+         * @param context context
+         * @param keyRange key range
+         * @return the operation result
          */
         @Override
-        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+        public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
             return List.of();
         }
 
         /**
-         * 预写并等待另一个分片同时进入。
+         * Prewrite and wait for another shard to enter at the same time.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
+         * @throws AssertionError if the operation cannot complete
          */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
             prewriteCalls.incrementAndGet();
             enteredPrewrite.countDown();
             try {
                 if (!enteredPrewrite.await(300, TimeUnit.MILLISECONDS)) {
                     throw new AssertionError("prewrite did not run concurrently");
                 }
-            } catch (InterruptedException ex) {
+            } catch (final InterruptedException ex) {
                 Thread.currentThread().interrupt();
                 throw new AssertionError("interrupted while waiting for concurrent prewrite", ex);
             }
         }
 
         /**
-         * 准备测试事务。
+         * Prepare the test transaction.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
         }
 
         /**
-         * 提交测试事务。
+         * Commit Test transaction.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
          */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
         }
 
         /**
-         * 提交已知测试写集合。
+         * Commit Known Test write set.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
          */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
         }
 
         /**
-         * 回滚测试事务。
+         * Roll back the test transaction.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void abort(long txId) {
+        public void abort(final long txId) {
         }
 
         /**
-         * 查找待恢复事务编号。
+         * Find to recovery transaction identifier.
+         *
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public Set<Long> findPendingTransactionIds(int limit) {
+        public Set<Long> findPendingTransactionIds(final int limit) {
             return Set.of();
         }
 
         /**
-         * 清理历史版本。
+         * Clear history version.
+         *
+         * @param safePoint oldest retained snapshot timestamp
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public int gc(long safePoint, int limit) {
+        public int gc(final long safePoint, final int limit) {
             return 0;
         }
 
         /**
-         * 返回预写调用次数。
+         * Returns the number of calls for prewrite.
+         *
+         * @return the operation result
          */
         private int prewriteCalls() {
             return prewriteCalls.get();
@@ -244,20 +299,25 @@ class TransactionManagerParticipantParallelismTest {
     }
 
     /**
-     * 会在预写阶段抛出 Error 的存储适配器。
+     * The storage adaptor will be thrown out of Error during the prewrite stage.
      */
     private static final class ErrorPrewriteStorageAdapter implements StorageAdapter {
+
         private final String shardId;
 
         /**
-         * 构造错误预写适配器。
+         * Tectonic error prewrite adapter.
+         *
+         * @param shardId logical shard identifier
          */
-        private ErrorPrewriteStorageAdapter(String shardId) {
+        private ErrorPrewriteStorageAdapter(final String shardId) {
             this.shardId = shardId;
         }
 
         /**
-         * 模拟跨分片可见性能力，使预写错误进入原始异常传播路径。
+         * Simulates the cross-shard Visibility capability that allows an prewrite error to enter the original abnormal transmission path.
+         *
+         * @return the operation result
          */
         @Override
         public boolean supportsCommittedIntentResolution() {
@@ -265,7 +325,9 @@ class TransactionManagerParticipantParallelismTest {
         }
 
         /**
-         * 返回当前分片编号。
+         * Return the shard identifier.
+         *
+         * @return the operation result
          */
         @Override
         public String shardId() {
@@ -273,96 +335,133 @@ class TransactionManagerParticipantParallelismTest {
         }
 
         /**
-         * 初始化测试适配器。
+         * Initialization test adapter.
          */
         @Override
         public void initialize() {
         }
 
         /**
-         * 读取指定键。
+         * Reads the specified key.
+         *
+         * @param context context
+         * @param key business key
+         * @return the operation result
          */
         @Override
-        public Optional<VersionedValue> get(ReadContext context, String key) {
+        public Optional<VersionedValue> get(final ReadContext context, final String key) {
             return Optional.empty();
         }
 
         /**
-         * 扫描指定范围。
+         * Scans the specified range.
+         *
+         * @param context context
+         * @param keyRange key range
+         * @return the operation result
          */
         @Override
-        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+        public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
             return List.of();
         }
 
         /**
-         * 预写时抛出测试错误。
+         * Throws a test error at prewrite.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
+         * @throws AssertionError if the operation cannot complete
          */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
             throw new AssertionError("participant error");
         }
 
         /**
-         * 准备测试事务。
+         * Prepare the test transaction.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
         }
 
         /**
-         * 提交测试事务。
+         * Commit Test transaction.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
          */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
         }
 
         /**
-         * 提交已知测试写集合。
+         * Commit Known Test write set.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
          */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
         }
 
         /**
-         * 回滚测试事务。
+         * Roll back the test transaction.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void abort(long txId) {
+        public void abort(final long txId) {
         }
 
         /**
-         * 查找待恢复事务编号。
+         * Find to recovery transaction identifier.
+         *
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public Set<Long> findPendingTransactionIds(int limit) {
+        public Set<Long> findPendingTransactionIds(final int limit) {
             return Set.of();
         }
 
         /**
-         * 清理历史版本。
+         * Clear history version.
+         *
+         * @param safePoint oldest retained snapshot timestamp
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public int gc(long safePoint, int limit) {
+        public int gc(final long safePoint, final int limit) {
             return 0;
         }
     }
 
     /**
-     * 会在预写阶段抛出 RuntimeException 的存储适配器。
+     * The storage adaptor will be thrown out of RuntimeException at the prewrite stage.
      */
     private static final class RuntimeExceptionPrewriteStorageAdapter implements StorageAdapter {
+
         private final String shardId;
 
         /**
-         * 构造运行时异常预写适配器。
+         * Construct an abnormal prewrite adapter when running.
+         *
+         * @param shardId logical shard identifier
          */
-        private RuntimeExceptionPrewriteStorageAdapter(String shardId) {
+        private RuntimeExceptionPrewriteStorageAdapter(final String shardId) {
             this.shardId = shardId;
         }
 
         /**
-         * 模拟跨分片可见性能力，使预写异常进入原始异常传播路径。
+         * Simulates the cross-shard Visibility capabilities that allow prewrite anomalies to enter the original abnormal transmission path.
+         *
+         * @return the operation result
          */
         @Override
         public boolean supportsCommittedIntentResolution() {
@@ -370,7 +469,9 @@ class TransactionManagerParticipantParallelismTest {
         }
 
         /**
-         * 返回当前分片编号。
+         * Return the shard identifier.
+         *
+         * @return the operation result
          */
         @Override
         public String shardId() {
@@ -378,77 +479,109 @@ class TransactionManagerParticipantParallelismTest {
         }
 
         /**
-         * 初始化测试适配器。
+         * Initialization test adapter.
          */
         @Override
         public void initialize() {
         }
 
         /**
-         * 读取指定键。
+         * Reads the specified key.
+         *
+         * @param context context
+         * @param key business key
+         * @return the operation result
          */
         @Override
-        public Optional<VersionedValue> get(ReadContext context, String key) {
+        public Optional<VersionedValue> get(final ReadContext context, final String key) {
             return Optional.empty();
         }
 
         /**
-         * 扫描指定范围。
+         * Scans the specified range.
+         *
+         * @param context context
+         * @param keyRange key range
+         * @return the operation result
          */
         @Override
-        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+        public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
             return List.of();
         }
 
         /**
-         * 预写时抛出测试运行时异常。
+         * Drops the test running anomaly when prewrite is in.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
+         * @throws IllegalStateException if the operation cannot complete
          */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
             throw new IllegalStateException("participant runtime failure");
         }
 
         /**
-         * 准备测试事务。
+         * Prepare the test transaction.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
         }
 
         /**
-         * 提交测试事务。
+         * Commit Test transaction.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
          */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
         }
 
         /**
-         * 提交已知测试写集合。
+         * Commit Known Test write set.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
          */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
         }
 
         /**
-         * 回滚测试事务。
+         * Roll back the test transaction.
+         *
+         * @param txId transaction identifier
          */
         @Override
-        public void abort(long txId) {
+        public void abort(final long txId) {
         }
 
         /**
-         * 查找待恢复事务编号。
+         * Find to recovery transaction identifier.
+         *
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public Set<Long> findPendingTransactionIds(int limit) {
+        public Set<Long> findPendingTransactionIds(final int limit) {
             return Set.of();
         }
 
         /**
-         * 清理历史版本。
+         * Clear history version.
+         *
+         * @param safePoint oldest retained snapshot timestamp
+         * @param limit maximum number of items
+         * @return the operation result
          */
         @Override
-        public int gc(long safePoint, int limit) {
+        public int gc(final long safePoint, final int limit) {
             return 0;
         }
     }

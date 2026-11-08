@@ -1,0 +1,13 @@
+Azir TX
+Copyright 2026 Azir TX contributors.
+
+This product includes code style configuration derived from Apache ShardingSphere
+5.5.3 (commit 8d35894433416ef249ebb6ea21f8a8749648e9b6).
+Apache ShardingSphere is developed at The Apache Software Foundation
+(https://www.apache.org/). Its original copyright and license headers are retained.
+The Eclipse formatter's source compatibility is adapted to Java 21, and the
+Checkstyle configuration uses this project's license header and explicit
+migration exceptions.
+
+This product includes Apache Maven Wrapper scripts, licensed by The Apache
+Software Foundation under the Apache License, Version 2.0.

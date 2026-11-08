@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -24,30 +40,54 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 已激活分段协议的显式事务入口及独立后台 owner、恢复、发布和 GC 生命周期。 */
+/**
+ * Visible transaction entry and independent background owner, recovery, release and GC life cycle of the sub-agreement activated.
+ */
 public final class MysqlSegmentTransactionRuntime implements AutoCloseable {
+
     private final TransactionManager transactionManager;
+
     private final SegmentPublicationMaintenanceScheduler scheduler;
+
     private final PublicationSegmentOwnerRegistry owner;
+
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    /** 保存已启动的前台管理器和后台任务。 */
-    private MysqlSegmentTransactionRuntime(TransactionManager transactionManager,
-                                           SegmentPublicationMaintenanceScheduler scheduler,
-                                           PublicationSegmentOwnerRegistry owner) {
+    /**
+     * Saves a start-up foreground manager and an background job.
+     *
+     * @param transactionManager transaction manager
+     * @param scheduler scheduler
+     * @param owner owner
+     */
+    private MysqlSegmentTransactionRuntime(final TransactionManager transactionManager,
+                                           final SegmentPublicationMaintenanceScheduler scheduler,
+                                           final PublicationSegmentOwnerRegistry owner) {
         this.transactionManager = transactionManager;
         this.scheduler = scheduler;
         this.owner = owner;
     }
 
-    /** 仅在持久分段模式已切换且前后台连接池独立同权威时启动。 */
-    public static MysqlSegmentTransactionRuntime open(DataSource foregroundControl,
-                                                      DataSource backgroundControl,
-                                                      Map<String, DataSource> foregroundShards,
-                                                      Map<String, DataSource> backgroundShards,
-                                                      TransactionOptions transactionOptions,
-                                                      SegmentRuntimeOptions runtimeOptions,
-                                                      TransactionMetrics metrics) {
+    /**
+     * Starts only when the durable segment mode has been switched and before background connection pool is independent with authority.
+     *
+     * @param foregroundControl foreground control
+     * @param backgroundControl background control
+     * @param foregroundShards foreground shards
+     * @param backgroundShards background shards
+     * @param transactionOptions transaction options
+     * @param runtimeOptions runtime options
+     * @param metrics metrics
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static MysqlSegmentTransactionRuntime open(final DataSource foregroundControl,
+                                                      final DataSource backgroundControl,
+                                                      final Map<String, DataSource> foregroundShards,
+                                                      final Map<String, DataSource> backgroundShards,
+                                                      final TransactionOptions transactionOptions,
+                                                      final SegmentRuntimeOptions runtimeOptions,
+                                                      final TransactionMetrics metrics) {
         Objects.requireNonNull(foregroundControl, "foregroundControl");
         Objects.requireNonNull(backgroundControl, "backgroundControl");
         Objects.requireNonNull(transactionOptions, "transactionOptions");
@@ -116,25 +156,25 @@ public final class MysqlSegmentTransactionRuntime implements AutoCloseable {
                     runtimeOptions.fastMaterialization());
             scheduler.start();
             return new MysqlSegmentTransactionRuntime(manager, scheduler, owner);
-        } catch (RuntimeException | Error ex) {
+        } catch (final RuntimeException | Error ex) {
             if (manager != null) {
                 try {
                     manager.close();
-                } catch (RuntimeException closeFailure) {
+                } catch (final RuntimeException closeFailure) {
                     ex.addSuppressed(closeFailure);
                 }
             } else {
                 if (batcher != null) {
                     try {
                         batcher.close(transactionOptions.limits().shutdownTimeoutMillis());
-                    } catch (RuntimeException closeFailure) {
+                    } catch (final RuntimeException closeFailure) {
                         ex.addSuppressed(closeFailure);
                     }
                 }
                 if (owner != null) {
                     try {
                         owner.close();
-                    } catch (RuntimeException closeFailure) {
+                    } catch (final RuntimeException closeFailure) {
                         ex.addSuppressed(closeFailure);
                     }
                 }
@@ -142,7 +182,7 @@ public final class MysqlSegmentTransactionRuntime implements AutoCloseable {
             if (scheduler != null) {
                 try {
                     scheduler.close();
-                } catch (RuntimeException closeFailure) {
+                } catch (final RuntimeException closeFailure) {
                     ex.addSuppressed(closeFailure);
                 }
             }
@@ -150,27 +190,45 @@ public final class MysqlSegmentTransactionRuntime implements AutoCloseable {
         }
     }
 
-    /** 返回显式分段模式的 RC/RR 事务管理器。 */
+    /**
+     * Returns the RC/RR transaction manager of the visible segment mode.
+     *
+     * @return the operation result
+     */
     public TransactionManager transactionManager() {
         return transactionManager;
     }
 
-    /** 返回后台恢复、发布与 GC 的运行统计。 */
+    /**
+     * Returns background recovery, publishes running statistics with GC.
+     *
+     * @return the operation result
+     */
     public SegmentPublicationMaintenanceScheduler maintenanceScheduler() {
         return scheduler;
     }
 
-    /** 返回分段 owner 续租与主动封存轮次的统计。 */
+    /**
+     * Returns the count of the duration of the own lease and the number of times the wheel is actively sealed.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats ownerRefreshStats() {
         return owner.refreshStats();
     }
 
-    /** 返回最近一次 owner 续租故障。 */
+    /**
+     * Returns the most recent leaser renewal failure.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastOwnerRefreshFailure() {
         return owner.lastRefreshFailure();
     }
 
-    /** 先停止前台事务与分段 owner，再停止发布和恢复；数据源由调用方关闭。 */
+    /**
+     * Stop foreground transaction and split owner first, then release and recovery; data sources are closed from the caller.
+     */
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
@@ -186,24 +244,38 @@ public final class MysqlSegmentTransactionRuntime implements AutoCloseable {
         }
     }
 
-    /** 校验两套连接池实际落在相同 MySQL 服务器 UUID 和数据库。 */
-    private static void requireSameAuthority(DataSource foreground, DataSource background, String route) {
+    /**
+     * Two validate sets of connection pool actually landed on the same MySQL server UUID and database.
+     *
+     * @param foreground foreground
+     * @param background background
+     * @param route route
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static void requireSameAuthority(final DataSource foreground, final DataSource background, final String route) {
         if (!authority(foreground).equals(authority(background))) {
             throw new IllegalArgumentException("segmented background authority differs from foreground: " + route);
         }
     }
 
-    /** 查询连接实际数据库身份而不相信仅由 JDBC URL 提供的路由名。 */
-    private static String authority(DataSource dataSource) {
-        try (Connection connection = dataSource.getConnection();
-             Statement query = connection.createStatement();
-             ResultSet row = query.executeQuery("select @@server_uuid, database()")) {
+    /**
+     * Look for connection actual database identity and do not believe only the route names provided by JDBC URL.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private static String authority(final DataSource dataSource) {
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement query = connection.createStatement();
+                ResultSet row = query.executeQuery("select @@server_uuid, database()")) {
             if (!row.next() || row.getString(1) == null || row.getString(2) == null) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "segmented runtime requires a selected MySQL database", false, null);
             }
             return row.getString(1) + "\u0000" + row.getString(2);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                     "inspect segmented runtime database authority failed", false, null, ex);
         }

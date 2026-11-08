@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.BackgroundTaskStats;
@@ -19,85 +35,88 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.LongSupplier;
 
-/** 为一个目标分片分配本地先提交槽，并周期维护中心与分片双侧 owner 租约。 */
+/**
+ * Assign local to a target local first commit slot and cycle maintenance center and shard side owner lease.
+ */
 final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
+
     private final MysqlLocalFirstPublicationLedger control;
+
     private final MysqlShardSegmentFence physical;
+
     private final MysqlLocalFirstPublicationLedger backgroundControl;
+
     private final MysqlShardSegmentFence backgroundPhysical;
+
     private final LongSupplier snapshotFloor;
+
     private final String ownerId = UUID.randomUUID().toString();
+
     private final int segmentSize;
+
     private final long leaseMillis;
+
     private final long idleSealNanos;
+
     private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
+
     private final ConcurrentHashMap<Long, SegmentState> segments = new ConcurrentHashMap<>();
+
     private final ScheduledExecutorService refresher;
+
     private final BackgroundTaskStats refreshStats = new BackgroundTaskStats();
+
     private final AtomicReference<RuntimeException> lastFailure = new AtomicReference<>();
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private final AtomicLong reservationSequence = new AtomicLong();
+
     private volatile SegmentState current;
+
     private String pendingRequestKey;
+
     private long pendingSnapshotFloor;
 
-    /** 持久段、无锁段内序号与尚未完成中心终态的事务数。 */
-    private static final class SegmentState {
-        private volatile SegmentReservation reservation;
-        private final AtomicLong nextTs;
-        private final AtomicInteger unresolved = new AtomicInteger();
-        private volatile long lastAssignedNanos = System.nanoTime();
-        private volatile boolean retiring;
-        private volatile boolean unsafe;
-
-        /** 从该段第一个持久占位槽开始本地取号。 */
-        private SegmentState(SegmentReservation reservation) {
-            this.reservation = reservation;
-            this.nextTs = new AtomicLong(reservation.lease().firstTs());
-        }
-    }
-
-    /** 前台保留领取时的 owner 凭据，续租只改变截止时间而不改变代数。 */
-    static final class Assignment {
-        private final SegmentState state;
-        private final SegmentReservation reservation;
-        private final long commitTs;
-        private final AtomicBoolean resolved = new AtomicBoolean();
-
-        /** 保存唯一段内槽和当前持久 owner 身份。 */
-        private Assignment(SegmentState state, SegmentReservation reservation, long commitTs) {
-            this.state = state;
-            this.reservation = reservation;
-            this.commitTs = commitTs;
-        }
-
-        /** 返回中心批量完成及分片物理提交共用的原段身份。 */
-        SegmentReservation reservation() {
-            return reservation;
-        }
-
-        /** 返回本事务唯一提交时间戳。 */
-        long commitTs() {
-            return commitTs;
-        }
-    }
-
-    /** 绑定单个目标分片和有界租约预算，后台只使用显式提供的数据库权威。 */
-    LocalFirstSegmentOwnerRegistry(MysqlLocalFirstPublicationLedger control,
-                                   MysqlShardSegmentFence physical, LongSupplier snapshotFloor,
-                                   int segmentSize, long leaseMillis,
-                                   long refreshMillis, long idleSealMillis) {
+    /**
+     * Bind single target shard and bounded lease budget, background only with visible database authority.
+     *
+     * @param control control
+     * @param physical physical
+     * @param snapshotFloor snapshot floor
+     * @param segmentSize segment size
+     * @param leaseMillis lease millis
+     * @param refreshMillis refresh millis
+     * @param idleSealMillis idle seal millis
+     */
+    LocalFirstSegmentOwnerRegistry(final MysqlLocalFirstPublicationLedger control,
+                                   final MysqlShardSegmentFence physical, final LongSupplier snapshotFloor,
+                                   final int segmentSize, final long leaseMillis,
+                                   final long refreshMillis, final long idleSealMillis) {
         this(control, control, physical, physical, snapshotFloor,
                 segmentSize, leaseMillis, refreshMillis, idleSealMillis);
     }
 
-    /** 前后台可使用独立连接池，路由身份必须一致且由调用方验证同一物理权威。 */
-    LocalFirstSegmentOwnerRegistry(MysqlLocalFirstPublicationLedger control,
-                                   MysqlLocalFirstPublicationLedger backgroundControl,
-                                   MysqlShardSegmentFence physical,
-                                   MysqlShardSegmentFence backgroundPhysical,
-                                   LongSupplier snapshotFloor, int segmentSize, long leaseMillis,
-                                   long refreshMillis, long idleSealMillis) {
+    /**
+     * Former background may use a stand-alone connection pool. Route identity must be consistent and verify called by the same physical authority.
+     *
+     * @param control control
+     * @param backgroundControl background control
+     * @param physical physical
+     * @param backgroundPhysical background physical
+     * @param snapshotFloor snapshot floor
+     * @param segmentSize segment size
+     * @param leaseMillis lease millis
+     * @param refreshMillis refresh millis
+     * @param idleSealMillis idle seal millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    LocalFirstSegmentOwnerRegistry(final MysqlLocalFirstPublicationLedger control,
+                                   final MysqlLocalFirstPublicationLedger backgroundControl,
+                                   final MysqlShardSegmentFence physical,
+                                   final MysqlShardSegmentFence backgroundPhysical,
+                                   final LongSupplier snapshotFloor, final int segmentSize, final long leaseMillis,
+                                   final long refreshMillis, final long idleSealMillis) {
         if (segmentSize < 1 || segmentSize > 4096 || leaseMillis < 3
                 || leaseMillis > 86_400_000L || refreshMillis < 1
                 || refreshMillis >= leaseMillis / 2 || idleSealMillis < 1) {
@@ -114,14 +133,19 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         this.segmentSize = segmentSize;
         this.leaseMillis = leaseMillis;
         this.idleSealNanos = TimeUnit.MILLISECONDS.toNanos(idleSealMillis);
-        this.refresher = Executors.newSingleThreadScheduledExecutor(task ->
-                Thread.ofPlatform().daemon().name("mvcc-local-first-owner-refresh").unstarted(task));
+        this.refresher = Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform().daemon().name("mvcc-local-first-owner-refresh").unstarted(task));
         refresher.scheduleWithFixedDelay(this::refreshSafely, refreshMillis,
                 refreshMillis, TimeUnit.MILLISECONDS);
     }
 
-    /** 正常路径只做本地 CAS；旧快照低于段下界时退役当前段并另行预留。 */
-    Assignment allocate(long startTs) {
+    /**
+     * The normal path is only local CAS; the current segment is retired and set aside when the old snapshot is below the lower bounds.
+     *
+     * @param startTs transaction start timestamp
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    Assignment allocate(final long startTs) {
         if (startTs < 0) {
             throw new IllegalArgumentException("invalid local-first start timestamp");
         }
@@ -154,13 +178,21 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 前台确认自己的中心终态后解除本地未决计数，允许后续安全封尾。 */
-    void complete(Assignment assignment) {
+    /**
+     * Foreground Undo the local pending count after confirming its centre terminal state and allow subsequent safe closure.
+     *
+     * @param assignment assignment
+     */
+    void complete(final Assignment assignment) {
         resolve(assignment, false);
     }
 
-    /** 分片候选已持久且整段领取完成时主动物理封段，再批量补中心终态。 */
-    void completePhysicalAndSeal(Assignment assignment) {
+    /**
+     * Shard candidate durable complete to collect active physics segment upon completion, and batch supplement centre terminal state.
+     *
+     * @param assignment assignment
+     */
+    void completePhysicalAndSeal(final Assignment assignment) {
         resolve(assignment, false);
         SegmentState state = assignment.state;
         if (!state.unsafe && state.unresolved.get() == 0
@@ -169,25 +201,30 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 本地或中心结果未知时停止该段续租与新分配，交由失联恢复。 */
-    void unknown(Assignment assignment) {
+    /**
+     * Local or Centre unknown outcome ceases the renewal of this paragraph and the new allocation and is handed over to the lost recovery.
+     *
+     * @param assignment assignment
+     */
+    void unknown(final Assignment assignment) {
         resolve(assignment, true);
     }
 
-    /** 显式轮次可用于测试双侧续租，也由后台定时线程调用。 */
+    /**
+     * Visible rotations can be used to test the double-side renewal lease, which is also called by the background time line.
+     */
     void refreshOnce() {
         for (SegmentState state : segments.values()) {
             if (state.unsafe) {
                 if (backgroundControl.segment(state.reservation.lease().firstTs())
-                        .filter(segment -> segment.status()
-                                == MysqlLocalFirstPublicationLedger.SegmentStatus.SEALED).isPresent()) {
+                        .filter(segment -> segment.status() == MysqlLocalFirstPublicationLedger.SegmentStatus.SEALED).isPresent()) {
                     segments.remove(state.reservation.lease().firstTs(), state);
                 }
                 continue;
             }
             boolean seal = state.unresolved.get() == 0
                     && (state.retiring || state.nextTs.get() > state.reservation.lease().lastTs()
-                    || System.nanoTime() - state.lastAssignedNanos >= idleSealNanos);
+                            || System.nanoTime() - state.lastAssignedNanos >= idleSealNanos);
             if (seal) {
                 sealKnown(state);
                 continue;
@@ -200,7 +237,7 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
                 backgroundPhysical.renew(state.reservation.lease(), leaseMillis);
                 state.reservation = backgroundControl.renewSegment(state.reservation);
                 refreshStats.recordSuccess(1);
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 state.unsafe = true;
                 lastFailure.set(ex);
                 refreshStats.recordFailure();
@@ -210,23 +247,41 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 返回本轮物理与中心续租结果，异常不会静默变成有效租约。 */
+    /**
+     * Returnes the current round of PHRC renewals, which will not change silently to a valid lease.
+     *
+     * @return the operation result
+     */
     BackgroundTaskStats refreshStats() {
         return refreshStats;
     }
 
-    /** 返回最近一次双侧续租或封段失败原因。 */
+    /**
+     * Returns the reason for the failure of the last two-sided renewal or block.
+     *
+     * @return the operation result
+     */
     RuntimeException lastFailure() {
         return lastFailure.get();
     }
 
-    /** 返回本协调器曾持久发起的分段预留次数。 */
+    /**
+     * Returns the number of times this coordinator has been set aside in a batch initiated by durable.
+     *
+     * @return the operation result
+     */
     long reservationCount() {
         return reservationSequence.get();
     }
 
-    /** CAS 失败仅重试当前段，不能误判为整段耗尽并制造 PENDING 缺口。 */
-    private Assignment tryAllocate(SegmentState state, long startTs) {
+    /**
+     * CAS failed with only the current retry segment, which cannot be miscalculated as depleting the entire section and creating a PENDING gap.
+     *
+     * @param state state
+     * @param startTs transaction start timestamp
+     * @return the operation result
+     */
+    private Assignment tryAllocate(final SegmentState state, final long startTs) {
         if (state == null || state.unsafe || state.retiring
                 || startTs < state.reservation.snapshotFloor()) {
             return null;
@@ -244,8 +299,12 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 同一请求键在预留、分片安装或中心激活响应丢失后仍只重放原段。 */
-    private void reserveNextSegment(long startTs) {
+    /**
+     * The same requested key is only the original replay section after it has been set, installed or activated.
+     *
+     * @param startTs transaction start timestamp
+     */
+    private void reserveNextSegment(final long startTs) {
         if (pendingRequestKey == null) {
             pendingRequestKey = ownerId + ":" + reservationSequence.incrementAndGet();
             pendingSnapshotFloor = Math.min(startTs, snapshotFloor.getAsLong());
@@ -259,7 +318,7 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
             segments.put(active.lease().firstTs(), state);
             current = state;
             pendingRequestKey = null;
-        } catch (MvccException ex) {
+        } catch (final MvccException ex) {
             if (ex.errorCode() == ErrorCode.TRANSACTION_ABORTED) {
                 pendingRequestKey = null;
             }
@@ -267,8 +326,13 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 每个分配只释放一次；未知结果保持 unsafe，不能靠本地计数封存。 */
-    private void resolve(Assignment assignment, boolean unknown) {
+    /**
+     * Each distribution is released only once; the unknown result remains unsafe and cannot be stored in local count.
+     *
+     * @param assignment assignment
+     * @param unknown unknown
+     */
+    private void resolve(final Assignment assignment, final boolean unknown) {
         Objects.requireNonNull(assignment, "assignment");
         if (assignment.resolved.compareAndSet(false, true)) {
             if (unknown) {
@@ -278,8 +342,12 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 先禁止本地分配，再按控制 FENCING、分片 fence、候选补齐与封尾顺序完成。 */
-    private void sealKnown(SegmentState state) {
+    /**
+     * The local distribution is first banned and then completed in the order of control FENCING, shard fence, candidate alignment and closure.
+     *
+     * @param state state
+     */
+    private void sealKnown(final SegmentState state) {
         lock.writeLock().lock();
         try {
             if (state.unsafe || state.unresolved.get() != 0
@@ -303,24 +371,28 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
             backgroundControl.advancePublishedFast(4096);
             segments.remove(latest.lease().firstTs(), state);
             refreshStats.recordSuccess(1);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             state.unsafe = true;
             lastFailure.set(ex);
             refreshStats.recordFailure();
         }
     }
 
-    /** 续租失败只留下持久过期段供独立恢复轮次处理。 */
+    /**
+     * The lease renewal failed to leave only durable expired slots for independent recovery rounds.
+     */
     private void refreshSafely() {
         try {
             refreshOnce();
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             lastFailure.set(ex);
             refreshStats.recordFailure();
         }
     }
 
-    /** 不再接受新分配；零未决段按相同 fencing 顺序主动封存。 */
+    /**
+     * No new allocations will be accepted; zero pending is actively sealed in the same fencing order.
+     */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -329,7 +401,7 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         refresher.shutdownNow();
         try {
             refresher.awaitTermination(5, TimeUnit.SECONDS);
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
         }
         for (SegmentState state : segments.values()) {
@@ -339,11 +411,88 @@ final class LocalFirstSegmentOwnerRegistry implements AutoCloseable {
         }
     }
 
-    /** 已关闭或丢失 owner 时禁止用旧段继续接受事务。 */
+    /**
+     * Disables continued acceptance of transaction with old paragraph when closed or lost owner.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     private void requireOpen() {
         if (closed.get()) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "local-first owner registry is closed", false, null);
+        }
+    }
+
+    /**
+     * Durable, the serial number within the unlocked segment and the number of transaction s for Centre terminal state that have not yet completed.
+     */
+    private static final class SegmentState {
+
+        private volatile SegmentReservation reservation;
+
+        private final AtomicLong nextTs;
+
+        private final AtomicInteger unresolved = new AtomicInteger();
+
+        private volatile long lastAssignedNanos = System.nanoTime();
+
+        private volatile boolean retiring;
+
+        private volatile boolean unsafe;
+
+        /**
+         * Starting with the first durable slot in the paragraph, take a number for local.
+         *
+         * @param reservation reservation
+         */
+        private SegmentState(final SegmentReservation reservation) {
+            this.reservation = reservation;
+            this.nextTs = new AtomicLong(reservation.lease().firstTs());
+        }
+    }
+
+    /**
+     * Foreground Retains the owner receipt at the time of receipt, and renews the lease only to change the deadline without changing the algebra.
+     */
+    static final class Assignment {
+
+        private final SegmentState state;
+
+        private final SegmentReservation reservation;
+
+        private final long commitTs;
+
+        private final AtomicBoolean resolved = new AtomicBoolean();
+
+        /**
+         * Saves the only slot and current durable owner identity.
+         *
+         * @param state state
+         * @param reservation reservation
+         * @param commitTs durable commit timestamp
+         */
+        private Assignment(final SegmentState state, final SegmentReservation reservation, final long commitTs) {
+            this.state = state;
+            this.reservation = reservation;
+            this.commitTs = commitTs;
+        }
+
+        /**
+         * Returns original batch completed and shared with shard Physics commit. identity.
+         *
+         * @return the operation result
+         */
+        SegmentReservation reservation() {
+            return reservation;
+        }
+
+        /**
+         * Return this transaction's unique commit timestamp.
+         *
+         * @return the operation result
+         */
+        long commitTs() {
+            return commitTs;
         }
     }
 }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -7,17 +23,30 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
-/** 在真实子 JVM 中停在提交边界，父进程使用强杀验证未执行关闭的恢复。 */
+/**
+ * Stop at commit border in the real son JVM, Father process uses to kill verify not executed closed recovery.
+ */
 public final class WalCrashProcess {
-    /** 禁止实例化独立进程探针。 */
-    private WalCrashProcess() { }
 
-    /** 写入一笔跨片事务，在指定持久边界通知父进程后阻塞。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Prohibits case-independent processes probe.
+     */
+    private WalCrashProcess() {
+    }
+
+    /**
+     * Writes an cross-shard transaction to block a parent process after specifying the durable border.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         Path directory = Path.of(args[0]);
         String stageName = args[1];
         var hook = (WalMvccRuntime.FaultHook) stage -> {
-            if (stage.name().equals(stageName)) { signalAndWait(directory); }
+            if (stage.name().equals(stageName)) {
+                signalAndWait(directory);
+            }
         };
         try (var runtime = WalMvccRuntime.openForTest(directory, Set.of("a", "b"), Map.of(), WalOptions.defaults(), hook)) {
             var tx = runtime.begin(IsolationLevel.REPEATABLE_READ);
@@ -25,15 +54,24 @@ public final class WalCrashProcess {
             runtime.put(tx, "a", "balance", new byte[]{90});
             runtime.put(tx, "b", "balance", new byte[]{110});
             runtime.commit(tx);
-            if (stageName.equals("ACK")) { signalAndWait(directory); }
+            if (stageName.equals("ACK")) {
+                signalAndWait(directory);
+            }
         }
     }
 
-    /** 通知父进程边界已到达，阻塞期间不正常退出或释放文件锁。 */
-    private static void signalAndWait(Path directory) {
+    /**
+     * Notification of the arrival of the father ' s process boundary and irregular withdrawal or release of document locks during obstruction.
+     *
+     * @param directory directory
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static void signalAndWait(final Path directory) {
         try {
             Files.writeString(directory.resolve("ready"), "ready");
             new CountDownLatch(1).await();
-        } catch (Exception ex) { throw new IllegalStateException(ex); }
+        } catch (final Exception ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 }

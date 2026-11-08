@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.flyingzc.azir.storage.mysql.MysqlDataSourceFactory;
@@ -15,19 +31,23 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * MySQL 直连两分片基准测试入口，用于对比没有全局事务协调时的性能基线。
+ * MySQL directs two shard benchmark test portals to compare performance baselines without global transaction coordination.
  */
 public final class MysqlDirectTwoShardTxnBenchmark {
+
     /**
-     * 构造 MysqlDirectTwoShardTxnBenchmark 实例。
+     * Construct a MysqlDirectTwoShardTxnBenchmark instance.
      */
     private MysqlDirectTwoShardTxnBenchmark() {
     }
 
     /**
-     * 程序入口方法。
+     * Run the application entry point.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
      */
-    public static void main(String[] args) throws Exception {
+    public static void main(final String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource shard1DataSource = MysqlDataSourceFactory.create(config.shard1JdbcUrl(), config.username(), config.password());
         DataSource shard2DataSource = MysqlDataSourceFactory.create(config.shard2JdbcUrl(), config.username(), config.password());
@@ -52,11 +72,15 @@ public final class MysqlDirectTwoShardTxnBenchmark {
     }
 
     /**
-     * 初始化基准测试表。
+     * Initializes the benchmark test table.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void initialize(DataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement()) {
+    private static void initialize(final DataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement()) {
             statement.execute("""
                     create table if not exists bench_direct_tx (
                       k varchar(128) not null primary key,
@@ -67,34 +91,48 @@ public final class MysqlDirectTwoShardTxnBenchmark {
     }
 
     /**
-     * 重置基准测试表数据。
+     * Reset the benchmark tables.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void reset(DataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement()) {
+    private static void reset(final DataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement()) {
             statement.execute("delete from bench_direct_tx");
         }
     }
 
     /**
-     * 写入热点行初始数据。
+     * Insert initial hot-row data.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void seedHotRow(DataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement("""
-                     insert into bench_direct_tx(k, v) values ('hot', 'v')
-                     on duplicate key update v = values(v)
-                     """)) {
+    private static void seedHotRow(final DataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement("""
+                        insert into bench_direct_tx(k, v) values ('hot', 'v')
+                        on duplicate key update v = values(v)
+                        """)) {
             statement.executeUpdate();
         }
     }
 
     /**
-     * 执行基准测试并返回统计结果。
+     * Run the benchmark and return its statistics.
+     *
+     * @param shard1DataSource shard1 data source
+     * @param shard2DataSource shard2 data source
+     * @param config config
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
-    private static BenchmarkResult runBenchmark(DataSource shard1DataSource,
-                                                DataSource shard2DataSource,
-                                                Config config) throws Exception {
+    private static BenchmarkResult runBenchmark(final DataSource shard1DataSource,
+                                                final DataSource shard2DataSource,
+                                                final Config config) throws Exception {
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
         LongAdder conflicts = new LongAdder();
@@ -116,17 +154,17 @@ public final class MysqlDirectTwoShardTxnBenchmark {
                         try {
                             executeTxn(shard1DataSource, shard2DataSource, sequence.incrementAndGet(), config.conflictMode());
                             committed.increment();
-                        } catch (SQLException ex) {
+                        } catch (final SQLException ex) {
                             if (isConflict(ex)) {
                                 conflicts.increment();
                             } else {
                                 failures.increment();
                             }
-                        } catch (RuntimeException ex) {
+                        } catch (final RuntimeException ex) {
                             failures.increment();
                         }
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 } finally {
                     finishLatch.countDown();
@@ -144,14 +182,21 @@ public final class MysqlDirectTwoShardTxnBenchmark {
     }
 
     /**
-     * 执行一次没有全局协调的两分片写入。
+     * Execute two shard writings without global coordination once.
+     *
+     * @param shard1DataSource shard1 data source
+     * @param shard2DataSource shard2 data source
+     * @param id id
+     * @param conflictMode conflict mode
+     * @throws SQLException if the operation cannot complete
      */
-    private static void executeTxn(DataSource shard1DataSource,
-                                   DataSource shard2DataSource,
-                                   long id,
-                                   boolean conflictMode) throws SQLException {
-        try (Connection shard1 = shard1DataSource.getConnection();
-             Connection shard2 = shard2DataSource.getConnection()) {
+    private static void executeTxn(final DataSource shard1DataSource,
+                                   final DataSource shard2DataSource,
+                                   final long id,
+                                   final boolean conflictMode) throws SQLException {
+        try (
+                Connection shard1 = shard1DataSource.getConnection();
+                Connection shard2 = shard2DataSource.getConnection()) {
             shard1.setAutoCommit(false);
             shard2.setAutoCommit(false);
             try {
@@ -162,10 +207,10 @@ public final class MysqlDirectTwoShardTxnBenchmark {
                     executeNoConflictWrite(shard1, "bench:s1:" + id, "v" + id);
                     executeNoConflictWrite(shard2, "bench:s2:" + id, "v" + id);
                 }
-                // 直连基线没有全局提交协议：任一分片提交后，另一个分片失败会留下部分提交风险。
+                // The straight-link baseline does not have an global commit protocol: after either shard commit, another shard failure leaves a partial commit risk.
                 shard1.commit();
                 shard2.commit();
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 rollbackQuietly(shard1);
                 rollbackQuietly(shard2);
                 throw ex;
@@ -177,9 +222,14 @@ public final class MysqlDirectTwoShardTxnBenchmark {
     }
 
     /**
-     * 执行无冲突写入。
+     * Implementation is not conflict-free.
+     *
+     * @param connection connection
+     * @param key business key
+     * @param value value to write
+     * @throws SQLException if the operation cannot complete
      */
-    private static void executeNoConflictWrite(Connection connection, String key, String value) throws SQLException {
+    private static void executeNoConflictWrite(final Connection connection, final String key, final String value) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into bench_direct_tx(k, v) values (?, ?)
                 on duplicate key update v = values(v)
@@ -191,9 +241,12 @@ public final class MysqlDirectTwoShardTxnBenchmark {
     }
 
     /**
-     * 执行热点行写入。
+     * Execute hot line writing.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
      */
-    private static void executeConflictWrite(Connection connection) throws SQLException {
+    private static void executeConflictWrite(final Connection connection) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 update bench_direct_tx set v = ? where k = 'hot'
                 """)) {
@@ -203,46 +256,78 @@ public final class MysqlDirectTwoShardTxnBenchmark {
     }
 
     /**
-     * 安静回滚本地事务。
+     * Quiet rollback local transaction.
+     *
+     * @param connection connection
      */
-    private static void rollbackQuietly(Connection connection) {
+    private static void rollbackQuietly(final Connection connection) {
         try {
             connection.rollback();
-        } catch (SQLException ignored) {
+        } catch (final SQLException ignored) {
         }
     }
 
     /**
-     * 判断 SQL 异常是否为事务冲突。
+     * Determine whether the SQL failure represents a transaction conflict.
+     *
+     * @param ex ex
+     * @return the operation result
      */
-    private static boolean isConflict(SQLException ex) {
+    private static boolean isConflict(final SQLException ex) {
         return ex instanceof SQLTransactionRollbackException
                 || "40001".equals(ex.getSQLState())
                 || "41000".equals(ex.getSQLState());
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void close(DataSource dataSource) throws Exception {
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
     /**
-     * 基准测试配置对象。
+     * Read a string-valued environment variable.
+     *
+     * @param key business key
+     * @param defaultValue default value
+     * @return the operation result
+     */
+    private static String env(final String key, final String defaultValue) {
+        String value = System.getenv(key);
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    /**
+     * Benchmark configuration.
+     *
+     * @param shard1JdbcUrl shard1 jdbc url
+     * @param shard2JdbcUrl shard2 jdbc url
+     * @param username username
+     * @param password password
+     * @param resetTables reset tables
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param conflictMode conflict mode
      */
     private record Config(String shard1JdbcUrl,
-                          String shard2JdbcUrl,
-                          String username,
-                          String password,
-                          boolean resetTables,
-                          int concurrency,
-                          int durationSeconds,
-                          boolean conflictMode) {
+            String shard2JdbcUrl,
+            String username,
+            String password,
+            boolean resetTables,
+            int concurrency,
+            int durationSeconds,
+            boolean conflictMode) {
+
         /**
-         * 从环境变量读取配置对象。
+         * Read configuration from environment variables.
+         *
+         * @return the operation result
          */
         private static Config fromEnv() {
             return new Config(
@@ -253,23 +338,32 @@ public final class MysqlDirectTwoShardTxnBenchmark {
                     Boolean.parseBoolean(env("AZIR_TX_RESET", "true")),
                     Integer.parseInt(env("AZIR_TX_BENCH_CONCURRENCY", "50")),
                     Integer.parseInt(env("AZIR_TX_BENCH_DURATION_SECONDS", "10")),
-                    Boolean.parseBoolean(env("AZIR_TX_BENCH_CONFLICT", "false"))
-            );
+                    Boolean.parseBoolean(env("AZIR_TX_BENCH_CONFLICT", "false")));
         }
     }
 
     /**
-     * 基准测试结果对象。
+     * Benchmark results.
+     *
+     * @param elapsedSeconds elapsed seconds
+     * @param attempts attempts
+     * @param committed committed
+     * @param conflicts conflicts
+     * @param failures failures
      */
     private record BenchmarkResult(double elapsedSeconds,
-                                   long attempts,
-                                   long committed,
-                                   long conflicts,
-                                   long failures) {
+            long attempts,
+            long committed,
+            long conflicts,
+            long failures) {
+
         /**
-         * 将基准测试结果格式化为一行文本。
+         * Format benchmark results as a single line.
+         *
+         * @param config config
+         * @return the operation result
          */
-        private String toLine(Config config) {
+        private String toLine(final Config config) {
             double attemptTps = attempts / elapsedSeconds;
             double commitTps = committed / elapsedSeconds;
             double conflictTps = conflicts / elapsedSeconds;
@@ -285,13 +379,5 @@ public final class MysqlDirectTwoShardTxnBenchmark {
                     + " commit_tps=" + String.format("%.2f", commitTps)
                     + " conflict_tps=" + String.format("%.2f", conflictTps);
         }
-    }
-
-    /**
-     * 读取字符串环境变量配置。
-     */
-    private static String env(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value == null || value.isBlank() ? defaultValue : value;
     }
 }

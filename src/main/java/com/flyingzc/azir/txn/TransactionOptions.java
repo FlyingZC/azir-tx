@@ -1,19 +1,52 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import java.util.Objects;
 
 /**
- * 事务执行选项，集中配置锁等待、重试和跨分片提交策略。
+ * Transaction executes the option to centralize lock-and-wait, retry and cross-shard commit policies.
+ *
+ * @param lockWaitPolicy lock wait policy
+ * @param retryPolicy retry policy
+ * @param crossShardCommitPolicy cross shard commit policy
+ * @param bufferWrites buffer writes
+ * @param lazyBeginMetadata lazy begin metadata
+ * @param deferIntentCleanup defer intent cleanup
+ * @param limits limits
  */
 public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
-                                 TransactionRetryPolicy retryPolicy,
-                                 CrossShardCommitPolicy crossShardCommitPolicy,
-                                 boolean bufferWrites,
-                                 boolean lazyBeginMetadata,
-                                 boolean deferIntentCleanup,
-                                 TransactionLimits limits) {
+        TransactionRetryPolicy retryPolicy,
+        CrossShardCommitPolicy crossShardCommitPolicy,
+        boolean bufferWrites,
+        boolean lazyBeginMetadata,
+        boolean deferIntentCleanup,
+        TransactionLimits limits) {
+
     /**
-     * 构造 TransactionOptions 实例。
+     * Construct a TransactionOptions instance.
+     *
+     * @param lockWaitPolicy lock wait policy
+     * @param retryPolicy retry policy
+     * @param crossShardCommitPolicy cross shard commit policy
+     * @param bufferWrites buffer writes
+     * @param lazyBeginMetadata lazy begin metadata
+     * @param deferIntentCleanup defer intent cleanup
+     * @param limits limits
      */
     public TransactionOptions {
         Objects.requireNonNull(lockWaitPolicy, "lockWaitPolicy");
@@ -22,23 +55,36 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
         Objects.requireNonNull(limits, "limits");
     }
 
-    /** 保留原有配置入口并应用有界资源默认值。 */
-    public TransactionOptions(LockWaitPolicy lockWaitPolicy, TransactionRetryPolicy retryPolicy,
-                              CrossShardCommitPolicy crossShardCommitPolicy, boolean bufferWrites,
-                              boolean lazyBeginMetadata, boolean deferIntentCleanup) {
+    /**
+     * Keeps the original configuration entry and applies the bounded resource default.
+     *
+     * @param lockWaitPolicy lock wait policy
+     * @param retryPolicy retry policy
+     * @param crossShardCommitPolicy cross shard commit policy
+     * @param bufferWrites buffer writes
+     * @param lazyBeginMetadata lazy begin metadata
+     * @param deferIntentCleanup defer intent cleanup
+     */
+    public TransactionOptions(final LockWaitPolicy lockWaitPolicy, final TransactionRetryPolicy retryPolicy,
+                              final CrossShardCommitPolicy crossShardCommitPolicy, final boolean bufferWrites,
+                              final boolean lazyBeginMetadata, final boolean deferIntentCleanup) {
         this(lockWaitPolicy, retryPolicy, crossShardCommitPolicy, bufferWrites, lazyBeginMetadata,
                 deferIntentCleanup, TransactionLimits.defaults());
     }
 
     /**
-     * 返回默认事务选项。
+     * Returns the default transaction option.
+     *
+     * @return the operation result
      */
     public static TransactionOptions defaults() {
         return safePerformanceDefaults();
     }
 
     /**
-     * 返回 ACID 安全的性能优先默认配置。
+     * Returns the ACID security performance priority default configuration.
+     *
+     * @return the operation result
      */
     public static TransactionOptions safePerformanceDefaults() {
         return new TransactionOptions(
@@ -47,12 +93,13 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
                 CrossShardCommitPolicy.parallel(),
                 true,
                 false,
-                false
-        );
+                false);
     }
 
     /**
-     * 返回失败优先的显式配置。
+     * Returns the visible configuration that failed.
+     *
+     * @return the operation result
      */
     public static TransactionOptions failFastDefaults() {
         return new TransactionOptions(
@@ -61,12 +108,13 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
                 CrossShardCommitPolicy.serial(),
                 false,
                 false,
-                false
-        );
+                false);
     }
 
     /**
-     * 返回接近 MySQL 行为的默认配置。
+     * Return defaults approximating MySQL conflict handling.
+     *
+     * @return the operation result
      */
     public static TransactionOptions mysqlLikeDefaults() {
         return new TransactionOptions(
@@ -75,7 +123,6 @@ public record TransactionOptions(LockWaitPolicy lockWaitPolicy,
                 CrossShardCommitPolicy.asyncParallel(16),
                 true,
                 true,
-                false
-        );
+                false);
     }
 }

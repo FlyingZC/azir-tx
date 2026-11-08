@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -9,19 +25,24 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
-/** 通过持久模式行和旧租约外键隔离新旧发布协议。 */
+/**
+ * Separates old and new release protocols by durable mode rows with the old lease external key.
+ */
 final class MysqlProtocolEpoch {
-    /** 旧协议、账本及分段账本切换的持久阶段。 */
-    enum Mode {
-        LEGACY, ACTIVATING, LEDGER, SEGMENT_PREPARE, SEGMENT
-    }
 
-    /** 仅提供同一 MySQL 连接内的协议模式操作。 */
+    /**
+     * Only the protocol mode operation in MySQL connection is available.
+     */
     private MysqlProtocolEpoch() {
     }
 
-    /** 安装模式行及旧租约外键，重复初始化保留已有协议阶段。 */
-    static void install(Connection connection) throws SQLException {
+    /**
+     * Installs the mode line and the old lease external key to repeat the initialize the existing protocol stage.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    static void install(final Connection connection) throws SQLException {
         try (Statement statement = connection.createStatement()) {
             statement.execute("""
                     create table if not exists mvcc_protocol_epoch_v1 (
@@ -72,10 +93,18 @@ final class MysqlProtocolEpoch {
         }
     }
 
-    /** 模式行与唯一有效父键必须一致，防止重启时重新放行旧租约。 */
-    private static void requireGateRow(Connection connection, int expected) throws SQLException {
-        try (PreparedStatement query = connection.prepareStatement("select mode_id from mvcc_legacy_lease_gate_v1");
-             ResultSet result = query.executeQuery()) {
+    /**
+     * Modeline must be aligned with the only valid parent key to prevent the old lease from being restarted.
+     *
+     * @param connection connection
+     * @param expected expected
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void requireGateRow(final Connection connection, final int expected) throws SQLException {
+        try (
+                PreparedStatement query = connection.prepareStatement("select mode_id from mvcc_legacy_lease_gate_v1");
+                ResultSet result = query.executeQuery()) {
             if (!result.next() || result.getInt(1) != expected || result.next()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "legacy snapshot gate differs from publication mode", false, null);
@@ -83,28 +112,57 @@ final class MysqlProtocolEpoch {
         }
     }
 
-    /** 查询版本化模式结构是否已经安装。 */
-    private static boolean schemaObjectExists(Connection connection, String table, String conditions)
-            throws SQLException {
+    /**
+     * Ask if the version mode structure has been installed.
+     *
+     * @param connection connection
+     * @param table table
+     * @param conditions conditions
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static boolean schemaObjectExists(final Connection connection, final String table, final String conditions) throws SQLException {
         String sql = "select 1 from " + table + " where table_schema = database() and " + conditions + " limit 1";
-        try (PreparedStatement query = connection.prepareStatement(sql);
-             ResultSet result = query.executeQuery()) {
+        try (
+                PreparedStatement query = connection.prepareStatement(sql);
+                ResultSet result = query.executeQuery()) {
             return result.next();
         }
     }
 
-    /** 查询当前持久模式，不存在或未知模式时失败关闭。 */
-    static Mode current(Connection connection) throws SQLException {
+    /**
+     * Querying the current durable mode, failed to close when no or unknown mode exists.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    static Mode current(final Connection connection) throws SQLException {
         return readMode(connection, false);
     }
 
-    /** 排他锁定模式行，切换检查和更新必须在同一数据库事务中完成。 */
-    static Mode lock(Connection connection) throws SQLException {
+    /**
+     * Unlock locking mode lines, toggle checking and updating must be done in the same database transaction.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    static Mode lock(final Connection connection) throws SQLException {
         return readMode(connection, true);
     }
 
-    /** 按预期旧模式原子推进协议阶段并增加代数。 */
-    static void transition(Connection connection, Mode expected, Mode next) throws SQLException {
+    /**
+     * Advance the protocol phase and add algebras to the expected old model atomic.
+     *
+     * @param connection connection
+     * @param expected expected
+     * @param next next
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    static void transition(final Connection connection, final Mode expected, final Mode next) throws SQLException {
         if (!(expected == Mode.LEGACY && next == Mode.ACTIVATING
                 || expected == Mode.ACTIVATING && next == Mode.LEDGER
                 || expected == Mode.LEDGER && next == Mode.SEGMENT_PREPARE
@@ -112,7 +170,7 @@ final class MysqlProtocolEpoch {
             throw new IllegalArgumentException("unsupported publication protocol transition");
         }
         if (expected == Mode.LEGACY && next == Mode.ACTIVATING) {
-            // 外键父键更新与模式行更新同事务；在途旧租约要么先提交并阻止切换，要么等待后失败。
+            // Parent-key updates are the same as mode line updates transaction; old lease is either first commit and stops switching, or waits for later failure.
             try (PreparedStatement gate = connection.prepareStatement("""
                     update mvcc_legacy_lease_gate_v1 set mode_id = 1 where mode_id = 0
                     """)) {
@@ -136,38 +194,66 @@ final class MysqlProtocolEpoch {
         }
     }
 
-    /** 新快照只可在账本模式已持久激活后开始。 */
-    static void requireLedger(Connection connection) throws SQLException {
+    /**
+     * New snapshot can only start after the account book mode has been activated by durable.
+     *
+     * @param connection connection
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    static void requireLedger(final Connection connection) throws SQLException {
         if (readMode(connection, false) != Mode.LEDGER) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "publication ledger protocol is not active", false, null);
         }
     }
 
-    /** 分段业务入口仅在归档旧状态表并完成持久模式切换后可启动。 */
-    static void requireSegment(Connection connection) throws SQLException {
+    /**
+     * The branch entry can be activated only after the old status table is archived and the durable mode switch has been completed.
+     *
+     * @param connection connection
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    static void requireSegment(final Connection connection) throws SQLException {
         if (readMode(connection, false) != Mode.SEGMENT) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "segmented publication protocol is not active", false, null);
         }
     }
 
-    /** 根据是否排他读取模式行，拒绝缺失和无法识别的状态。 */
-    private static Mode readMode(Connection connection, boolean exclusive) throws SQLException {
+    /**
+     * Rejects the status of missing and unrecognized, depending on whether or not you are exclusive in reading mode.
+     *
+     * @param connection connection
+     * @param exclusive exclusive
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static Mode readMode(final Connection connection, final boolean exclusive) throws SQLException {
         String sql = "select protocol_mode from mvcc_protocol_epoch_v1 where singleton_id = 1"
                 + (exclusive ? " for update" : " for share");
-        try (PreparedStatement query = connection.prepareStatement(sql);
-             ResultSet result = query.executeQuery()) {
+        try (
+                PreparedStatement query = connection.prepareStatement(sql);
+                ResultSet result = query.executeQuery()) {
             if (!result.next()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "publication protocol mode row missing", false, null);
             }
             try {
                 return Mode.valueOf(result.getString(1));
-            } catch (IllegalArgumentException ex) {
+            } catch (final IllegalArgumentException ex) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "unknown publication protocol mode", false, null, ex);
             }
         }
+    }
+
+    /**
+     * Durable phase of an old agreement, account book and branch book switch.
+     */
+    enum Mode {
+        LEGACY, ACTIVATING, LEDGER, SEGMENT_PREPARE, SEGMENT
     }
 }

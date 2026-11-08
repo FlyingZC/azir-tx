@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
 import com.flyingzc.azir.api.Transaction;
@@ -39,23 +55,34 @@ import java.util.Properties;
 import java.util.Set;
 
 /**
- * Calcite 关系计划执行器，把 MVCC 快照行暴露为 Calcite 表并把 DML 变更写回事务核心。
+ * Calcite Relationship Scheme Executor, exposes the MVCC snapshot line to Calcite Table and writes the DML change back to the transaction core.
  */
 final class CalciteSqlExecutor {
+
     private final TransactionManager transactionManager;
+
     private final ShardResolver shardResolver;
+
     private final SqlValueCodec valueCodec;
+
     private final SqlStorageKeyCodec keyCodec;
+
     private final SqlExecutionOptions options;
 
     /**
-     * 构造 Calcite SQL 执行器。
+     * Construct the Calcite SQL implementer.
+     *
+     * @param transactionManager transaction manager
+     * @param shardResolver shard resolver
+     * @param valueCodec value codec
+     * @param keyCodec key codec
+     * @param options options
      */
-    CalciteSqlExecutor(TransactionManager transactionManager,
-                       ShardResolver shardResolver,
-                       SqlValueCodec valueCodec,
-                       SqlStorageKeyCodec keyCodec,
-                       SqlExecutionOptions options) {
+    CalciteSqlExecutor(final TransactionManager transactionManager,
+                       final ShardResolver shardResolver,
+                       final SqlValueCodec valueCodec,
+                       final SqlStorageKeyCodec keyCodec,
+                       final SqlExecutionOptions options) {
         this.transactionManager = transactionManager;
         this.shardResolver = shardResolver;
         this.valueCodec = valueCodec;
@@ -63,24 +90,42 @@ final class CalciteSqlExecutor {
         this.options = options;
     }
 
-    /** 原生后端复用 Calcite 关系计划，不绑定旧控制面事务管理器。 */
-    CalciteSqlExecutor(ShardResolver shardResolver, SqlValueCodec valueCodec,
-                       SqlStorageKeyCodec keyCodec, SqlExecutionOptions options) {
+    /**
+     * Original backend reuses Calcite relationship plan without binding the old control face transaction manager.
+     *
+     * @param shardResolver shard resolver
+     * @param valueCodec value codec
+     * @param keyCodec key codec
+     * @param options options
+     */
+    CalciteSqlExecutor(final ShardResolver shardResolver, final SqlValueCodec valueCodec,
+                       final SqlStorageKeyCodec keyCodec, final SqlExecutionOptions options) {
         this(null, shardResolver, valueCodec, keyCodec, options);
     }
 
     /**
-     * 在指定事务中执行 Calcite 查询或 DML 计划。
+     * Execute Calcite Query or DML schedule in the transaction specified.
+     *
+     * @param tx transaction context
+     * @param plan plan
+     * @param snapshot snapshot
+     * @return the operation result
      */
-    SqlExecutionResult execute(Transaction tx, SqlPlan.CalcitePlan plan, StatementReadSnapshot snapshot) {
+    SqlExecutionResult execute(final Transaction tx, final SqlPlan.CalcitePlan plan, final StatementReadSnapshot snapshot) {
         if (transactionManager == null) {
             throw illegal("MySQL Calcite execution requires its transaction manager");
         }
         return execute(new MysqlSqlReadPort(transactionManager, tx, snapshot), plan);
     }
 
-    /** SQL 计划只依赖当前语句端口的固定读切面和同事务写入能力。 */
-    SqlExecutionResult execute(SqlTransactionPort port, SqlPlan.CalcitePlan plan) {
+    /**
+     * SQL plans to rely only on the fixed read snapshot and same transaction writing capabilities of the current statement port.
+     *
+     * @param port port
+     * @param plan plan
+     * @return the operation result
+     */
+    SqlExecutionResult execute(final SqlTransactionPort port, final SqlPlan.CalcitePlan plan) {
         return switch (plan.statementType()) {
             case SELECT -> SqlExecutionResult.rows(executeQuery(port, plan.sql(), plan.tableNames()).sqlRows());
             case INSERT -> executeInsert(port, plan);
@@ -90,9 +135,13 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 执行 INSERT VALUES 或 INSERT SELECT，并按目标列顺序写入 MVCC。
+     * Execute INSERT VALUES or INSERT SELECT and write to MVCC in the order of the target line.
+     *
+     * @param port port
+     * @param plan plan
+     * @return the operation result
      */
-    private SqlExecutionResult executeInsert(SqlTransactionPort port, SqlPlan.CalcitePlan plan) {
+    private SqlExecutionResult executeInsert(final SqlTransactionPort port, final SqlPlan.CalcitePlan plan) {
         SqlInsert insert = parse(plan.sql(), SqlInsert.class);
         String table = tableName(insert.getTargetTable());
         List<String> targetColumns = columnNames(insert.getTargetColumnList());
@@ -104,7 +153,7 @@ final class CalciteSqlExecutor {
         int idIndex = targetColumns.indexOf("id");
         int valueIndex = targetColumns.indexOf("value");
         Set<String> insertedIds = new HashSet<>();
-        // 整句验证完成后才写入，跨行重复键和 NULL 不会造成已执行前缀残留。
+        // The entire sentence verify is not written after completion, cross-line repetition keys and NULL do not result in executed prefix residues.
         for (List<String> row : source.values()) {
             if (row.size() != targetColumns.size()) {
                 throw illegal("INSERT source column count does not match target columns");
@@ -123,9 +172,13 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 执行支持表达式和过滤条件的 UPDATE，并处理主键变化。
+     * Executes UPDATEs that support expressions and filter conditions, and handle changes in the primary key.
+     *
+     * @param port port
+     * @param plan plan
+     * @return the operation result
      */
-    private SqlExecutionResult executeUpdate(SqlTransactionPort port, SqlPlan.CalcitePlan plan) {
+    private SqlExecutionResult executeUpdate(final SqlTransactionPort port, final SqlPlan.CalcitePlan plan) {
         SqlUpdate update = parse(plan.sql(), SqlUpdate.class);
         String table = tableName(update.getTargetTable());
         List<String> targetColumns = columnNames(update.getTargetColumnList());
@@ -149,11 +202,10 @@ final class CalciteSqlExecutor {
                 .map(row -> new UpdatedRow(
                         requiredValue(row.get(0), "old id"),
                         requiredValue(row.get(1), "new id"),
-                        requiredValue(row.get(2), "new value")
-                ))
+                        requiredValue(row.get(2), "new value")))
                 .toList();
         validateUpdatedKeys(port, table, updates);
-        // 先删除所有迁移的旧键，再写入新键，避免主键交换时删除刚写入的另一行。
+        // Deletes all old moving keys, then writes new keys and avoids the deletion of another line that you just wrote when the primary key is exchanged.
         for (UpdatedRow updateRow : updates) {
             if (!updateRow.oldId().equals(updateRow.newId())) {
                 delete(port, table, updateRow.oldId());
@@ -166,9 +218,13 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 执行带 Calcite 表达式过滤条件的 DELETE。
+     * Executes a DelETE with Calcite expression filtering conditions.
+     *
+     * @param port port
+     * @param plan plan
+     * @return the operation result
      */
-    private SqlExecutionResult executeDelete(SqlTransactionPort port, SqlPlan.CalcitePlan plan) {
+    private SqlExecutionResult executeDelete(final SqlTransactionPort port, final SqlPlan.CalcitePlan plan) {
         SqlDelete delete = parse(plan.sql(), SqlDelete.class);
         String table = tableName(delete.getTargetTable());
         String alias = delete.getAlias() == null ? "" : " AS " + toSql(delete.getAlias());
@@ -176,8 +232,7 @@ final class CalciteSqlExecutor {
         QueryData rows = executeQuery(
                 port,
                 "SELECT id FROM " + toSql(delete.getTargetTable()) + alias + condition,
-                plan.tableNames()
-        );
+                plan.tableNames());
         for (List<String> row : rows.values()) {
             delete(port, table, requiredValue(row.getFirst(), "id"));
         }
@@ -185,9 +240,15 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 注册不预读数据的分页表，以调用方传入的语句快照执行关系运算。
+     * Registers a page break table that does not preread the data to execute a relationship operation for a statement snapshot that is sent by the caller.
+     *
+     * @param port port
+     * @param sql sql
+     * @param tableNames table names
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private QueryData executeQuery(SqlTransactionPort port, String sql, List<String> tableNames) {
+    private QueryData executeQuery(final SqlTransactionPort port, final String sql, final List<String> tableNames) {
         SqlScanBudget scanBudget = new SqlScanBudget(port.diagnosticTransactionId(), options);
         int simpleLimit = simpleScanLimit(sql, tableNames);
         Properties properties = new Properties();
@@ -204,8 +265,8 @@ final class CalciteSqlExecutor {
             try (Statement statement = connection.createStatement(); ResultSet resultSet = statement.executeQuery(sql)) {
                 return readResultSet(resultSet, port);
             }
-        } catch (Exception ex) {
-            // Calcite/JDBC 可能多层包装枚举器异常，保留快照失效等原始 MVCC 错误语义。
+        } catch (final Exception ex) {
+            // Calcite/JDBC may contain multiple layers of anarchy and keep original MVCC hyphens such as snapshot invalids.
             for (Throwable cause = ex; cause != null; cause = cause.getCause()) {
                 if (cause instanceof MvccException mvccException) {
                     throw mvccException;
@@ -217,9 +278,13 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 仅对单表、无过滤排序和聚合的简单投影下推 LIMIT，避免 JDBC 多取一行时打开后续分片。
+     * Just push LIMIT for a simple projection of a single table, unfiltered sorting and aggregate to avoid opening the follow-up shard when JDBC takes an extra line.
+     *
+     * @param sql sql
+     * @param tableNames table names
+     * @return the operation result
      */
-    private int simpleScanLimit(String sql, List<String> tableNames) {
+    private int simpleScanLimit(final String sql, final List<String> tableNames) {
         if (tableNames.size() != 1 || !sql.toLowerCase(Locale.ROOT).contains("limit")) {
             return Integer.MAX_VALUE;
         }
@@ -253,15 +318,21 @@ final class CalciteSqlExecutor {
             }
             long limit = literal.longValue(true);
             return limit >= 0 && limit <= Integer.MAX_VALUE ? (int) limit : Integer.MAX_VALUE;
-        } catch (RuntimeException | org.apache.calcite.sql.parser.SqlParseException ex) {
+        } catch (final RuntimeException | org.apache.calcite.sql.parser.SqlParseException ex) {
             return Integer.MAX_VALUE;
         }
     }
 
     /**
-     * 把 JDBC 结果集转换为保序的 SQL 行和值矩阵。
+     * Converts the JDBC result set to a sequenced SQL line and value matrix.
+     *
+     * @param resultSet result set
+     * @param port port
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
      */
-    private QueryData readResultSet(ResultSet resultSet, SqlTransactionPort port) throws Exception {
+    private QueryData readResultSet(final ResultSet resultSet, final SqlTransactionPort port) throws Exception {
         ResultSetMetaData metadata = resultSet.getMetaData();
         List<String> labels = new ArrayList<>();
         for (int index = 1; index <= metadata.getColumnCount(); index++) {
@@ -299,9 +370,13 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 校验 UPDATE 后的新主键在结果集合内唯一，且不会覆盖集合外已有行。
+     * The new primary key after validate UPDATE is the only one in the result set and does not overwhelm existing lines outside the assembly.
+     *
+     * @param port port
+     * @param table table
+     * @param updates updates
      */
-    private void validateUpdatedKeys(SqlTransactionPort port, String table, List<UpdatedRow> updates) {
+    private void validateUpdatedKeys(final SqlTransactionPort port, final String table, final List<UpdatedRow> updates) {
         Set<String> oldIds = updates.stream().map(UpdatedRow::oldId).collect(java.util.stream.Collectors.toSet());
         Set<String> newIds = new HashSet<>();
         for (UpdatedRow row : updates) {
@@ -315,57 +390,82 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 校验 INSERT 目标主键当前不存在。
+     * Validate INSERT target primary key does not currently exist.
+     *
+     * @param port port
+     * @param table table
+     * @param id id
      */
-    private void ensureKeyAbsent(SqlTransactionPort port, String table, String id) {
+    private void ensureKeyAbsent(final SqlTransactionPort port, final String table, final String id) {
         if (exists(port, table, id)) {
             throw illegal("duplicate key: " + id);
         }
     }
 
     /**
-     * 判断逻辑表主键在当前事务视图中是否存在。
+     * Determines whether the logical table primary key exists in the current transaction view.
+     *
+     * @param port port
+     * @param table table
+     * @param id id
+     * @return the operation result
      */
-    private boolean exists(SqlTransactionPort port, String table, String id) {
+    private boolean exists(final SqlTransactionPort port, final String table, final String id) {
         String shardId = shardResolver.resolveShard(table, id);
         return port.get(shardId, keyCodec.encode(table, id)).isPresent();
     }
 
     /**
-     * 写入逻辑表行。
+     * Writes the logical table row.
+     *
+     * @param port port
+     * @param table table
+     * @param id id
+     * @param value value to write
      */
-    private void put(SqlTransactionPort port, String table, String id, String value) {
+    private void put(final SqlTransactionPort port, final String table, final String id, final String value) {
         String shardId = shardResolver.resolveShard(table, id);
         port.put(shardId, keyCodec.encode(table, id), valueCodec.encode(value));
     }
 
     /**
-     * 删除逻辑表行并保留 MVCC tombstone 语义。
+     * Deletes the loglist row and maintains the MVCC tombstone syntax.
+     *
+     * @param port port
+     * @param table table
+     * @param id id
      */
-    private void delete(SqlTransactionPort port, String table, String id) {
+    private void delete(final SqlTransactionPort port, final String table, final String id) {
         String shardId = shardResolver.resolveShard(table, id);
         port.delete(shardId, keyCodec.encode(table, id));
     }
 
     /**
-     * 使用与计划器一致的词法配置解析指定 Calcite DML 节点。
+     * Parsing specifies the Calcite DML node using terms configuration consistent with the planner.
+     *
+     * @param <T> value type
+     * @param sql sql
+     * @param expectedType expected type
+     * @return the operation result
      */
-    private <T extends SqlNode> T parse(String sql, Class<T> expectedType) {
+    private <T extends SqlNode> T parse(final String sql, final Class<T> expectedType) {
         try {
             SqlNode parsed = SqlParser.create(
                     sql,
-                    SqlParser.config().withLex(Lex.MYSQL).withCaseSensitive(false)
-            ).parseStmt();
+                    SqlParser.config().withLex(Lex.MYSQL).withCaseSensitive(false)).parseStmt();
             return expectedType.cast(parsed);
-        } catch (Exception ex) {
+        } catch (final Exception ex) {
             throw illegal("cannot parse planned SQL: " + sql, ex);
         }
     }
 
     /**
-     * 提取 DML 目标表的简单名称。
+     * Extracts a simple name for the DML destination table.
+     *
+     * @param targetTable target table
+     * @return the operation result
      */
-    private String tableName(SqlNode targetTable) {
+    private String tableName(final SqlNode targetTable) {
         if (!(targetTable instanceof SqlIdentifier identifier)) {
             throw illegal("only simple DML target table is supported: " + targetTable);
         }
@@ -373,9 +473,12 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 提取并规范化目标列名。
+     * To extract and regularize the target listing.
+     *
+     * @param columns columns
+     * @return the operation result
      */
-    private List<String> columnNames(SqlNodeList columns) {
+    private List<String> columnNames(final SqlNodeList columns) {
         if (columns == null) {
             return List.of();
         }
@@ -388,9 +491,11 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 校验 DML 只修改当前物理模型支持的 id/value 列并且两列恰好出现一次。
+     * Validate DML only changes the id/value column supported by the current physical model and both columns happen once.
+     *
+     * @param columns columns
      */
-    private void validateTargetColumns(List<String> columns) {
+    private void validateTargetColumns(final List<String> columns) {
         Set<String> distinct = new HashSet<>(columns);
         if (distinct.size() != columns.size() || !Set.of("id", "value").containsAll(columns)) {
             throw illegal("only id and value columns are supported: " + columns);
@@ -401,9 +506,11 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 校验 INSERT 必须同时提供当前行模型中的 id 和 value 两列。
+     * Validate INSERT must supply both id and value columns in the current line model.
+     *
+     * @param columns columns
      */
-    private void validateInsertColumns(List<String> columns) {
+    private void validateInsertColumns(final List<String> columns) {
         validateTargetColumns(columns);
         if (!new HashSet<>(columns).equals(Set.of("id", "value"))) {
             throw illegal("INSERT must provide both id and value columns: " + columns);
@@ -411,16 +518,22 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 使用 MySQL 方言把 Calcite 节点转回可执行 SQL 片段。
+     * Use MySQL dialect to return Calcite node to an executable SQL clip.
+     *
+     * @param node node
+     * @return the operation result
      */
-    private String toSql(SqlNode node) {
+    private String toSql(final SqlNode node) {
         return node.toSqlString(MysqlSqlDialect.DEFAULT).getSql();
     }
 
     /**
-     * 为多行 VALUES 的每个字符表达式显式转换为 VARCHAR，避免 Calcite 按最长 CHAR 自动补空格。
+     * Converts each character expression for multiple rows of VALUES to VARCHAR, avoiding Calcite pressing the maximum CHAR autofilling spaces.
+     *
+     * @param source database connection source
+     * @return the operation result
      */
-    private String insertSourceSql(SqlNode source) {
+    private String insertSourceSql(final SqlNode source) {
         if (source.getKind() != SqlKind.VALUES || !(source instanceof SqlCall valuesCall)) {
             return toSql(source);
         }
@@ -438,9 +551,13 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 校验写入模型不接受 SQL NULL 的必填值。
+     * Validate Writing Model does not accept SQL NULL 's required fill.
+     *
+     * @param value value to write
+     * @param column column
+     * @return the operation result
      */
-    private String requiredValue(String value, String column) {
+    private String requiredValue(final String value, final String column) {
         if (value == null) {
             throw illegal(column + " must not be null");
         }
@@ -448,27 +565,41 @@ final class CalciteSqlExecutor {
     }
 
     /**
-     * 创建统一 SQL 执行异常。
+     * Creates a uniform SQL execution anomaly.
+     *
+     * @param message message
+     * @return the operation result
      */
-    private MvccException illegal(String message) {
+    private MvccException illegal(final String message) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, null);
     }
 
     /**
-     * 创建带根因的统一 SQL 执行异常。
+     * Creates a unified SQL execution anomaly with root causes.
+     *
+     * @param message message
+     * @param cause cause
+     * @return the operation result
      */
-    private MvccException illegal(String message, Exception cause) {
+    private MvccException illegal(final String message, final Exception cause) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, null, cause);
     }
 
     /**
-     * 内部查询结果，同时保留列标签映射和按位置访问的数据。
+     * Internal query results, while retaining column tab mapping and location-based access data.
+     *
+     * @param sqlRows sql rows
+     * @param values values
      */
     private record QueryData(List<SqlRow> sqlRows, List<List<String>> values) {
     }
 
     /**
-     * UPDATE 计算后的旧主键、新主键和值。
+     * UPDATE calculates the old primary key, new primary key and value.
+     *
+     * @param oldId old id
+     * @param newId new id
+     * @param newValue new value
      */
     private record UpdatedRow(String oldId, String newId, String newValue) {
     }

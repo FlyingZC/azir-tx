@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
 import com.flyingzc.azir.api.Transaction;
@@ -11,11 +27,55 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Calcite 表只依赖同一语句切面内的点读与原始键分页，不解释后端提交时间。 */
+/**
+ * Calcite tables rely only on the reading and original page in the same statement snapshot, without explaining the backend commit time.
+ */
 interface SqlReadPort {
-    /** SQL 表保留墓碑计费身份；只有未删除的业务值必须非空。 */
+
+    /**
+     * Returns the transaction identifier in a process used for error and budget records, which does not take global time to sort.
+     *
+     * @return the operation result
+     */
+    long diagnosticTransactionId();
+
+    /**
+     * Reads a physical business key inside the handle of the same sentence.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @return the operation result
+     */
+    Optional<byte[]> get(String shardId, String key);
+
+    /**
+     * The range of keys within the handle of the same sentence and exclusive cursor reads a page.
+     *
+     * @param shardId logical shard identifier
+     * @param range range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    Page scanPage(String shardId, KeyRange range, String afterKeyExclusive, int limit);
+
+    /**
+     * The SQL table retains tombstone bill identity; only undeleted business values must be empty.
+     *
+     * @param key business key
+     * @param value value to write
+     * @param deleted deleted
+     */
     record KeyValue(String key, byte[] value, boolean deleted) {
-        /** 禁止后端在 Calcite 消费时修改当前页。 */
+
+        /**
+         * Allows the backend to modify the current page while consuming Calcite.
+         *
+         * @param key business key
+         * @param value value to write
+         * @param deleted deleted
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
         public KeyValue {
             Objects.requireNonNull(key, "key");
             if (!deleted && value == null) {
@@ -24,73 +84,128 @@ interface SqlReadPort {
             value = value == null ? null : value.clone();
         }
 
-        /** 调用方取得独立字节数组。 */
+        /**
+         * Caller obtains a separate byte array.
+         *
+         * @return the operation result
+         */
         @Override
         public byte[] value() {
             return value == null ? null : value.clone();
         }
     }
 
-    /** 空值页也保留来自已扫描原始键的排他游标。 */
+    /**
+     * The empty value page also maintains an exclusive cursor from the scanned original key.
+     *
+     * @param values values
+     * @param nextKey next key
+     */
     record Page(List<KeyValue> values, String nextKey) {
-        /** 固定页内业务键顺序。 */
+
+        /**
+         * Fixed the order of business keys on the page.
+         *
+         * @param values values
+         * @param nextKey next key
+         */
         public Page {
             values = List.copyOf(values);
         }
     }
-
-    /** 返回用于错误与预算记录的进程内事务标识，不承担全局时间排序。 */
-    long diagnosticTransactionId();
-
-    /** 同一语句句柄内读取一个物理业务键。 */
-    Optional<byte[]> get(String shardId, String key);
-
-    /** 同一语句句柄内按键范围和排他游标读取一页。 */
-    Page scanPage(String shardId, KeyRange range, String afterKeyExclusive, int limit);
 }
 
-/** SQL DML 在同一事务上缓冲或执行写入，读取仍沿用语句开始时的切面。 */
+/**
+ * SQL DML is written on the same transaction buffer or executes, and reads the cut at the beginning of the statement.
+ */
 interface SqlTransactionPort extends SqlReadPort {
-    /** 主键 INSERT 必须由后端保证不存在时才写入。 */
+
+    /**
+     * The primary key INSERT must be written when the backend ensures that it does not exist.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param value value to write
+     */
     void insert(String shardId, String key, byte[] value);
 
-    /** 按已验证的物理路由写入非空 SQL value 字节。 */
+    /**
+     * Writing non-empty SQL value bytes by physical path of verify.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param value value to write
+     */
     void put(String shardId, String key, byte[] value);
 
-    /** 按已验证的物理路由删除业务键。 */
+    /**
+     * Presss the physical path of verify to delete the key.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     */
     void delete(String shardId, String key);
 }
 
-/** 现有 MySQL 事务管理器沿用原语句级时间戳与分页门禁。 */
+/**
+ * The current MySQL transaction manager follows the original statement-level timestamp and page breaks.
+ */
 final class MysqlSqlReadPort implements SqlTransactionPort {
+
     private final TransactionManager manager;
+
     private final Transaction transaction;
+
     private final StatementReadSnapshot snapshot;
 
-    /** 只由已经创建语句快照的 SQL 执行器构造。 */
-    MysqlSqlReadPort(TransactionManager manager, Transaction transaction,
-                     StatementReadSnapshot snapshot) {
+    /**
+     * Only constructed from a SQL implementer that has created a statement snapshot.
+     *
+     * @param manager manager
+     * @param transaction transaction context
+     * @param snapshot snapshot
+     */
+    MysqlSqlReadPort(final TransactionManager manager, final Transaction transaction,
+                     final StatementReadSnapshot snapshot) {
         this.manager = Objects.requireNonNull(manager, "manager");
         this.transaction = Objects.requireNonNull(transaction, "transaction");
         this.snapshot = Objects.requireNonNull(snapshot, "snapshot");
     }
 
-    /** MySQL 事务号仅供 SQL 诊断使用。 */
+    /**
+     * MySQL transaction ID is for SQL diagnostics only.
+     *
+     * @return the operation result
+     */
     @Override
     public long diagnosticTransactionId() {
         return transaction.txId();
     }
 
-    /** 原有点读仍由事务管理器验证固定语句快照。 */
+    /**
+     * A little reading is still by transaction manager verify fixed statement snapshot.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @return the operation result
+     */
     @Override
-    public Optional<byte[]> get(String shardId, String key) {
+    public Optional<byte[]> get(final String shardId, final String key) {
         return manager.get(transaction, shardId, key, snapshot);
     }
 
-    /** 墓碑由 SQL 非空行模型过滤，原始分页游标保持不变。 */
+    /**
+     * Tombstone filtered by SQL non-empty line model, original page cursor remains unchanged.
+     *
+     * @param shardId logical shard identifier
+     * @param range range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public Page scanPage(String shardId, KeyRange range,
-                         String afterKeyExclusive, int limit) {
+    public Page scanPage(final String shardId, final KeyRange range,
+                         final String afterKeyExclusive, final int limit) {
         var source = manager.scanPage(transaction, shardId,
                 range.startKeyInclusive(), range.endKeyExclusive(),
                 snapshot, afterKeyExclusive, limit);
@@ -99,15 +214,28 @@ final class MysqlSqlReadPort implements SqlTransactionPort {
                 .toList(), source.nextKey());
     }
 
-    /** 原有 MySQL 缓冲写集合保持不变。 */
+    /**
+     * The original MySQL buffered write set combination remains unchanged.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param value value to write
+     */
     @Override
-    public void put(String shardId, String key, byte[] value) {
+    public void put(final String shardId, final String key, final byte[] value) {
         manager.put(transaction, shardId, key, value);
     }
 
-    /** 旧 MySQL 后端沿用语句快照存在性检查和缓冲写入。 */
+    /**
+     * The old MySQL backend follows the snapshot existential check and buffer writing.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param value value to write
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
-    public void insert(String shardId, String key, byte[] value) {
+    public void insert(final String shardId, final String key, final byte[] value) {
         if (get(shardId, key).isPresent()) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "duplicate SQL key: " + key, false, transaction.txId());
@@ -115,9 +243,14 @@ final class MysqlSqlReadPort implements SqlTransactionPort {
         put(shardId, key, value);
     }
 
-    /** 原有 MySQL 删除墓碑语义保持不变。 */
+    /**
+     * The original MySQL removes the tombstone semantic unchanged.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     */
     @Override
-    public void delete(String shardId, String key) {
+    public void delete(final String shardId, final String key) {
         manager.delete(transaction, shardId, key);
     }
 }

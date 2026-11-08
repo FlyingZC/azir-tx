@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -15,26 +31,32 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
-/** 只回收正式向量本地旧行，混合键的跨片映射与已提交版本始终保留。 */
+/**
+ * Only the collection official vector local old line, with a mixed-key cross-shard map and already commit version always maintained.
+ */
 final class MysqlVectorLocalGarbageCollector {
+
     private final DataSource shard;
+
     private final String shardId;
+
     private final int stripes;
+
     private final MysqlVectorSnapshotLeaseStore protection;
+
     private volatile String expectedIdentity;
 
-    /** 跨片映射绑定原保留序号、中心决议及真实版本载荷。 */
-    private record CrossMapping(long txId, long sequence, long commitTs,
-                                boolean deleted, byte[] payload) {
-    }
-
-    /** 标量和跨片数据行的持久身份用于识别无向量映射的旧协议记录。 */
-    private record DataIdentity(long txId, long commitTs) {
-    }
-
-    /** 只接受已配置读者保护的同一分片布局。 */
-    MysqlVectorLocalGarbageCollector(DataSource shard, String shardId, int stripes,
-                                     MysqlVectorSnapshotLeaseStore protection) {
+    /**
+     * Accepts only the same shard layout that has been configured for reader protection.
+     *
+     * @param shard logical shard identifier
+     * @param shardId logical shard identifier
+     * @param stripes stripes
+     * @param protection protection
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    MysqlVectorLocalGarbageCollector(final DataSource shard, final String shardId, final int stripes,
+                                     final MysqlVectorSnapshotLeaseStore protection) {
         this.shard = Objects.requireNonNull(shard, "shard");
         this.shardId = Objects.requireNonNull(shardId, "shardId");
         this.protection = Objects.requireNonNull(protection, "protection");
@@ -44,22 +66,38 @@ final class MysqlVectorLocalGarbageCollector {
         this.stripes = stripes;
     }
 
-    /** 调度器只读此数据源身份以确认后台池没有指错物理分片。 */
+    /**
+     * Scheduler read-only This data source identity confirms that the background pool did not misdirect physical shard.
+     *
+     * @return the operation result
+     */
     DataSource dataSource() {
         return shard;
     }
 
-    /** 本地 GC 的分片编号必须等于发布者路由编号。 */
+    /**
+     * The local GC shard number shall be equal to the issuer 's route number.
+     *
+     * @return the operation result
+     */
     String shardId() {
         return shardId;
     }
 
-    /** 分条布局必须与发布者和中心读者租约相同。 */
+    /**
+     * The partition must be the same as the publisher and centre reader lease.
+     *
+     * @return the operation result
+     */
     int stripeCount() {
         return stripes;
     }
 
-    /** 持久游标只补缺失单例，重启不能清空已回收进度。 */
+    /**
+     * Durable cursor fills only a single case of missing items, restarting cannot empty the collection progress.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     void initializeProduct() {
         try (Connection connection = shard.getConnection(); Statement sql = connection.createStatement()) {
             String identity = MysqlVectorDatabaseIdentity.read(connection);
@@ -86,13 +124,19 @@ final class MysqlVectorLocalGarbageCollector {
                 }
             }
             expectedIdentity = identity;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("initialize vector local GC failed", ex);
         }
     }
 
-    /** 从中心持久安全向量取界限，再在分片键锁下有界删除更早本地版本。 */
-    int collect(int limit) {
+    /**
+     * Take the limit from the center durable security vector, then lock the shard key and remove the bounded earlier local version.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    int collect(final int limit) {
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("vector local GC limit must be in 1..4096");
         }
@@ -138,14 +182,21 @@ final class MysqlVectorLocalGarbageCollector {
                 }
                 return reclaimed;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("collect vector local versions failed", ex);
         }
     }
 
-    /** 按二进制主键顺序从上轮持久游标读取有限候选。 */
-    private static List<byte[]> keysAfter(Connection connection, byte[] after, int limit)
-            throws SQLException {
+    /**
+     * Reads a limited candidate from the upper wheel durable cursor in binary main key order.
+     *
+     * @param connection connection
+     * @param after after
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static List<byte[]> keysAfter(final Connection connection, final byte[] after, final int limit) throws SQLException {
         String sql = after == null ? """
                 select distinct user_key from mvcc_vector_local_data_v1
                 order by user_key limit ?
@@ -169,10 +220,19 @@ final class MysqlVectorLocalGarbageCollector {
         }
     }
 
-    /** 同键稳定锁先于版本和意向检查，避免 GC 越过正在提交的本地或跨片写。 */
-    private int collectKey(Connection connection, byte[] key,
-                           MysqlStripedSnapshotOracle.Snapshot floor,
-                           int budget) throws SQLException {
+    /**
+     * The same key stabilizer lock pre-checks version and intent to avoid GC crossing local or cross-shard writing in commit.
+     *
+     * @param connection connection
+     * @param key business key
+     * @param floor floor
+     * @param budget budget
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private int collectKey(final Connection connection, final byte[] key,
+                           final MysqlStripedSnapshotOracle.Snapshot floor,
+                           final int budget) throws SQLException {
         try (PreparedStatement lock = connection.prepareStatement("""
                 insert into mvcc_key_lock(user_key) values (?)
                 on duplicate key update user_key = user_key
@@ -254,9 +314,15 @@ final class MysqlVectorLocalGarbageCollector {
         }
     }
 
-    /** 旧标量版本没有向量排序身份时保留整键历史，不能按本地序号推断它。 */
-    private static boolean hasUnmappedScalarData(Connection connection, byte[] key)
-            throws SQLException {
+    /**
+     * The old cursor version retains the whole key history when there is no vector sorting identity and cannot be extrapolated by an local serial number.
+     *
+     * @param connection connection
+     * @param key business key
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static boolean hasUnmappedScalarData(final Connection connection, final byte[] key) throws SQLException {
         List<DataIdentity> data = new ArrayList<>();
         try (PreparedStatement query = connection.prepareStatement("""
                 select tx_id, commit_ts from mvcc_data
@@ -288,10 +354,20 @@ final class MysqlVectorLocalGarbageCollector {
         return false;
     }
 
-    /** 决议时间已进入安全切面的跨片版本可作为本地旧行的稳定可见前驱。 */
-    private static Long visibleCrossPredecessor(Connection connection, byte[] key,
-                                                int stripe, long sequenceBound,
-                                                long decisionBound) throws SQLException {
+    /**
+     * Decision cross-shard version timed to enter a secure cut-off can be used as a stable front for the old line local.
+     *
+     * @param connection connection
+     * @param key business key
+     * @param stripe stripe
+     * @param sequenceBound sequence bound
+     * @param decisionBound decision bound
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static Long visibleCrossPredecessor(final Connection connection, final byte[] key,
+                                                final int stripe, final long sequenceBound,
+                                                final long decisionBound) throws SQLException {
         List<CrossMapping> mappings = new ArrayList<>();
         try (PreparedStatement query = connection.prepareStatement("""
                 select tx_id, stripe_id, reserved_seq, commit_ts, deleted, payload
@@ -333,8 +409,16 @@ final class MysqlVectorLocalGarbageCollector {
         return predecessor;
     }
 
-    /** 未决意向与回滚证明尚不能由已发布下界安全回收。 */
-    private static boolean hasKey(Connection connection, String table, byte[] key) throws SQLException {
+    /**
+     * Pending intent and rollback certificates are not yet safe from the released lower bounds collection.
+     *
+     * @param connection connection
+     * @param table table
+     * @param key business key
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static boolean hasKey(final Connection connection, final String table, final byte[] key) throws SQLException {
         String sql = "select 1 from " + table + " where user_key = ? limit 1 for update";
         try (PreparedStatement query = connection.prepareStatement(sql)) {
             query.setBytes(1, key);
@@ -344,13 +428,46 @@ final class MysqlVectorLocalGarbageCollector {
         }
     }
 
-    /** 发现跨分条身份破坏时停止 GC，而不是猜测应保留哪条版本链。 */
-    private static MvccException illegal(String message) {
+    /**
+     * Stop GC when cross-section identity damage is discovered, instead of speculating which version chain should be retained.
+     *
+     * @param message message
+     * @return the operation result
+     */
+    private static MvccException illegal(final String message) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, null);
     }
 
-    /** 控制或分片数据库不可用时禁止按猜测下界继续回收。 */
-    private static MvccException unavailable(String message, SQLException cause) {
+    /**
+     * Controls or shard database do not allow the continuation of collection as assumed when it is not available.
+     *
+     * @param message message
+     * @param cause cause
+     * @return the operation result
+     */
+    private static MvccException unavailable(final String message, final SQLException cause) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, null, cause);
+    }
+
+    /**
+     * Cross-shard Maps original retention number, centre decision and real version payload.
+     *
+     * @param txId transaction identifier
+     * @param sequence sequence
+     * @param commitTs durable commit timestamp
+     * @param deleted deleted
+     * @param payload payload
+     */
+    private record CrossMapping(long txId, long sequence, long commitTs,
+            boolean deleted, byte[] payload) {
+    }
+
+    /**
+     * Durable identity of the cursor and cross-shard data row is used to identify old protocol records without vector mapping.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     */
+    private record DataIdentity(long txId, long commitTs) {
     }
 }

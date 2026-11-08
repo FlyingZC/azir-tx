@@ -1,24 +1,46 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.tso;
 
 import java.util.Objects;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * 带调用计数的时间戳分配器包装器。
+ * A timestamp dispenser wrapper with a call count.
  */
 public final class CountingTimestampOracle implements TimestampOracle {
+
     private final TimestampOracle delegate;
+
     private final LongAdder invocationCount = new LongAdder();
 
     /**
-     * 构造 CountingTimestampOracle 实例。
+     * Construct a CountingTimestampOracle instance.
+     *
+     * @param delegate delegate
      */
-    public CountingTimestampOracle(TimestampOracle delegate) {
+    public CountingTimestampOracle(final TimestampOracle delegate) {
         this.delegate = Objects.requireNonNull(delegate, "delegate");
     }
 
     /**
-     * 分配下一个全局单调递增时间戳。
+     * Allocate the next globally increasing timestamp.
+     *
+     * @return the operation result
      */
     @Override
     public long nextTimestamp() {
@@ -27,7 +49,9 @@ public final class CountingTimestampOracle implements TimestampOracle {
     }
 
     /**
-     * 返回底层时间戳分配器调用次数。
+     * Returns the number of calls from the bottom timestamp distributor.
+     *
+     * @return the operation result
      */
     public long invocationCount() {
         return invocationCount.sum();

@@ -1,4 +1,26 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import org.junit.jupiter.api.Assertions;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -18,23 +40,40 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import static com.flyingzc.azir.wal.WalMvccRuntimeTest.*;
-import static org.junit.jupiter.api.Assertions.*;
 
-/** 用两个独立 MySQL 实例验证新模式，不接触已有环境和旧模式协议表。 */
+/**
+ * Use two stand-alone MySQL examples verify new models, without contact with the existing environment and old mode protocol table.
+ */
 @Testcontainers
 class WalMysqlIntegrationTest {
-    @Container static final MySQLContainer<?> A = container();
-    @Container static final MySQLContainer<?> B = container();
-    @TempDir Path directory;
+
+    @Container
+    static final MySQLContainer<?> A = container();
+
+    @Container
+    static final MySQLContainer<?> B = container();
+
+    @TempDir
+    Path directory;
+
     private HikariDataSource a;
+
     private HikariDataSource b;
 
-    /** 普通回归各执行一次，正式验收显式指定真实后端重复次数。 */
+    /**
+     * The normal return is carried out once each time, with a formal acceptance pattern specifying the number of real backend repeats.
+     *
+     * @return the operation result
+     */
     static java.util.stream.IntStream repetitions() {
         return java.util.stream.IntStream.range(0, Integer.getInteger("azir.wal.mysqlRepeats", 1));
     }
 
-    /** 创建强刷盘配置的隔离数据库容器。 */
+    /**
+     * Creates an isolated database container with a strong brush configuration.
+     *
+     * @return the operation result
+     */
     private static MySQLContainer<?> container() {
         return new MySQLContainer<>("mysql:8.4").withDatabaseName("wal_mvp")
                 .withUsername("wal_test").withPassword("wal_test")
@@ -43,9 +82,15 @@ class WalMysqlIntegrationTest {
                 .withCommand("--innodb-flush-log-at-trx-commit=1", "--sync-binlog=1");
     }
 
-    /** 为每个用例清理专属空表并创建有界连接池。 */
-    @BeforeEach void prepare() throws Exception {
-        a = pool(A); b = pool(B);
+    /**
+     * Clears an exclusive empty table and creates bounded connection pool for each example.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @BeforeEach
+    void prepare() throws Exception {
+        a = pool(A);
+        b = pool(B);
         for (var dataSource : List.of(a, b)) {
             try (var connection = dataSource.getConnection(); var statement = connection.createStatement()) {
                 statement.executeUpdate("drop table if exists azir_wal_version");
@@ -54,20 +99,45 @@ class WalMysqlIntegrationTest {
         }
     }
 
-    /** 仅关闭本用例创建的连接池。 */
-    @AfterEach void cleanup() { if (a != null) { a.close(); } if (b != null) { b.close(); } }
+    /**
+     * Only close connection pool created by this example.
+     */
+    @AfterEach
+    void cleanup() {
+        if (a != null) {
+            a.close();
+        }
+        if (b != null) {
+            b.close();
+        }
+    }
 
-    /** 配置短 JDBC 超时，避免后端故障阻塞关闭和资源回收。 */
-    private static HikariDataSource pool(MySQLContainer<?> container) {
+    /**
+     * Configure short JDBC timeout to avoid backend failure blocking off and resource collection.
+     *
+     * @param container container
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final MySQLContainer<?> container) {
         return pool(container, 0);
     }
 
-    /** 用较小客户端单包限制验证物化按字节拆批。 */
-    private static HikariDataSource pool(MySQLContainer<?> container, int packetLimit) {
+    /**
+     * Limit verify materialization bytes to a smaller client package.
+     *
+     * @param container container
+     * @param packetLimit packet limit
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final MySQLContainer<?> container, final int packetLimit) {
         var config = new HikariConfig();
-        config.setJdbcUrl(container.getJdbcUrl()); config.setUsername(container.getUsername()); config.setPassword(container.getPassword());
-        config.setMaximumPoolSize(4); config.setMinimumIdle(0);
-        config.setConnectionTimeout(2500); config.setValidationTimeout(1000);
+        config.setJdbcUrl(container.getJdbcUrl());
+        config.setUsername(container.getUsername());
+        config.setPassword(container.getPassword());
+        config.setMaximumPoolSize(4);
+        config.setMinimumIdle(0);
+        config.setConnectionTimeout(2500);
+        config.setValidationTimeout(1000);
         if (packetLimit > 0) {
             config.addDataSourceProperty("maxAllowedPacket", Integer.toString(packetLimit));
             config.addDataSourceProperty("useServerPrepStmts", "true");
@@ -75,28 +145,48 @@ class WalMysqlIntegrationTest {
         return new HikariDataSource(config);
     }
 
-    /** 合批总大小超过单包上限时仍在同一数据库事务中完整物化。 */
-    @ParameterizedTest @MethodSource("repetitions") void largeMaterializationBatchIsSplitByPacketBudget(int repetition) throws Exception {
+    /**
+     * Complete materialization in the same database transaction when the total size of the batch exceeds the maximum per package.
+     *
+     * @param repetition repetition
+     * @throws Exception if the operation cannot complete
+     */
+    @ParameterizedTest
+    @MethodSource("repetitions")
+    void largeMaterializationBatchIsSplitByPacketBudget(final int repetition) throws Exception {
         try (var smallPackets = pool(A, 65_536)) {
             var store = new MysqlWalMaterializedStore(smallPackets);
             try (var runtime = WalMvccRuntime.open(directory, Map.of("a", store), WalOptions.defaults())) {
-            var tx = runtime.begin(IsolationLevel.REPEATABLE_READ);
-            byte[] payload = new byte[1024]; java.util.Arrays.fill(payload, (byte) 7);
-            for (int i = 0; i < 300; i++) { runtime.put(tx, "a", "packet:" + i, payload); }
-            runtime.commit(tx); drain(runtime);
-            assertEquals(300, count(a));
-            var persisted = store.scan(null, null, 1);
-            assertEquals(300, persisted.size());
-            for (int i = 0; i < 300; i++) { assertArrayEquals(payload, persisted.get("packet:" + i).value()); }
-            var reader = runtime.begin(IsolationLevel.REPEATABLE_READ);
-            assertArrayEquals(payload, runtime.get(reader, "a", "packet:299").orElseThrow());
-            runtime.rollback(reader);
+                var tx = runtime.begin(IsolationLevel.REPEATABLE_READ);
+                byte[] payload = new byte[1024];
+                java.util.Arrays.fill(payload, (byte) 7);
+                for (int i = 0; i < 300; i++) {
+                    runtime.put(tx, "a", "packet:" + i, payload);
+                }
+                runtime.commit(tx);
+                drain(runtime);
+                Assertions.assertEquals(300, count(a));
+                var persisted = store.scan(null, null, 1);
+                Assertions.assertEquals(300, persisted.size());
+                for (int i = 0; i < 300; i++) {
+                    assertArrayEquals(payload, persisted.get("packet:" + i).value());
+                }
+                var reader = runtime.begin(IsolationLevel.REPEATABLE_READ);
+                assertArrayEquals(payload, runtime.get(reader, "a", "packet:299").orElseThrow());
+                runtime.rollback(reader);
             }
         }
     }
 
-    /** 拆批后第二个 SQL 批次失败必须回滚前一批，检查点也不能推进。 */
-    @ParameterizedTest @MethodSource("repetitions") void secondPacketChunkFailureRollsBackAllChunksAndCheckpoint(int repetition) throws Exception {
+    /**
+     * The second SQL batch failed after the batch had to be in front of the rollback and the checkpoint could not advance.
+     *
+     * @param repetition repetition
+     * @throws Exception if the operation cannot complete
+     */
+    @ParameterizedTest
+    @MethodSource("repetitions")
+    void secondPacketChunkFailureRollsBackAllChunksAndCheckpoint(final int repetition) throws Exception {
         try (var smallPackets = pool(A, 65_536)) {
             var calls = new java.util.concurrent.atomic.AtomicInteger();
             var armed = new java.util.concurrent.atomic.AtomicBoolean(true);
@@ -124,205 +214,379 @@ class WalMysqlIntegrationTest {
                         }
                         return result;
                     });
-            var store = new MysqlWalMaterializedStore(failing); store.initialize(UUID.randomUUID(), "a");
+            var store = new MysqlWalMaterializedStore(failing);
+            store.initialize(UUID.randomUUID(), "a");
             var mutations = new java.util.ArrayList<WalMutation>();
-            for (int i = 0; i < 300; i++) { mutations.add(new WalMutation("a", "chunk:" + i, new byte[1024])); }
+            for (int i = 0; i < 300; i++) {
+                mutations.add(new WalMutation("a", "chunk:" + i, new byte[1024]));
+            }
             var commit = new WalCommit(UUID.randomUUID(), 1, 0, mutations);
             assertThrows(WalMvccException.class, () -> store.apply(List.of(commit)));
-            assertEquals(0, count(a)); assertEquals(0, store.checkpoint().sequence());
-            armed.set(false); assertEquals(1, store.apply(List.of(commit)).sequence()); assertEquals(300, count(a));
+            Assertions.assertEquals(0, count(a));
+            Assertions.assertEquals(0, store.checkpoint().sequence());
+            armed.set(false);
+            Assertions.assertEquals(1, store.apply(List.of(commit)).sequence());
+            Assertions.assertEquals(300, count(a));
         }
     }
 
-    /** 反射代理保留原始 JDBC 异常，避免把注入失败包成反射包装异常。 */
-    private static Object delegated(Object target, java.lang.reflect.Method method, Object[] args) throws Throwable {
-        try { return method.invoke(target, args); }
-        catch (java.lang.reflect.InvocationTargetException failure) { throw failure.getCause(); }
+    /**
+     * The reflect agent retains the original JDBC anomaly and avoids wrapping the injection failure into a reflection package anomaly.
+     *
+     * @param target target
+     * @param method method
+     * @param args args
+     * @return the operation result
+     * @throws Throwable if the operation cannot complete
+     */
+    private static Object delegated(final Object target, final java.lang.reflect.Method method, final Object[] args) throws Throwable {
+        try {
+            return method.invoke(target, args);
+        } catch (final java.lang.reflect.InvocationTargetException failure) {
+            throw failure.getCause();
+        }
     }
 
-    /** 单行超过后端可物化预算时必须在持久提交之前拒绝。 */
-    @ParameterizedTest @MethodSource("repetitions") void oversizedRowIsRejectedBeforeWalConfirmation(int repetition) throws Exception {
-        try (var smallPackets = pool(A, 65_536);
-             var runtime = WalMvccRuntime.open(directory, Map.of("a", new MysqlWalMaterializedStore(smallPackets)), WalOptions.defaults())) {
+    /**
+     * A single line exceeding the backend materialization budget must be refused before durable commit.
+     *
+     * @param repetition repetition
+     * @throws Exception if the operation cannot complete
+     */
+    @ParameterizedTest
+    @MethodSource("repetitions")
+    void oversizedRowIsRejectedBeforeWalConfirmation(final int repetition) throws Exception {
+        try (
+                var smallPackets = pool(A, 65_536);
+                var runtime = WalMvccRuntime.open(directory, Map.of("a", new MysqlWalMaterializedStore(smallPackets)), WalOptions.defaults())) {
             var tx = runtime.begin(IsolationLevel.REPEATABLE_READ);
-            assertEquals(com.flyingzc.azir.common.ErrorCode.RESOURCE_EXHAUSTED, assertThrows(WalMvccException.class,
+            Assertions.assertEquals(com.flyingzc.azir.common.ErrorCode.RESOURCE_EXHAUSTED, assertThrows(WalMvccException.class,
                     () -> runtime.put(tx, "a", "too-large", new byte[40_000])).errorCode());
-            assertEquals(0, runtime.stats().publishedSequence()); assertEquals(60, runtime.stats().walBytes());
-            assertEquals(0, runtime.stats().bufferedBytes()); runtime.rollback(tx);
+            Assertions.assertEquals(0, runtime.stats().publishedSequence());
+            Assertions.assertEquals(60, runtime.stats().walBytes());
+            Assertions.assertEquals(0, runtime.stats().bufferedBytes());
+            runtime.rollback(tx);
         }
     }
 
-    /** 一片只物化旧值、另一片已物化新值时，全局快照仍保持完整。 */
-    @ParameterizedTest @MethodSource("repetitions") void partialFlushOldRrGcAndRestartRemainConsistent(int repetition) throws Exception {
+    /**
+     * Global snapshot remains complete when one materialization old value and another materialization new value.
+     *
+     * @param repetition repetition
+     * @throws Exception if the operation cannot complete
+     */
+    @ParameterizedTest
+    @MethodSource("repetitions")
+    void partialFlushOldRrGcAndRestartRemainConsistent(final int repetition) throws Exception {
         var left = new MysqlWalMaterializedStore(a);
         var right = new ControlledStore(new MysqlWalMaterializedStore(b));
         UUID committedId;
         try (var runtime = WalMvccRuntime.open(directory, Map.of("a", left, "b", right), WalOptions.defaults())) {
             var seed = runtime.begin(IsolationLevel.REPEATABLE_READ);
-            runtime.put(seed, "a", "balance", bytes("100")); runtime.put(seed, "b", "balance", bytes("100"));
-            runtime.commit(seed); drain(runtime);
+            runtime.put(seed, "a", "balance", bytes("100"));
+            runtime.put(seed, "b", "balance", bytes("100"));
+            runtime.commit(seed);
+            drain(runtime);
             var old = runtime.begin(IsolationLevel.REPEATABLE_READ);
             right.paused = true;
             var transfer = runtime.begin(IsolationLevel.REPEATABLE_READ);
             committedId = transfer.id();
-            runtime.put(transfer, "a", "balance", bytes("90")); runtime.put(transfer, "b", "balance", bytes("110"));
+            runtime.put(transfer, "a", "balance", bytes("90"));
+            runtime.put(transfer, "b", "balance", bytes("110"));
             runtime.commit(transfer);
             assertThrows(WalMvccException.class, runtime::flush);
-            assertEquals("90", text(left.get("balance", 2).orElseThrow().value()));
-            assertEquals("100", text(right.delegate.get("balance", 2).orElseThrow().value()));
-            assertEquals("100", text(runtime.get(old, "a", "balance").orElseThrow()));
-            assertEquals("100", text(runtime.get(old, "b", "balance").orElseThrow()));
+            Assertions.assertEquals("90", text(left.get("balance", 2).orElseThrow().value()));
+            Assertions.assertEquals("100", text(right.delegate.get("balance", 2).orElseThrow().value()));
+            Assertions.assertEquals("100", text(runtime.get(old, "a", "balance").orElseThrow()));
+            Assertions.assertEquals("100", text(runtime.get(old, "b", "balance").orElseThrow()));
             var fresh = runtime.begin(IsolationLevel.READ_COMMITTED);
             var snapshot = runtime.beginReadStatement(fresh);
-            assertEquals("90", text(runtime.get(fresh, "a", "balance", snapshot).orElseThrow()));
-            assertEquals("110", text(runtime.get(fresh, "b", "balance", snapshot).orElseThrow()));
-            right.paused = false; drain(runtime);
+            Assertions.assertEquals("90", text(runtime.get(fresh, "a", "balance", snapshot).orElseThrow()));
+            Assertions.assertEquals("110", text(runtime.get(fresh, "b", "balance", snapshot).orElseThrow()));
+            right.paused = false;
+            drain(runtime);
             runtime.collectGarbage(100);
-            assertEquals("100", text(runtime.get(old, "b", "balance").orElseThrow()));
-            runtime.rollback(old); runtime.rollback(fresh);
-            assertEquals(2, runtime.collectGarbage(100));
-            assertEquals(1, count(a)); assertEquals(1, count(b));
+            Assertions.assertEquals("100", text(runtime.get(old, "b", "balance").orElseThrow()));
+            runtime.rollback(old);
+            runtime.rollback(fresh);
+            Assertions.assertEquals(2, runtime.collectGarbage(100));
+            Assertions.assertEquals(1, count(a));
+            Assertions.assertEquals(1, count(b));
         }
-        try (var recovered = WalMvccRuntime.open(directory,
-                Map.of("a", new MysqlWalMaterializedStore(a), "b", new MysqlWalMaterializedStore(b)), WalOptions.defaults())) {
+        try (
+                var recovered = WalMvccRuntime.open(directory,
+                        Map.of("a", new MysqlWalMaterializedStore(a), "b", new MysqlWalMaterializedStore(b)), WalOptions.defaults())) {
             var tx = recovered.begin(IsolationLevel.REPEATABLE_READ);
-            assertEquals("90", text(recovered.get(tx, "a", "balance").orElseThrow()));
-            assertEquals("110", text(recovered.get(tx, "b", "balance").orElseThrow()));
-            assertEquals(2, recovered.findCommitted(committedId).orElseThrow().commitSequence());
+            Assertions.assertEquals("90", text(recovered.get(tx, "a", "balance").orElseThrow()));
+            Assertions.assertEquals("110", text(recovered.get(tx, "b", "balance").orElseThrow()));
+            Assertions.assertEquals(2, recovered.findCommitted(committedId).orElseThrow().commitSequence());
             recovered.rollback(tx);
         }
         try (var connection = a.getConnection(); var query = connection.createStatement(); var tables = query.executeQuery("show tables")) {
             var names = new java.util.HashSet<String>();
-            while (tables.next()) { names.add(tables.getString(1)); }
-            assertEquals(java.util.Set.of("azir_wal_binding", "azir_wal_version"), names);
+            while (tables.next()) {
+                names.add(tables.getString(1));
+            }
+            Assertions.assertEquals(java.util.Set.of("azir_wal_binding", "azir_wal_version"), names);
         }
     }
 
-    /** 数据库提交成功而响应丢失后的重放不能重复写，也不能接受冲突日志。 */
-    @ParameterizedTest @MethodSource("repetitions") void committedDatabaseBatchCanBeReplayedAfterLostResponse(int repetition) throws Exception {
+    /**
+     * Database commit successfully responding to lost replay cannot duplicate or accept conflict logs.
+     *
+     * @param repetition repetition
+     * @throws Exception if the operation cannot complete
+     */
+    @ParameterizedTest
+    @MethodSource("repetitions")
+    void committedDatabaseBatchCanBeReplayedAfterLostResponse(final int repetition) throws Exception {
         var store = new MysqlWalMaterializedStore(a);
         store.initialize(UUID.randomUUID(), "a");
         var commit = new WalCommit(UUID.randomUUID(), 1, 0, List.of(new WalMutation("a", "k", bytes("v"))));
-        assertEquals(1, store.apply(List.of(commit)).sequence());
-        // 调用方忽略第一次返回，按未知结果重新发送完全相同的批次。
-        assertEquals(1, store.apply(List.of(commit)).sequence());
-        assertEquals(1, count(a));
+        Assertions.assertEquals(1, store.apply(List.of(commit)).sequence());
+        // The caller ignores the first return and retransmits exactly the same batch as the unknown result.
+        Assertions.assertEquals(1, store.apply(List.of(commit)).sequence());
+        Assertions.assertEquals(1, count(a));
         var conflicting = new WalCommit(UUID.randomUUID(), 1, 0, List.of(new WalMutation("a", "k", bytes("wrong"))));
         assertThrows(WalMvccException.class, () -> store.apply(List.of(conflicting)));
         var gap = new WalCommit(UUID.randomUUID(), 3, 1, List.of(new WalMutation("a", "k", bytes("gap"))));
         assertThrows(WalMvccException.class, () -> store.apply(List.of(gap)));
-        assertEquals("v", text(store.get("k", 3).orElseThrow().value()));
+        Assertions.assertEquals("v", text(store.get("k", 3).orElseThrow().value()));
     }
 
-    /** 墓碑和重建在回收及重启后不会复活已删除数据。 */
-    @ParameterizedTest @MethodSource("repetitions") void tombstoneHistorySurvivesGcAndRecovery(int repetition) throws Exception {
+    /**
+     * Tombstone and reconstruction will not revive deleted data after collection and restart.
+     *
+     * @param repetition repetition
+     * @throws Exception if the operation cannot complete
+     */
+    @ParameterizedTest
+    @MethodSource("repetitions")
+    void tombstoneHistorySurvivesGcAndRecovery(final int repetition) throws Exception {
         try (var runtime = WalMvccRuntime.open(directory, Map.of("a", new MysqlWalMaterializedStore(a)), WalOptions.defaults())) {
-            write(runtime, "a", "k", "old"); drain(runtime);
+            write(runtime, "a", "k", "old");
+            drain(runtime);
             var old = runtime.begin(IsolationLevel.REPEATABLE_READ);
-            var deletion = runtime.begin(IsolationLevel.REPEATABLE_READ); runtime.delete(deletion, "a", "k"); runtime.commit(deletion);
+            var deletion = runtime.begin(IsolationLevel.REPEATABLE_READ);
+            runtime.delete(deletion, "a", "k");
+            runtime.commit(deletion);
             write(runtime, "a", "k", "new");
-            var finalDelete = runtime.begin(IsolationLevel.REPEATABLE_READ); runtime.delete(finalDelete, "a", "k"); runtime.commit(finalDelete);
-            drain(runtime); runtime.collectGarbage(100);
-            assertEquals("old", text(runtime.get(old, "a", "k").orElseThrow()));
-            assertEquals(List.of("k"), new java.util.ArrayList<>(runtime.scan(old, "a", null, null).keySet()));
-            runtime.rollback(old); assertEquals(4, runtime.collectGarbage(100));
+            var finalDelete = runtime.begin(IsolationLevel.REPEATABLE_READ);
+            runtime.delete(finalDelete, "a", "k");
+            runtime.commit(finalDelete);
+            drain(runtime);
+            runtime.collectGarbage(100);
+            Assertions.assertEquals("old", text(runtime.get(old, "a", "k").orElseThrow()));
+            Assertions.assertEquals(List.of("k"), new java.util.ArrayList<>(runtime.scan(old, "a", null, null).keySet()));
+            runtime.rollback(old);
+            Assertions.assertEquals(4, runtime.collectGarbage(100));
         }
         try (var recovered = WalMvccRuntime.open(directory, Map.of("a", new MysqlWalMaterializedStore(a)), WalOptions.defaults())) {
             var tx = recovered.begin(IsolationLevel.READ_COMMITTED);
             assertTrue(recovered.get(tx, "a", "k").isEmpty());
             assertTrue(recovered.scan(tx, "a", null, null).isEmpty());
         }
-        assertEquals(0, count(a));
+        Assertions.assertEquals(0, count(a));
     }
 
-    /** 新日志身份和落后日志都不得接管已物化的存储。 */
-    @ParameterizedTest @MethodSource("repetitions") void bindingAndAheadCheckpointRejectUnsafeStartup(int repetition) throws Exception {
+    /**
+     * Neither the new log identity nor the backward log can take over the stored materialization.
+     *
+     * @param repetition repetition
+     * @throws Exception if the operation cannot complete
+     */
+    @ParameterizedTest
+    @MethodSource("repetitions")
+    void bindingAndAheadCheckpointRejectUnsafeStartup(final int repetition) throws Exception {
         byte[] oldLog;
         try (var runtime = WalMvccRuntime.open(directory, Map.of("a", new MysqlWalMaterializedStore(a)), WalOptions.defaults())) {
-            write(runtime, "a", "k", "one"); drain(runtime);
+            write(runtime, "a", "k", "one");
+            drain(runtime);
             oldLog = Files.readAllBytes(directory.resolve("transactions.wal"));
-            write(runtime, "a", "k", "two"); drain(runtime);
+            write(runtime, "a", "k", "two");
+            drain(runtime);
         }
         assertThrows(WalMvccException.class, () -> WalMvccRuntime.open(directory.resolve("foreign"),
                 Map.of("a", new MysqlWalMaterializedStore(a)), WalOptions.defaults()));
         Files.write(directory.resolve("transactions.wal"), oldLog);
         assertThrows(WalMvccException.class, () -> WalMvccRuntime.open(directory,
                 Map.of("a", new MysqlWalMaterializedStore(a)), WalOptions.defaults()));
-        assertEquals(2, count(a));
+        Assertions.assertEquals(2, count(a));
     }
 
-    /** 暂停一个真实 MySQL 进程，前台 WAL 提交与新版本读取仍能完成。 */
-    @ParameterizedTest @MethodSource("repetitions") void pausedMysqlDoesNotEnterTheCommitCriticalPath(int repetition) throws Exception {
-        try (var runtime = WalMvccRuntime.open(directory,
-                Map.of("a", new MysqlWalMaterializedStore(a), "b", new MysqlWalMaterializedStore(b)), WalOptions.defaults())) {
+    /**
+     * Pauses a real MySQL process, foreground WAL commit and new version reading still complete.
+     *
+     * @param repetition repetition
+     * @throws Exception if the operation cannot complete
+     */
+    @ParameterizedTest
+    @MethodSource("repetitions")
+    void pausedMysqlDoesNotEnterTheCommitCriticalPath(final int repetition) throws Exception {
+        try (
+                var runtime = WalMvccRuntime.open(directory,
+                        Map.of("a", new MysqlWalMaterializedStore(a), "b", new MysqlWalMaterializedStore(b)), WalOptions.defaults())) {
             var seed = runtime.begin(IsolationLevel.REPEATABLE_READ);
-            runtime.put(seed, "a", "k", bytes("old-left")); runtime.put(seed, "b", "k", bytes("old-right"));
-            runtime.commit(seed); drain(runtime);
+            runtime.put(seed, "a", "k", bytes("old-left"));
+            runtime.put(seed, "b", "k", bytes("old-right"));
+            runtime.commit(seed);
+            drain(runtime);
             B.getDockerClient().pauseContainerCmd(B.getContainerId()).exec();
             try {
-                // 已物化的最新头仍在缓存中，不能因数据库暂停退化为必需的同步数据库读取。
+                // The latest head of materialization is still in the cache and cannot be read as synchronous database as necessary by suspending degradation from database.
                 var cached = runtime.begin(IsolationLevel.READ_COMMITTED);
-                assertEquals("old-right", text(runtime.get(cached, "b", "k").orElseThrow()));
+                Assertions.assertEquals("old-right", text(runtime.get(cached, "b", "k").orElseThrow()));
                 runtime.rollback(cached);
                 long start = System.nanoTime();
                 var tx = runtime.begin(IsolationLevel.REPEATABLE_READ);
-                runtime.put(tx, "a", "k", bytes("left")); runtime.put(tx, "b", "k", bytes("right"));
+                runtime.put(tx, "a", "k", bytes("left"));
+                runtime.put(tx, "b", "k", bytes("right"));
                 runtime.commit(tx);
                 assertTrue(System.nanoTime() - start < TimeUnit.SECONDS.toNanos(5));
                 var reader = runtime.begin(IsolationLevel.READ_COMMITTED);
-                assertEquals("left", text(runtime.get(reader, "a", "k").orElseThrow()));
-                assertEquals("right", text(runtime.get(reader, "b", "k").orElseThrow()));
+                Assertions.assertEquals("left", text(runtime.get(reader, "a", "k").orElseThrow()));
+                Assertions.assertEquals("right", text(runtime.get(reader, "b", "k").orElseThrow()));
                 runtime.rollback(reader);
                 assertThrows(WalMvccException.class, runtime::flush);
-            } finally { B.getDockerClient().unpauseContainerCmd(B.getContainerId()).exec(); }
+            } finally {
+                B.getDockerClient().unpauseContainerCmd(B.getContainerId()).exec();
+            }
             drain(runtime);
-            assertEquals(2, count(a)); assertEquals(2, count(b));
+            Assertions.assertEquals(2, count(a));
+            Assertions.assertEquals(2, count(b));
         }
     }
 
-    /** 等待有限日志批次全部物化，同时允许故障恢复后的连接池重建。 */
-    private static void drain(WalMvccRuntime runtime) throws Exception {
+    /**
+     * Waiting for a limited log batch all materialization while allowing connection pool to be rebuilt after failure recovery.
+     *
+     * @param runtime runtime
+     * @throws Exception if the operation cannot complete
+     */
+    private static void drain(final WalMvccRuntime runtime) throws Exception {
         long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
         do {
-            try { runtime.flush(); } catch (WalMvccException transientFailure) {
-                if (System.nanoTime() > until) { throw transientFailure; }
+            try {
+                runtime.flush();
+            } catch (final WalMvccException transientFailure) {
+                if (System.nanoTime() > until) {
+                    throw transientFailure;
+                }
             }
             var stats = runtime.stats();
-            if (stats.materializedSequences().values().stream().allMatch(sequence -> sequence == stats.publishedSequence())) { return; }
+            if (stats.materializedSequences().values().stream().allMatch(sequence -> sequence == stats.publishedSequence())) {
+                return;
+            }
             Thread.sleep(10);
         } while (System.nanoTime() <= until);
         fail("materialization did not catch up");
     }
 
-    /** 读取专属版本表行数，用于证明重放和回收没有重复或丢失。 */
-    private static long count(HikariDataSource dataSource) throws Exception {
-        try (var connection = dataSource.getConnection(); var query = connection.createStatement();
-             var rows = query.executeQuery("select count(*) from azir_wal_version")) { rows.next(); return rows.getLong(1); }
+    /**
+     * Reads the exclusive version Table Line Number to prove that replay and collection are not duplicated or lost.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     */
+    private static long count(final HikariDataSource dataSource) throws Exception {
+        try (
+                var connection = dataSource.getConnection(); var query = connection.createStatement();
+                var rows = query.executeQuery("select count(*) from azir_wal_version")) {
+            rows.next();
+            return rows.getLong(1);
+        }
     }
 
-    /** 可暂停一片物化的测试包装，不改变真实 MySQL 读写实现。 */
+    /**
+     * You can suspend a test package of materialization without changing the real MySQL reading and writing.
+     */
     private static final class ControlledStore implements WalMaterializedStore {
+
         final WalMaterializedStore delegate;
+
         volatile boolean paused;
 
-        /** 保存被包装的真实物化存储。 */
-        ControlledStore(WalMaterializedStore delegate) { this.delegate = delegate; }
-        /** 初始化固定绑定。 */
-        @Override public void initialize(UUID id, String shard) { delegate.initialize(id, shard); }
-        /** 读取真实检查点。 */
-        @Override public WalCheckpoint checkpoint() { return delegate.checkpoint(); }
-        /** 暂停时拒绝物化，恢复时继续调用真实后端。 */
-        @Override public WalCheckpoint apply(List<WalCommit> commits) {
-            if (paused) { throw new IllegalStateException("materialization paused"); }
+        /**
+         * Saves the actual packaged materialization storage.
+         *
+         * @param delegate delegate
+         */
+        ControlledStore(final WalMaterializedStore delegate) {
+            this.delegate = delegate;
+        }
+
+        /**
+         * Initialization of fixed bindings.
+         *
+         * @param id id
+         * @param shard logical shard identifier
+         */
+        @Override
+        public void initialize(final UUID id, final String shard) {
+            delegate.initialize(id, shard);
+        }
+
+        /**
+         * Reads the real checkpoint.
+         *
+         * @return the operation result
+         */
+        @Override
+        public WalCheckpoint checkpoint() {
+            return delegate.checkpoint();
+        }
+
+        /**
+         * Continue to call the real backend when rejecting materialization, recovery.
+         *
+         * @param commits commits
+         * @return the operation result
+         * @throws IllegalStateException if the operation cannot complete
+         */
+        @Override
+        public WalCheckpoint apply(final List<WalCommit> commits) {
+            if (paused) {
+                throw new IllegalStateException("materialization paused");
+            }
             return delegate.apply(commits);
         }
-        /** 读取快照版本。 */
-        @Override public java.util.Optional<WalValue> get(String key, long sequence) { return delegate.get(key, sequence); }
-        /** 扫描快照版本。 */
-        @Override public java.util.NavigableMap<String, WalValue> scan(String from, String to, long sequence) {
+
+        /**
+         * Read snapshot version.
+         *
+         * @param key business key
+         * @param sequence sequence
+         * @return the operation result
+         */
+        @Override
+        public java.util.Optional<WalValue> get(final String key, final long sequence) {
+            return delegate.get(key, sequence);
+        }
+
+        /**
+         * Scan snapshot version.
+         *
+         * @param from from
+         * @param to to
+         * @param sequence sequence
+         * @return the operation result
+         */
+        @Override
+        public java.util.NavigableMap<String, WalValue> scan(final String from, final String to, final long sequence) {
             return delegate.scan(from, to, sequence);
         }
-        /** 有界清理旧版本。 */
-        @Override public int gc(long safePoint, int limit) { return delegate.gc(safePoint, limit); }
+
+        /**
+         * Bounded Cleans up old version.
+         *
+         * @param safePoint oldest retained snapshot timestamp
+         * @param limit maximum number of items
+         * @return the operation result
+         */
+        @Override
+        public int gc(final long safePoint, final int limit) {
+            return delegate.gc(safePoint, limit);
+        }
     }
 }

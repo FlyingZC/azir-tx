@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -23,57 +39,77 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
-/** 跨片容量探针的并行后继写入和安全 GC，真实业务 ACK 受有界队列背压约束。 */
+/**
+ * Cross-shard capacity probe parallel follow-up writing and security GC, real business ACK subject to bounded queue back pressure.
+ */
 final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
+
     private final MysqlLocalFirstPublicationLedger ledger;
+
     private final MysqlStorageAdapter left;
+
     private final MysqlStorageAdapter right;
+
     private final HikariDataSource leftData;
+
     private final HikariDataSource rightData;
+
     private final HikariDataSource backgroundCenter;
+
     private final HikariDataSource backgroundLeft;
+
     private final HikariDataSource backgroundRight;
+
     private final MysqlVectorLocalGcScheduler gc;
+
     private final ArrayBlockingQueue<SuccessorWork> queue = new ArrayBlockingQueue<>(4_096);
+
     private final ExecutorService successors = Executors.newFixedThreadPool(16,
             task -> Thread.ofPlatform().daemon().name("azir-vector-successor").unstarted(task));
+
     private final AtomicBoolean accepting = new AtomicBoolean(true);
+
     private final AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+
     private final AtomicLong nextLocalId = new AtomicLong(-1);
+
     private final LongAdder submitted = new LongAdder();
+
     private final LongAdder completed = new LongAdder();
 
-    /** 队列保存原跨片分条身份，后继只在两片最终化后写入。 */
-    private record SuccessorWork(long txId, long localTxId,
-                                 String leftKey, int leftStripe, long leftSequence,
-                                 String rightKey, int rightStripe, long rightSequence) {
-    }
-
-    /** 后台状态同时记录剩余大版本、持久回执、后继积压和 GC 失败。 */
-    record Snapshot(long leftMappings, long rightMappings, long leftReceipts, long rightReceipts,
-                    long submitted, long completed, long gcRuns, long gcFailures,
-                    long gcRetired, Throwable firstFailure) {
-        /** 任何计数为负都表示观测结果无效。 */
-        Snapshot {
-            if (leftMappings < 0 || rightMappings < 0 || leftReceipts < 0 || rightReceipts < 0
-                    || submitted < 0 || completed < 0 || gcRuns < 0 || gcFailures < 0
-                    || gcRetired < 0) {
-                throw new IllegalArgumentException("invalid steady cross probe snapshot");
-            }
-        }
-    }
-
-    /** 独立后台池绑定同一控制与两片权威，参数限制物化后继和回收的资源预算。 */
-    MysqlVectorCrossSteadyBackground(MysqlLocalFirstPublicationLedger ledger,
-                                     MysqlStorageAdapter left, MysqlStorageAdapter right,
-                                     HikariDataSource center, HikariDataSource leftData,
-                                     HikariDataSource rightData,
-                                     MysqlVectorCutLeaderRuntime publisher,
-                                     String controlUrl, String leftUrl, String rightUrl,
-                                     String user, String password, int stripes,
-                                     int gcParallelism, int gcRetireBatch,
-                                     int gcCandidateLimit, int localEveryRounds,
-                                     long gcIntervalMillis) {
+    /**
+     * An independent background pool bound to the same control and two pieces of authority with parameters limiting the resources of materialization follow-up and collection budget.
+     *
+     * @param ledger ledger
+     * @param left left
+     * @param right right
+     * @param center center
+     * @param leftData left data
+     * @param rightData right data
+     * @param publisher publisher
+     * @param controlUrl control url
+     * @param leftUrl left url
+     * @param rightUrl right url
+     * @param user user
+     * @param password password
+     * @param stripes stripes
+     * @param gcParallelism gc parallelism
+     * @param gcRetireBatch gc retire batch
+     * @param gcCandidateLimit gc candidate limit
+     * @param localEveryRounds local every rounds
+     * @param gcIntervalMillis gc interval millis
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    MysqlVectorCrossSteadyBackground(final MysqlLocalFirstPublicationLedger ledger,
+                                     final MysqlStorageAdapter left, final MysqlStorageAdapter right,
+                                     final HikariDataSource center, final HikariDataSource leftData,
+                                     final HikariDataSource rightData,
+                                     final MysqlVectorCutLeaderRuntime publisher,
+                                     final String controlUrl, final String leftUrl, final String rightUrl,
+                                     final String user, final String password, final int stripes,
+                                     final int gcParallelism, final int gcRetireBatch,
+                                     final int gcCandidateLimit, final int localEveryRounds,
+                                     final long gcIntervalMillis) {
         this.ledger = ledger;
         this.left = left;
         this.right = right;
@@ -107,7 +143,9 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
         }
     }
 
-    /** 恢复线程和切面发布者就绪后才启动有界后继及 GC 工作。 */
+    /**
+     * Recovery Thread and Declan Launcher ready to start the bounded follow-up and GC jobs.
+     */
     void start() {
         gc.start();
         for (int index = 0; index < 16; index++) {
@@ -115,9 +153,17 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
         }
     }
 
-    /** 业务 ACK 前将每笔后续同键更新放入有界队列，满队列使前台自然背压。 */
-    void enqueue(long txId, MysqlStorageAdapter.PrewriteProof leftProof,
-                 MysqlStorageAdapter.PrewriteProof rightProof) throws InterruptedException {
+    /**
+     * Business ACK places each subsequent peer update in the bounded queue, full of which gives the foreground natural backpressure.
+     *
+     * @param txId transaction identifier
+     * @param leftProof left proof
+     * @param rightProof right proof
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws InterruptedException if the operation cannot complete
+     */
+    void enqueue(final long txId, final MysqlStorageAdapter.PrewriteProof leftProof,
+                 final MysqlStorageAdapter.PrewriteProof rightProof) throws InterruptedException {
         requireHealthy();
         var leftReservation = leftProof.vectorReservation().orElseThrow();
         var rightReservation = rightProof.vectorReservation().orElseThrow();
@@ -131,7 +177,11 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
         requireHealthy();
     }
 
-    /** 每个后继必须等中心确认全部参与片最终化，未决时不得覆盖意向。 */
+    /**
+     * Each follow-up must wait for the centre to confirm the finalization of all participating films, and pending should not cover intent.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     private void runSuccessors() {
         try {
             while (accepting.get() || !queue.isEmpty()) {
@@ -152,26 +202,34 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
                         work.rightStripe(), work.rightSequence());
                 completed.increment();
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             if (accepting.get()) {
                 firstFailure.compareAndSet(null, ex);
             }
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             firstFailure.compareAndSet(null, ex);
             ex.printStackTrace(System.err);
         }
     }
 
-    /** 未知响应按同一负事务号精确重放，存储过程会确认已有版本或重新提交。 */
-    private static void commitSuccessorWithRetry(MysqlStorageAdapter adapter, long txId,
-                                                 String key, int stripe, long startSequence) {
+    /**
+     * The unknown response presses the same negative transaction ID accuracy replay, storage process will confirm an existing version or reset commit.
+     *
+     * @param adapter adapter
+     * @param txId transaction identifier
+     * @param key business key
+     * @param stripe stripe
+     * @param startSequence start sequence
+     */
+    private static void commitSuccessorWithRetry(final MysqlStorageAdapter adapter, final long txId,
+                                                 final String key, final int stripe, final long startSequence) {
         Mutation mutation = Mutation.put(key, new byte[]{42});
-        for (int attempt = 0; ; attempt++) {
+        for (int attempt = 0;; attempt++) {
             try {
                 adapter.directCommitVectorLocal(txId, mutation, stripe, startSequence);
                 return;
-            } catch (MvccException ex) {
+            } catch (final MvccException ex) {
                 if (attempt >= 7 || ex.errorCode() != ErrorCode.TRANSACTION_STATUS_UNKNOWN
                         && ex.errorCode() != ErrorCode.STORAGE_UNAVAILABLE
                         && ex.errorCode() != ErrorCode.LOCK_CONFLICT) {
@@ -182,7 +240,12 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
         }
     }
 
-    /** 定时报告前先确认后台无故障，不能把失活调度器当成 0 积压。 */
+    /**
+     * Confirmation of background without failure cannot be used as a zero backlog before regular reporting.
+     *
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
     Snapshot snapshot() throws SQLException {
         Throwable failure = firstFailure.get();
         if (failure == null && gc.stats().failureCount() != 0) {
@@ -196,8 +259,14 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
                 gc.stats().failureCount(), gc.crossReclaimed(), failure);
     }
 
-    /** 前台结束后等待有界队列排空，失败或超时均使压测证据无效。 */
-    void awaitSuccessors(Duration timeout) throws InterruptedException {
+    /**
+     * After the foreground waits for the bounded queue to be emptied, failure or timeout invalidates pressure measurement evidence.
+     *
+     * @param timeout timeout
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws InterruptedException if the operation cannot complete
+     */
+    void awaitSuccessors(final Duration timeout) throws InterruptedException {
         accepting.set(false);
         successors.shutdown();
         if (!successors.awaitTermination(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
@@ -210,8 +279,14 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
         }
     }
 
-    /** 后继写入完成后等待旧映射清零，超时返回非零积压供生产判断。 */
-    Snapshot awaitGcDrain(Duration timeout) throws Exception {
+    /**
+     * Following completion of writing, the timeout returns to non-zero backlog for production judgement, pending clearance of old maps.
+     *
+     * @param timeout timeout
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     */
+    Snapshot awaitGcDrain(final Duration timeout) throws Exception {
         long deadline = System.nanoTime() + timeout.toNanos();
         Snapshot current;
         do {
@@ -225,7 +300,11 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
         return current;
     }
 
-    /** 第一条后继或 GC 故障阻止业务把无界积压误认为成功 ACK。 */
+    /**
+     * The first follow-up or GC failure prevents operations from mistaking the unbounded backlog as a success ACK.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     void requireHealthy() {
         Throwable failure = firstFailure.get();
         if (failure == null && gc.stats().failureCount() != 0) {
@@ -236,7 +315,11 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
         }
     }
 
-    /** 释放后继线程、GC 工作线程和三套独立后台池。 */
+    /**
+     * Releases the trunking, GC workspace and three stand-alone background pools.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     @Override
     public void close() {
         accepting.set(false);
@@ -246,7 +329,7 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
                 successors.shutdownNow();
             }
             gc.close();
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             successors.shutdownNow();
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted while closing steady cross background", ex);
@@ -257,23 +340,98 @@ final class MysqlVectorCrossSteadyBackground implements AutoCloseable {
         }
     }
 
-    /** GC 后台池与业务池的连接预算各自独立。 */
-    private static HikariDataSource pool(String url, String user, String password) {
+    /**
+     * GC background pool and connection budget of the operations pool are separate.
+     *
+     * @param url url
+     * @param user user
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String url, final String user, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.createBackground(url, user, password);
     }
 
-    /** 表名只接受本探针固定的版本和凭据表。 */
-    private static long count(HikariDataSource dataSource, String table) throws SQLException {
+    /**
+     * Table names only accept this probe fixed version and receipt tables.
+     *
+     * @param dataSource database connection source
+     * @param table table
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long count(final HikariDataSource dataSource, final String table) throws SQLException {
         if (!List.of("mvcc_vector_committed_v1", "mvcc_vector_retired_v1").contains(table)) {
             throw new IllegalArgumentException("unsupported steady cross count table");
         }
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement query = connection.prepareStatement("select count(*) from " + table);
-             ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement query = connection.prepareStatement("select count(*) from " + table);
+                ResultSet row = query.executeQuery()) {
             if (!row.next()) {
                 throw new SQLException("steady cross count returned no row");
             }
             return row.getLong(1);
+        }
+    }
+
+    /**
+     * Queue to save the original cross-shard subsection identity, followed by writing only after two pieces have been finalized.
+     *
+     * @param txId transaction identifier
+     * @param localTxId local tx id
+     * @param leftKey left key
+     * @param leftStripe left stripe
+     * @param leftSequence left sequence
+     * @param rightKey right key
+     * @param rightStripe right stripe
+     * @param rightSequence right sequence
+     */
+    private record SuccessorWork(long txId, long localTxId,
+            String leftKey, int leftStripe, long leftSequence,
+            String rightKey, int rightStripe, long rightSequence) {
+    }
+
+    /**
+     * The background status also records the remaining large version, durable receipt, the backlog and GC failure.
+     *
+     * @param leftMappings left mappings
+     * @param rightMappings right mappings
+     * @param leftReceipts left receipts
+     * @param rightReceipts right receipts
+     * @param submitted submitted
+     * @param completed completed
+     * @param gcRuns gc runs
+     * @param gcFailures gc failures
+     * @param gcRetired gc retired
+     * @param firstFailure first failure
+     */
+    record Snapshot(long leftMappings, long rightMappings, long leftReceipts, long rightReceipts,
+            long submitted, long completed, long gcRuns, long gcFailures,
+            long gcRetired, Throwable firstFailure) {
+
+        /**
+         * Any negative count indicates that the observations are invalid.
+         *
+         * @param leftMappings left mappings
+         * @param rightMappings right mappings
+         * @param leftReceipts left receipts
+         * @param rightReceipts right receipts
+         * @param submitted submitted
+         * @param completed completed
+         * @param gcRuns gc runs
+         * @param gcFailures gc failures
+         * @param gcRetired gc retired
+         * @param firstFailure first failure
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        Snapshot {
+            if (leftMappings < 0 || rightMappings < 0 || leftReceipts < 0 || rightReceipts < 0
+                    || submitted < 0 || completed < 0 || gcRuns < 0 || gcFailures < 0
+                    || gcRetired < 0) {
+                throw new IllegalArgumentException("invalid steady cross probe snapshot");
+            }
         }
     }
 }

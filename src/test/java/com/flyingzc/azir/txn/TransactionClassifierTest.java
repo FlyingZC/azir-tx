@@ -1,21 +1,38 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.api.Transaction;
 import com.flyingzc.azir.common.IsolationLevel;
 import com.flyingzc.azir.storage.Mutation;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /**
- * 事务分类器测试，验证不同事务形态会选择预期协议路径。
+ * Transaction Catalogue Tests, verify different transaction forms select the expected protocol path.
  */
 class TransactionClassifierTest {
+
     private final TransactionClassifier classifier = new TransactionClassifier();
 
     /**
-     * 验证无参与分片事务会被分类为只读快照路径。
+     * Verify Uninvolved shard transaction will be classified as an read-only snapshot path.
      */
     @Test
     void shouldClassifyReadOnlyTransaction() {
@@ -23,12 +40,12 @@ class TransactionClassifierTest {
 
         TransactionClassification actual = classifier.classifyForCommit(tx, TransactionOptions.defaults());
 
-        assertEquals(TransactionProtocolType.READ_ONLY_SNAPSHOT, actual.protocolType());
+        Assertions.assertEquals(TransactionProtocolType.READ_ONLY_SNAPSHOT, actual.protocolType());
         assertTrue(actual.participants().isEmpty());
     }
 
     /**
-     * 验证单分片写事务会被分类为单分片 1PC 路径。
+     * Verify single shard writing transaction will be classified as a single shard 1PC path.
      */
     @Test
     void shouldClassifySingleShardTransaction() {
@@ -37,13 +54,13 @@ class TransactionClassifierTest {
 
         TransactionClassification actual = classifier.classifyForCommit(tx, TransactionOptions.mysqlLikeDefaults());
 
-        assertEquals(TransactionProtocolType.SINGLE_SHARD_1PC, actual.protocolType());
-        assertEquals(1, actual.participants().size());
+        Assertions.assertEquals(TransactionProtocolType.SINGLE_SHARD_1PC, actual.protocolType());
+        Assertions.assertEquals(1, actual.participants().size());
         assertTrue(actual.participants().contains("shard-1"));
     }
 
     /**
-     * 验证启用 async commit 的跨分片事务会被分类为异步提交路径。
+     * Verify The cross-shard transaction that allows async committee will be classified as a walk commit path.
      */
     @Test
     void shouldClassifyCrossShardAsyncTransaction() {
@@ -53,12 +70,12 @@ class TransactionClassifierTest {
 
         TransactionClassification actual = classifier.classifyForCommit(tx, TransactionOptions.mysqlLikeDefaults());
 
-        assertEquals(TransactionProtocolType.CROSS_SHARD_ASYNC_COMMIT, actual.protocolType());
-        assertEquals(2, actual.participants().size());
+        Assertions.assertEquals(TransactionProtocolType.CROSS_SHARD_ASYNC_COMMIT, actual.protocolType());
+        Assertions.assertEquals(2, actual.participants().size());
     }
 
     /**
-     * 验证未启用 async commit 的跨分片事务会被分类为同步 2PC 路径。
+     * Verify cross-shard transaction that does not enable async committee will be classified as a sync 2PC path.
      */
     @Test
     void shouldClassifyCrossShardSynchronousTransaction() {
@@ -68,7 +85,7 @@ class TransactionClassifierTest {
 
         TransactionClassification actual = classifier.classifyForCommit(tx, TransactionOptions.defaults());
 
-        assertEquals(TransactionProtocolType.CROSS_SHARD_SYNC_2PC, actual.protocolType());
-        assertEquals(2, actual.participants().size());
+        Assertions.assertEquals(TransactionProtocolType.CROSS_SHARD_SYNC_2PC, actual.protocolType());
+        Assertions.assertEquals(2, actual.participants().size());
     }
 }

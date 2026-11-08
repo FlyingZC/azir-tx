@@ -1,4 +1,25 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.testing;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.api.Transaction;
 import com.flyingzc.azir.common.ErrorCode;
@@ -40,14 +61,12 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-/** 验证持久控制面、协调器重启、快照租约及垃圾回收。 */
+/**
+ * Verify durable control, coordinator restart, snapshot lease and garbage collection.
+ */
 @Testcontainers
 class PersistentControlPlaneIntegrationTest {
+
     @Container
     private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4")
             .withUsername("test")
@@ -55,12 +74,20 @@ class PersistentControlPlaneIntegrationTest {
             .withDatabaseName("bootstrap");
 
     private static DataSource controlDataSource;
+
     private static DataSource shard1DataSource;
+
     private static DataSource shard2DataSource;
+
     private MysqlStorageAdapter shard1;
+
     private MysqlStorageAdapter shard2;
 
-    /** 创建隔离测试数据库并初始化协议表。 */
+    /**
+     * Creates a quarantine test database and initializes the protocol table.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeAll
     static void beforeAll() throws Exception {
         createDatabase("control");
@@ -79,7 +106,11 @@ class PersistentControlPlaneIntegrationTest {
         safePointStore.initialize(0);
     }
 
-    /** 关闭测试使用的数据源。 */
+    /**
+     * Closes the data source used for testing.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @AfterAll
     static void afterAll() throws Exception {
         close(controlDataSource);
@@ -87,7 +118,11 @@ class PersistentControlPlaneIntegrationTest {
         close(shard2DataSource);
     }
 
-    /** 清理协议状态并为当前用例创建独立适配器。 */
+    /**
+     * Clears the protocol state and creates an independent adaptor for current use.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeEach
     void setUp() throws Exception {
         shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource);
@@ -108,49 +143,50 @@ class PersistentControlPlaneIntegrationTest {
         safePointStore.initialize(0);
     }
 
-    /** 验证重启后使用新适配器读取持久中心决议并完成恢复。 */
+    /**
+     * After restarting verify, use the new adapter to read durable Center decision and complete recovery.
+     */
     @Test
     void restartedCoordinatorShouldRecoverCommittedTransactionFromMysqlMetadata() {
         MysqlTimestampOracle tso1 = new MysqlTimestampOracle(controlDataSource);
         TransactionMetadataStore metadataStore1 = new MysqlTransactionMetadataStore(controlDataSource);
         TransactionManager manager1 = new TransactionManager(tso1, metadataStore1, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)
-        ));
+                shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)));
 
         Transaction tx = manager1.begin(IsolationLevel.REPEATABLE_READ);
         manager1.put(tx, "shard-1", "acct:1", bytes("100"));
         manager1.put(tx, "shard-2", "acct:2", bytes("200"));
 
         MvccException error = assertThrows(MvccException.class, () -> manager1.commit(tx));
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
         assertFalse(error.retryable());
 
         MysqlTimestampOracle tso2 = new MysqlTimestampOracle(controlDataSource);
         TransactionMetadataStore metadataStore2 = new MysqlTransactionMetadataStore(controlDataSource);
-        // 模拟重启时重建适配器，不复绑旧协调器使用的实例。
+        // Rebuilds the adaptor when simulated to restart without tying up old examples of coordinator use.
         shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource, metadataStore2);
         shard2 = new MysqlStorageAdapter("shard-2", shard2DataSource, metadataStore2);
         TransactionManager manager2 = new TransactionManager(tso2, metadataStore2, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         RecoveryManager recoveryManager = new RecoveryManager(metadataStore2, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
 
         recoveryManager.recover(tx.txId());
 
         Transaction reader = manager2.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("100", readString(manager2, reader, "shard-1", "acct:1"));
-        assertEquals("200", readString(manager2, reader, "shard-2", "acct:2"));
+        Assertions.assertEquals("100", readString(manager2, reader, "shard-1", "acct:1"));
+        Assertions.assertEquals("200", readString(manager2, reader, "shard-2", "acct:2"));
 
         long nextTs = tso2.nextTimestamp();
         assertTrue(nextTs > tx.txId());
     }
 
-    /** 提交例程已持久化决议但响应丢失时，独立协调器必须按原 commitTs 补物化。 */
+    /**
+     * Commit routine durable storage decision has been lost, but independent coordinator must replace materialization with the original committeeTs.
+     */
     @Test
     void lostServerSideCommitResponseMustRecoverTheDurableDecision() {
         var backing = new MysqlTransactionMetadataStore(controlDataSource);
@@ -167,7 +203,7 @@ class PersistentControlPlaneIntegrationTest {
                                     "simulated lost commit response", true, null);
                         }
                         return result;
-                    } catch (InvocationTargetException ex) {
+                    } catch (final InvocationTargetException ex) {
                         throw ex.getCause();
                     }
                 });
@@ -178,10 +214,10 @@ class PersistentControlPlaneIntegrationTest {
         Transaction tx = coordinator.begin(IsolationLevel.REPEATABLE_READ);
         coordinator.put(tx, "shard-1", "lost:one", bytes("one"));
         coordinator.put(tx, "shard-2", "lost:two", bytes("two"));
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 assertThrows(MvccException.class, () -> coordinator.commit(tx)).errorCode());
         var persisted = backing.get(tx.txId()).orElseThrow();
-        assertEquals(TxStatus.COMMITTED, persisted.status());
+        Assertions.assertEquals(TxStatus.COMMITTED, persisted.status());
         long commitTs = persisted.commitTs();
 
         var restartedStore = new MysqlTransactionMetadataStore(controlDataSource);
@@ -189,18 +225,21 @@ class PersistentControlPlaneIntegrationTest {
         var recoveredSecond = new MysqlStorageAdapter("shard-2", shard2DataSource, restartedStore);
         new RecoveryManager(restartedStore, Map.of(recoveredFirst.shardId(), recoveredFirst,
                 recoveredSecond.shardId(), recoveredSecond)).recover(tx.txId());
-        assertEquals(commitTs, restartedStore.get(tx.txId()).orElseThrow().commitTs().longValue());
-        try (var reader = new TransactionManager(new MysqlTimestampOracle(controlDataSource), restartedStore,
-                Map.of(recoveredFirst.shardId(), recoveredFirst, recoveredSecond.shardId(), recoveredSecond))) {
+        Assertions.assertEquals(commitTs, restartedStore.get(tx.txId()).orElseThrow().commitTs().longValue());
+        try (
+                var reader = new TransactionManager(new MysqlTimestampOracle(controlDataSource), restartedStore,
+                        Map.of(recoveredFirst.shardId(), recoveredFirst, recoveredSecond.shardId(), recoveredSecond))) {
             Transaction snapshot = reader.begin(IsolationLevel.READ_COMMITTED);
-            assertEquals("one", readString(reader, snapshot, "shard-1", "lost:one"));
-            assertEquals("two", readString(reader, snapshot, "shard-2", "lost:two"));
+            Assertions.assertEquals("one", readString(reader, snapshot, "shard-1", "lost:one"));
+            Assertions.assertEquals("two", readString(reader, snapshot, "shard-2", "lost:two"));
             reader.commit(snapshot);
         }
         coordinator.close();
     }
 
-    /** 验证省略显式准备的事务仍能在协调器重启后恢复。 */
+    /**
+     * Verify omitted transaction for visible preparation can still be recovery after the coordinator restart.
+     */
     @Test
     void restartedCoordinatorShouldRecoverCommittedTransactionWithoutPreparingMetadataStep() {
         MysqlTimestampOracle tso1 = new MysqlTimestampOracle(controlDataSource);
@@ -214,52 +253,48 @@ class PersistentControlPlaneIntegrationTest {
                         com.flyingzc.azir.txn.CrossShardCommitPolicy.parallel(),
                         true,
                         false,
-                        false
-                ),
+                        false),
                 Map.of(
                         shard1.shardId(), shard1,
-                        shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)
-                )
-        );
+                        shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)));
 
         Transaction tx = manager1.begin(IsolationLevel.REPEATABLE_READ);
         manager1.put(tx, "shard-1", "acct:no-prepare:1", bytes("100"));
         manager1.put(tx, "shard-2", "acct:no-prepare:2", bytes("200"));
 
         MvccException error = assertThrows(MvccException.class, () -> manager1.commit(tx));
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
         assertFalse(error.retryable());
 
         MysqlTimestampOracle tso2 = new MysqlTimestampOracle(controlDataSource);
         TransactionMetadataStore metadataStore2 = new MysqlTransactionMetadataStore(controlDataSource);
-        // 模拟重启时重建适配器，不复绑旧协调器使用的实例。
+        // Rebuilds the adaptor when simulated to restart without tying up old examples of coordinator use.
         shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource, metadataStore2);
         shard2 = new MysqlStorageAdapter("shard-2", shard2DataSource, metadataStore2);
         RecoveryManager recoveryManager = new RecoveryManager(metadataStore2, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
 
         recoveryManager.recover(tx.txId());
 
         TransactionManager manager2 = new TransactionManager(tso2, metadataStore2, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         Transaction reader = manager2.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("100", readString(manager2, reader, "shard-1", "acct:no-prepare:1"));
-        assertEquals("200", readString(manager2, reader, "shard-2", "acct:no-prepare:2"));
+        Assertions.assertEquals("100", readString(manager2, reader, "shard-1", "acct:no-prepare:1"));
+        Assertions.assertEquals("200", readString(manager2, reader, "shard-2", "acct:no-prepare:2"));
     }
 
-    /** 验证后台扫描可发现残留意向并完成一次事务恢复。 */
+    /**
+     * Verify background scans can detect residual intent and complete once transaction recovery.
+     */
     @Test
     void backgroundRecoveryRunnerShouldScanLingeringIntentsAndRecover() {
         MysqlTimestampOracle tso1 = new MysqlTimestampOracle(controlDataSource);
         TransactionMetadataStore metadataStore1 = new MysqlTransactionMetadataStore(controlDataSource);
         TransactionManager manager1 = new TransactionManager(tso1, metadataStore1, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)
-        ));
+                shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)));
 
         Transaction tx = manager1.begin(IsolationLevel.REPEATABLE_READ);
         manager1.put(tx, "shard-1", "order:1", bytes("created"));
@@ -268,31 +303,32 @@ class PersistentControlPlaneIntegrationTest {
 
         MysqlTimestampOracle tso2 = new MysqlTimestampOracle(controlDataSource);
         TransactionMetadataStore metadataStore2 = new MysqlTransactionMetadataStore(controlDataSource);
-        // 模拟重启时重建适配器，不复绑旧协调器使用的实例。
+        // Rebuilds the adaptor when simulated to restart without tying up old examples of coordinator use.
         shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource, metadataStore2);
         shard2 = new MysqlStorageAdapter("shard-2", shard2DataSource, metadataStore2);
         TransactionManager manager2 = new TransactionManager(tso2, metadataStore2, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         RecoveryManager recoveryManager = new RecoveryManager(metadataStore2, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         BackgroundRecoveryRunner runner = new BackgroundRecoveryRunner(recoveryManager, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
 
         int recovered = runner.recoverOnce(100);
 
-        assertEquals(1, recovered);
+        Assertions.assertEquals(1, recovered);
         Transaction reader = manager2.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("created", readString(manager2, reader, "shard-1", "order:1"));
-        assertEquals("reserved", readString(manager2, reader, "shard-2", "stock:1"));
+        Assertions.assertEquals("created", readString(manager2, reader, "shard-1", "order:1"));
+        Assertions.assertEquals("reserved", readString(manager2, reader, "shard-2", "stock:1"));
     }
 
-    /** 验证活跃快照阻止水位推进，结束后能够回收旧版本。 */
+    /**
+     * Verify Active snapshot prevents watermark propulsion and can be collection old version after completion.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void safePointShouldBeBlockedByOldestActiveTransactionAndGcShouldReclaimOldVersions() throws Exception {
         MysqlTimestampOracle tso = new MysqlTimestampOracle(controlDataSource);
@@ -300,39 +336,39 @@ class PersistentControlPlaneIntegrationTest {
         SafePointStore safePointStore = new MysqlSafePointStore(controlDataSource);
         TransactionManager manager = new TransactionManager(tso, metadataStore, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         GcManager gcManager = new GcManager(metadataStore, tso, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
 
         Transaction seed1 = manager.begin(IsolationLevel.READ_COMMITTED);
         manager.put(seed1, "shard-1", "gc:001", bytes("v1"));
         manager.commit(seed1);
 
         Transaction longTx = manager.begin(IsolationLevel.REPEATABLE_READ);
-        assertEquals("v1", readString(manager, longTx, "shard-1", "gc:001"));
+        Assertions.assertEquals("v1", readString(manager, longTx, "shard-1", "gc:001"));
 
         Transaction seed2 = manager.begin(IsolationLevel.READ_COMMITTED);
         manager.put(seed2, "shard-1", "gc:001", bytes("v2"));
         manager.commit(seed2);
 
         long safePoint = gcManager.advanceSafePoint();
-        assertEquals(longTx.startTs() - 1, safePoint);
+        Assertions.assertEquals(longTx.startTs() - 1, safePoint);
 
         int reclaimedWhileBlocked = gcManager.gcOnce(100);
-        assertEquals(0, reclaimedWhileBlocked);
-        assertEquals(2, countRows(shard1DataSource, "mvcc_data"));
+        Assertions.assertEquals(0, reclaimedWhileBlocked);
+        Assertions.assertEquals(2, countRows(shard1DataSource, "mvcc_data"));
 
         manager.rollback(longTx);
 
         int reclaimed = gcManager.gcOnce(100);
         assertTrue(reclaimed >= 1);
-        assertEquals(1, countRows(shard1DataSource, "mvcc_data"));
+        Assertions.assertEquals(1, countRows(shard1DataSource, "mvcc_data"));
     }
 
-    /** 验证真实事务快照被测试强推水位越过后拒绝点读和扫描。 */
+    /**
+     * Verify real transaction snapshot tested to push watermark over and refuse to read and scan.
+     */
     @Test
     void readBelowSafePointShouldReturnSnapshotTooOld() {
         MysqlTimestampOracle tso = new MysqlTimestampOracle(controlDataSource);
@@ -340,8 +376,7 @@ class PersistentControlPlaneIntegrationTest {
         SafePointStore safePointStore = new MysqlSafePointStore(controlDataSource);
         TransactionManager manager = new TransactionManager(tso, metadataStore, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         Transaction seed1 = manager.begin(IsolationLevel.READ_COMMITTED);
         manager.put(seed1, "shard-1", "gc:002", bytes("v1"));
         manager.commit(seed1);
@@ -351,19 +386,23 @@ class PersistentControlPlaneIntegrationTest {
         manager.commit(seed2);
 
         Transaction oldSnapshot = manager.begin(IsolationLevel.REPEATABLE_READ);
-        assertEquals("v2", readString(manager, oldSnapshot, "shard-1", "gc:002"));
-        assertEquals(oldSnapshot.deadlineMillis(), metadataStore.snapshotExpiry(oldSnapshot.txId()).orElseThrow().longValue());
-        // 仅在测试中越过真实活跃快照，验证读入口拒绝低于水位的快照。
+        Assertions.assertEquals("v2", readString(manager, oldSnapshot, "shard-1", "gc:002"));
+        Assertions.assertEquals(oldSnapshot.deadlineMillis(), metadataStore.snapshotExpiry(oldSnapshot.txId()).orElseThrow().longValue());
+        // Only snapshot below watermark is rejected in the test by passing real active snapshot, the verify reading entrance.
         safePointStore.advanceTo(oldSnapshot.startTs() + 1);
         MvccException error = assertThrows(MvccException.class, () -> manager.get(oldSnapshot, "shard-1", "gc:002"));
-        assertEquals(ErrorCode.SNAPSHOT_TOO_OLD, error.errorCode());
+        Assertions.assertEquals(ErrorCode.SNAPSHOT_TOO_OLD, error.errorCode());
         MvccException scanError = assertThrows(MvccException.class,
                 () -> manager.scan(oldSnapshot, "shard-1", "gc:000", "gc:999"));
-        assertEquals(ErrorCode.SNAPSHOT_TOO_OLD, scanError.errorCode());
+        Assertions.assertEquals(ErrorCode.SNAPSHOT_TOO_OLD, scanError.errorCode());
         manager.rollback(oldSnapshot);
     }
 
-    /** 验证安全点之后完整回收墓碑链且删除值不可见。 */
+    /**
+     * Full collection tombstone chain after verify safe point and missing values.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void gcShouldReclaimTombstoneChainAfterSafePoint() throws Exception {
         MysqlTimestampOracle tso = new MysqlTimestampOracle(controlDataSource);
@@ -371,12 +410,10 @@ class PersistentControlPlaneIntegrationTest {
         SafePointStore safePointStore = new MysqlSafePointStore(controlDataSource);
         TransactionManager manager = new TransactionManager(tso, metadataStore, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         GcManager gcManager = new GcManager(metadataStore, tso, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
 
         Transaction seed = manager.begin(IsolationLevel.READ_COMMITTED);
         manager.put(seed, "shard-1", "tomb:001", bytes("alive"));
@@ -386,17 +423,21 @@ class PersistentControlPlaneIntegrationTest {
         manager.delete(deleteTx, "shard-1", "tomb:001");
         manager.commit(deleteTx);
 
-        assertEquals(2, countVersionsForKey(shard1DataSource, "tomb:001"));
+        Assertions.assertEquals(2, countVersionsForKey(shard1DataSource, "tomb:001"));
 
         int reclaimed = gcManager.gcOnce(100);
 
         assertTrue(reclaimed >= 2);
-        assertEquals(0, countVersionsForKey(shard1DataSource, "tomb:001"));
+        Assertions.assertEquals(0, countVersionsForKey(shard1DataSource, "tomb:001"));
         Transaction reader = manager.begin(IsolationLevel.READ_COMMITTED);
         assertTrue(manager.get(reader, "shard-1", "tomb:001").isEmpty());
     }
 
-    /** 验证后台调度实际完成参与者恢复和版本垃圾回收。 */
+    /**
+     * Verify background schedule actually completed participant recovery and version garbage collection.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void schedulerShouldAutomaticallyRunRecoveryAndGc() throws Exception {
         MysqlTimestampOracle tso = new MysqlTimestampOracle(controlDataSource);
@@ -405,24 +446,19 @@ class PersistentControlPlaneIntegrationTest {
 
         TransactionManager writerManager = new TransactionManager(tso, metadataStore, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)
-        ));
+                shard2.shardId(), new FailOnceOnCommitStorageAdapter(shard2)));
         TransactionManager readerManager = new TransactionManager(tso, metadataStore, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         RecoveryManager recoveryManager = new RecoveryManager(metadataStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         BackgroundRecoveryRunner recoveryRunner = new BackgroundRecoveryRunner(recoveryManager, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         GcManager gcManager = new GcManager(metadataStore, tso, safePointStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
 
         Transaction tx = writerManager.begin(IsolationLevel.REPEATABLE_READ);
         writerManager.put(tx, "shard-1", "sched:001", bytes("v1"));
@@ -434,7 +470,7 @@ class PersistentControlPlaneIntegrationTest {
             waitUntil(() -> {
                 if (scheduler.recoveryStats().runCount() == 0 || scheduler.gcStats().runCount() == 0
                         || shard2.participantRecord(tx.txId())
-                        .filter(record -> record.status() == com.flyingzc.azir.common.TxStatus.COMMITTED).isEmpty()
+                                .filter(record -> record.status() == com.flyingzc.azir.common.TxStatus.COMMITTED).isEmpty()
                         || shard2.findPendingTransactionIds(100).contains(tx.txId())) {
                     return false;
                 }
@@ -463,25 +499,44 @@ class PersistentControlPlaneIntegrationTest {
                     return scheduler.gcStats().runCount() > 0
                             && safePointStore.currentSafePoint() > 0
                             && countVersionsForKey(shard1DataSource, "sched-gc:001") == 1;
-                } catch (Exception ex) {
+                } catch (final Exception ex) {
                     throw new RuntimeException(ex);
                 }
             }, 3000);
         }
     }
 
-    /** 读取当前事务快照中的字符串值。 */
-    private static String readString(TransactionManager manager, Transaction tx, String shardId, String key) {
+    /**
+     * Reads the current string value in transaction snapshot.
+     *
+     * @param manager manager
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @return the operation result
+     */
+    private static String readString(final TransactionManager manager, final Transaction tx, final String shardId, final String key) {
         return manager.get(tx, shardId, key).map(String::new).orElse(null);
     }
 
-    /** 按 UTF-8 编码测试字符串。 */
-    private static byte[] bytes(String value) {
+    /**
+     * Tests the string by UTF-8 encoding.
+     *
+     * @param value value to write
+     * @return the operation result
+     */
+    private static byte[] bytes(final String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
-    /** 清理用例协议表，调用者随后恢复本地水位单例。 */
-    private static void truncate(DataSource dataSource, String... tables) throws Exception {
+    /**
+     * Clears the case protocol list, and the caller is then recovery local watermark.
+     *
+     * @param dataSource database connection source
+     * @param tables tables
+     * @throws Exception if the operation cannot complete
+     */
+    private static void truncate(final DataSource dataSource, final String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
                 statement.execute("delete from " + table);
@@ -489,21 +544,36 @@ class PersistentControlPlaneIntegrationTest {
         }
     }
 
-    /** 查询指定测试表的总行数。 */
-    private static long countRows(DataSource dataSource, String table) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement();
-             ResultSet resultSet = statement.executeQuery("select count(*) from " + table)) {
+    /**
+     * Query to specify the total number of lines for the test sheet.
+     *
+     * @param dataSource database connection source
+     * @param table table
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     */
+    private static long countRows(final DataSource dataSource, final String table) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery("select count(*) from " + table)) {
             resultSet.next();
             return resultSet.getLong(1);
         }
     }
 
-    /** 统计指定业务键的物理版本数。 */
-    private static long countVersionsForKey(DataSource dataSource, String key) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             var statement = connection.prepareStatement("select count(*) from mvcc_data where user_key = ?");
-        ) {
+    /**
+     * Statistics specify the physical version number of key(s).
+     *
+     * @param dataSource database connection source
+     * @param key business key
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     */
+    private static long countVersionsForKey(final DataSource dataSource, final String key) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                var statement = connection.prepareStatement("select count(*) from mvcc_data where user_key = ?");) {
             statement.setBytes(1, key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             try (ResultSet resultSet = statement.executeQuery()) {
                 resultSet.next();
@@ -512,8 +582,15 @@ class PersistentControlPlaneIntegrationTest {
         }
     }
 
-    /** 在有限期限内轮询异步测试条件。 */
-    private static void waitUntil(Check check, long timeoutMillis) throws Exception {
+    /**
+     * Interrogate the conditions of the walk test for a limited period.
+     *
+     * @param check check
+     * @param timeoutMillis timeout millis
+     * @throws AssertionError if the operation cannot complete
+     * @throws Exception if the operation cannot complete
+     */
+    private static void waitUntil(final Check check, final long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
         while (System.currentTimeMillis() < deadline) {
             if (check.ok()) {
@@ -524,15 +601,13 @@ class PersistentControlPlaneIntegrationTest {
         throw new AssertionError("condition not met within timeout");
     }
 
-    /** 异步测试的可抛异常检查条件。 */
-    @FunctionalInterface
-    private interface Check {
-        /** 检查当前异步条件是否已经满足。 */
-        boolean ok() throws Exception;
-    }
-
-    /** 在测试容器中创建数据库并授予测试账号权限。 */
-    private static void createDatabase(String databaseName) throws Exception {
+    /**
+     * Creates database in the test container and gives test account privileges.
+     *
+     * @param databaseName database name
+     * @throws Exception if the operation cannot complete
+     */
+    private static void createDatabase(final String databaseName) throws Exception {
         MYSQL.execInContainer(
                 "mysql",
                 "-uroot",
@@ -540,60 +615,120 @@ class PersistentControlPlaneIntegrationTest {
                 "-e",
                 "create database if not exists `" + databaseName + "`; " +
                         "grant all privileges on `" + databaseName + "`.* to '" + MYSQL.getUsername() + "'@'%'; " +
-                        "flush privileges;"
-        );
+                        "flush privileges;");
     }
 
-    /** 生成指定测试数据库的连接地址。 */
-    private static String databaseUrl(String databaseName) {
+    /**
+     * Generates the connection address of the specified test database.
+     *
+     * @param databaseName database name
+     * @return the operation result
+     */
+    private static String databaseUrl(final String databaseName) {
         return MYSQL.getJdbcUrl().replace("/bootstrap", "/" + databaseName);
     }
 
-    /** 关闭实现可关闭接口的数据源。 */
-    private static void close(DataSource dataSource) throws Exception {
+    /**
+     * Closes the data source to close interface.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
+     */
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
-    /** 首次提交调用在真实落盘前失败，后续调用保留真实参与者终态语义。 */
+    /**
+     * Discretionary check conditions for staggered tests.
+     */
+    @FunctionalInterface
+    private interface Check {
+
+        /**
+         * Checks whether the current walk conditions have been met.
+         *
+         * @return the operation result
+         * @throws Exception if the operation cannot complete
+         */
+        boolean ok() throws Exception;
+    }
+
+    /**
+     * The first commit call failed before the real dropout, followed by a call to retain the true participant terminal state syntax.
+     */
     private static final class FailOnceOnCommitStorageAdapter extends DelegatingStorageAdapter {
+
         private final AtomicBoolean shouldFail = new AtomicBoolean(true);
 
-        /** 构造提交故障包装器。 */
-        private FailOnceOnCommitStorageAdapter(StorageAdapter delegate) {
+        /**
+         * Construct commit failure packaging.
+         *
+         * @param delegate delegate
+         */
+        private FailOnceOnCommitStorageAdapter(final StorageAdapter delegate) {
             super(delegate);
         }
 
-        /** 按事务编号注入一次提交故障。 */
+        /**
+         * Press transaction identifier to inject commit failure.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
             failOnce();
             super.commit(txId, commitTs);
         }
 
-        /** 按写集合注入一次提交故障。 */
+        /**
+         * Press write set to inject commit failure.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations) {
             failOnce();
             super.commit(txId, commitTs, mutations);
         }
 
-        /** 保留清理策略并注入一次提交故障。 */
+        /**
+         * Retain the cleanup policy and inject it once.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
+         */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
             failOnce();
             super.commit(txId, commitTs, mutations, cleanupIntents);
         }
 
-        /** 直接提交仍调用真实原子实现，失败时不伪造本地提交记录。 */
+        /**
+         * Direct commit still calls real atomic and does not falsify local commit records when it fails.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
             failOnce();
             super.directCommit(txId, startTs, commitTs, mutations);
         }
 
-        /** 在所有提交重载间共享一次性故障。 */
+        /**
+         * Share one-time failure between all commit loads.
+         *
+         * @throws IllegalStateException if the operation cannot complete
+         */
         private void failOnce() {
             if (shouldFail.compareAndSet(true, false)) {
                 throw new IllegalStateException("simulated commit failure");

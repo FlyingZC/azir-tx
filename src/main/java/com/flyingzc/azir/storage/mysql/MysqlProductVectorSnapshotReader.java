@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -23,19 +39,37 @@ import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-/** 在一个真实分片 RR 读视图中合并向量版本与未物化中心意向。 */
+/**
+ * Merge version vector with intent in a real shard RR reading view.
+ */
 final class MysqlProductVectorSnapshotReader {
+
     private static final int MAX_INTERNAL_PAGE = 128;
 
-    /** 只有适配器持有产品分片连接时才能调用。 */
+    /**
+     * Only adaptor shard connection can be called when the adapter holds the product.
+     */
     private MysqlProductVectorSnapshotReader() {
     }
 
-    /** 已发布切面按本地序号筛选版本，再按中心决议时间判断跨分片可见性。 */
-    static Optional<VersionedValue> get(Connection connection,
-                                        MysqlStripedSnapshotOracle.Snapshot snapshot,
-                                        String shardId, String key, int stripe, long requesterTxId,
-                                        TransactionMetadataStore metadata) throws SQLException {
+    /**
+     * Version screening by local serial number has been published, and cross-shard visibility is judged by centre decision time.
+     *
+     * @param connection connection
+     * @param snapshot snapshot
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param stripe stripe
+     * @param requesterTxId requester tx id
+     * @param metadata metadata
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    static Optional<VersionedValue> get(final Connection connection,
+                                        final MysqlStripedSnapshotOracle.Snapshot snapshot,
+                                        final String shardId, final String key, final int stripe, final long requesterTxId,
+                                        final TransactionMetadataStore metadata) throws SQLException {
         long bound = snapshot.sequence(shardId, stripe);
         byte[] encodedKey = Utf8KeyOrder.encode(key);
         rejectUnmappedScalarRows(connection, encodedKey, stripe, requesterTxId);
@@ -93,7 +127,7 @@ final class MysqlProductVectorSnapshotReader {
                     long visibleTs;
                     int origin = rows.getInt("origin");
                     if (origin == 2) {
-                        // 本地 1PC 已由分条上界证明可见，不依赖中心决议时间。
+                        // The striped upper bound proves visibility of local 1PC without relying on the central decision timestamp.
                         return Optional.of(new VersionedValue(key, rows.getBytes("value"),
                                 rows.getBoolean("deleted"), rows.getLong("local_seq"), false));
                     }
@@ -119,10 +153,23 @@ final class MysqlProductVectorSnapshotReader {
         }
     }
 
-    /** 一页内所有键使用同一分片 RR 视图和同一全局向量，游标来自原始键。 */
-    static ScanPage page(Connection connection, MysqlStripedSnapshotOracle.Snapshot snapshot,
-                         String shardId, KeyRange range, String afterKeyExclusive, int limit,
-                         long requesterTxId, TransactionMetadataStore metadata) throws SQLException {
+    /**
+     * All keys in one page use the same shard RR view and the same global vector, cursor from the original key.
+     *
+     * @param connection connection
+     * @param snapshot snapshot
+     * @param shardId logical shard identifier
+     * @param range range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @param requesterTxId requester tx id
+     * @param metadata metadata
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    static ScanPage page(final Connection connection, final MysqlStripedSnapshotOracle.Snapshot snapshot,
+                         final String shardId, final KeyRange range, final String afterKeyExclusive, final int limit,
+                         final long requesterTxId, final TransactionMetadataStore metadata) throws SQLException {
         int pageLimit = Math.min(limit, MAX_INTERNAL_PAGE);
         List<String> candidates = candidateKeys(connection, range, afterKeyExclusive, pageLimit + 1);
         boolean more = candidates.size() > pageLimit;
@@ -141,9 +188,19 @@ final class MysqlProductVectorSnapshotReader {
         return new ScanPage(values, more ? keys.getLast() : null);
     }
 
-    /** 五种真实键来源都参与候选发现，旧标量孤儿不能在范围扫描中被静默漏掉。 */
-    private static List<String> candidateKeys(Connection connection, KeyRange range,
-                                              String afterKeyExclusive, int limit) throws SQLException {
+    /**
+     * Five real key sources were involved in the selection and it was found that the old target number of orphans could not be lost silently in a range scan.
+     *
+     * @param connection connection
+     * @param range range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static List<String> candidateKeys(final Connection connection, final KeyRange range,
+                                              final String afterKeyExclusive, final int limit) throws SQLException {
         List<byte[]> bounds = new ArrayList<>();
         StringBuilder predicate = new StringBuilder(" where 1 = 1");
         if (range.startKeyInclusive() != null) {
@@ -194,9 +251,18 @@ final class MysqlProductVectorSnapshotReader {
         }
     }
 
-    /** 三类向量行在一次查询中给每个候选键确定唯一的物理分条。 */
-    private static Map<String, Integer> keyStripes(Connection connection, List<String> keys,
-                                                    long requesterTxId) throws SQLException {
+    /**
+     * Three vector rows determine the only physical subsection for each candidate in a query.
+     *
+     * @param connection connection
+     * @param keys keys
+     * @param requesterTxId requester tx id
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static Map<String, Integer> keyStripes(final Connection connection, final List<String> keys,
+                                                   final long requesterTxId) throws SQLException {
         Map<String, Integer> stripes = new HashMap<>();
         if (keys.isEmpty()) {
             return stripes;
@@ -230,9 +296,17 @@ final class MysqlProductVectorSnapshotReader {
         return stripes;
     }
 
-    /** 一次找出整页所有无映射的旧标量行，不能因向量行存在就忽略混合协议历史。 */
-    private static void rejectUnmappedScalarRows(Connection connection, List<String> keys,
-                                                 long requesterTxId) throws SQLException {
+    /**
+     * The history of mixed agreements cannot be ignored because vector lines exist.
+     *
+     * @param connection connection
+     * @param keys keys
+     * @param requesterTxId requester tx id
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void rejectUnmappedScalarRows(final Connection connection, final List<String> keys,
+                                                 final long requesterTxId) throws SQLException {
         if (keys.isEmpty()) {
             return;
         }
@@ -259,11 +333,24 @@ final class MysqlProductVectorSnapshotReader {
         }
     }
 
-    /** 分条上界与候选键一次传给数据库，三类版本合并后按原有点读规则选首个可见项。 */
-    private static Map<String, VersionedValue> visiblePageValues(Connection connection,
-            MysqlStripedSnapshotOracle.Snapshot snapshot, String shardId, List<String> keys,
-            Map<String, Integer> stripes, long requesterTxId,
-            TransactionMetadataStore metadata) throws SQLException {
+    /**
+     * The split upper bounds and candidate keys are passed to database at a time, and the first visible entry is selected after combining three types of version with some reading rule.
+     *
+     * @param connection connection
+     * @param snapshot snapshot
+     * @param shardId logical shard identifier
+     * @param keys keys
+     * @param stripes stripes
+     * @param requesterTxId requester tx id
+     * @param metadata metadata
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static Map<String, VersionedValue> visiblePageValues(final Connection connection,
+                                                                 final MysqlStripedSnapshotOracle.Snapshot snapshot, final String shardId, final List<String> keys,
+                                                                 final Map<String, Integer> stripes, final long requesterTxId,
+                                                                 final TransactionMetadataStore metadata) throws SQLException {
         Map<String, VersionedValue> visible = new HashMap<>();
         if (keys.isEmpty()) {
             return visible;
@@ -359,22 +446,41 @@ final class MysqlProductVectorSnapshotReader {
         return visible;
     }
 
-    /** 绑定批量二进制业务键并返回下一参数位置。 */
-    private static int bindKeys(PreparedStatement query, List<String> keys, int parameter)
-            throws SQLException {
+    /**
+     * Ties the batch binary key and returns the next parameter position.
+     *
+     * @param query query
+     * @param keys keys
+     * @param parameter parameter
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static int bindKeys(final PreparedStatement query, final List<String> keys, int parameter) throws SQLException {
         for (String key : keys) {
             query.setBytes(parameter++, Utf8KeyOrder.encode(key));
         }
         return parameter;
     }
 
-    /** 每页参数列表只由有界候选键数量生成。 */
-    private static String placeholders(int count) {
+    /**
+     * The list of parameters per page is generated only by the number of bounded candidates.
+     *
+     * @param count count
+     * @return the operation result
+     */
+    private static String placeholders(final int count) {
         return IntStream.range(0, count).mapToObj(ignored -> "?").collect(Collectors.joining(", "));
     }
 
-    /** 数据库键必须能无损往返 UTF-8，防止 Java 字符串别名。 */
-    private static String decodeKey(byte[] bytes, long requesterTxId) {
+    /**
+     * Database keys shall be able to move to and from UTF-8 without loss, preventing Java string aliases.
+     *
+     * @param bytes bytes
+     * @param requesterTxId requester tx id
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private static String decodeKey(final byte[] bytes, final long requesterTxId) {
         String key = new String(bytes, StandardCharsets.UTF_8);
         if (!java.util.Arrays.equals(bytes, Utf8KeyOrder.encode(key))) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -383,10 +489,18 @@ final class MysqlProductVectorSnapshotReader {
         return key;
     }
 
-    /** 混入无向量映射的旧版本或意向时拒绝猜测跨协议先后顺序。 */
-    private static void rejectUnmappedScalarRows(Connection connection, byte[] key,
-                                                 int stripe, long requesterTxId)
-            throws SQLException {
+    /**
+     * Disables guessing cross-arranged order when mixing old version or intent without vector map.
+     *
+     * @param connection connection
+     * @param key business key
+     * @param stripe stripe
+     * @param requesterTxId requester tx id
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void rejectUnmappedScalarRows(final Connection connection, final byte[] key,
+                                                 final int stripe, final long requesterTxId) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select
                   exists(select 1 from mvcc_data d where d.user_key = ?

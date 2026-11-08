@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.TxStatus;
@@ -24,20 +40,30 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 /**
- * 在调用者持有的同一本地快照中批量读取版本和意向，不持有跨页 JDBC 游标。
+ * Batch reads version and intent in the same local snapshot held by the caller, without holding a cross-page JDBC cursor.
  */
 final class MysqlSnapshotReader {
+
     /**
-     * 阻止实例化快照读取工具。
+     * Stops the exemplifier snapshot reading tool.
      */
     private MysqlSnapshotReader() {
     }
 
     /**
-     * 读取有界原始键页并叠加本事务写入和已发布的其他事务意向。
+     * Read the original bounded key page and superimpose a copy of transaction written and other transaction intent published.
+     *
+     * @param connection connection
+     * @param context context
+     * @param range range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @param metadata metadata
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
      */
-    static ScanPage page(Connection connection, ReadContext context, KeyRange range,
-                         String afterKeyExclusive, int limit, TransactionMetadataStore metadata) throws SQLException {
+    static ScanPage page(final Connection connection, final ReadContext context, final KeyRange range,
+                         final String afterKeyExclusive, final int limit, final TransactionMetadataStore metadata) throws SQLException {
         List<String> collected = collectKeys(connection, range, afterKeyExclusive, limit + 1);
         boolean hasMore = collected.size() > limit;
         List<String> keys = hasMore ? collected.subList(0, limit) : collected;
@@ -49,15 +75,22 @@ final class MysqlSnapshotReader {
                 values.add(value);
             }
         }
-        // 游标必须来自扫描过的原始键，删除或不可见意向不能使分页停滞。
+        // Cursor must come from a scanned original key and delete or not see intent does not make the page break stagnate.
         return new ScanPage(values, hasMore ? keys.getLast() : null);
     }
 
     /**
-     * 以两次批量查询读取指定键的最新可见版本及全部意向。
+     * Read the latest visible version and all intent keys with two batch queries.
+     *
+     * @param connection connection
+     * @param context context
+     * @param keys keys
+     * @param metadata metadata
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
      */
-    static Map<String, VersionedValue> visibleValues(Connection connection, ReadContext context,
-                                                     List<String> keys, TransactionMetadataStore metadata) throws SQLException {
+    static Map<String, VersionedValue> visibleValues(final Connection connection, final ReadContext context,
+                                                     final List<String> keys, final TransactionMetadataStore metadata) throws SQLException {
         Map<String, VersionedValue> values = new HashMap<>();
         if (keys.isEmpty()) {
             return values;
@@ -82,9 +115,10 @@ final class MysqlSnapshotReader {
         }
         List<ReadIntent> intents = new ArrayList<>();
         Set<Long> foreignTransactions = new LinkedHashSet<>();
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select user_key, tx_id, start_ts, deleted, value from mvcc_intent where user_key in ("
-                        + placeholders(keys.size()) + ")")) {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select user_key, tx_id, start_ts, deleted, value from mvcc_intent where user_key in ("
+                                + placeholders(keys.size()) + ")")) {
             bindKeys(statement, keys);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
@@ -97,11 +131,11 @@ final class MysqlSnapshotReader {
                 }
             }
         }
-        // 每页先去重再解析，非终态不缓存；下页允许重新观察刚发布的决议。
+        // Each page is resolved, not terminal state without cache; the next page allows for a new view of the newly released decision.
         Map<Long, TxRecord> terminal = new HashMap<>();
         if (metadata != null) {
             for (long txId : foreignTransactions) {
-                // 旧 RR view 可能仍看见已物化的意向，但中心决议已被 GC；不能把缺失误判为未提交。
+                // The old RR view may still see materialization, but the center decision has already been GC; failure cannot be judged as missing commit.
                 TxRecord record = metadata.get(txId).orElseThrow(() -> new MissingDecisionException(txId));
                 if (record.status() == TxStatus.COMMITTED || record.status() == TxStatus.ABORTED) {
                     terminal.put(txId, record);
@@ -127,9 +161,16 @@ final class MysqlSnapshotReader {
     }
 
     /**
-     * 将每个来源限制为一页候选键，避免 UNION 在分页前装载整个键范围。
+     * Limit each source to a one-page candidate key, avoiding UNION loading the full range of keys in front of the page break.
+     *
+     * @param connection connection
+     * @param range range
+     * @param after after
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
      */
-    private static List<String> collectKeys(Connection connection, KeyRange range, String after, int limit) throws SQLException {
+    private static List<String> collectKeys(final Connection connection, final KeyRange range, final String after, final int limit) throws SQLException {
         List<byte[]> bounds = new ArrayList<>();
         StringBuilder predicate = new StringBuilder(" where 1 = 1");
         if (range.startKeyInclusive() != null) {
@@ -167,42 +208,61 @@ final class MysqlSnapshotReader {
     }
 
     /**
-     * 绑定一页 UTF-8 二进制键参数。
+     * Ties a page of UTF-8 binary key parameters.
+     *
+     * @param statement statement
+     * @param keys keys
+     * @throws SQLException if the operation cannot complete
      */
-    private static void bindKeys(PreparedStatement statement, List<String> keys) throws SQLException {
+    private static void bindKeys(final PreparedStatement statement, final List<String> keys) throws SQLException {
         for (int index = 0; index < keys.size(); index++) {
             statement.setBytes(index + 1, Utf8KeyOrder.encode(keys.get(index)));
         }
     }
 
     /**
-     * 创建有界参数列表，业务键始终通过 JDBC 参数传递。
+     * Creates a list of bounded parameters, and the key always passes through JDBC parameters.
+     *
+     * @param count count
+     * @return the operation result
      */
-    private static String placeholders(int count) {
+    private static String placeholders(final int count) {
         return IntStream.range(0, count).mapToObj(ignored -> "?").collect(Collectors.joining(", "));
     }
 
     /**
-     * 解码数据库中经过校验的 UTF-8 业务键。
+     * Decoding UTF-8 business keys in database that pass validate.
+     *
+     * @param key business key
+     * @return the operation result
      */
-    private static String decode(byte[] key) {
+    private static String decode(final byte[] key) {
         return new String(key, StandardCharsets.UTF_8);
     }
 
     /**
-     * 通知调用者关闭旧本地快照并重新读取，不向上层泄漏或放大成整事务重试。
+     * Notify caller to close the old local snapshot and read it again, without leaking or zooming in to the upper layer.
      */
     static final class MissingDecisionException extends RuntimeException {
+
         /**
-         * 保留缺失中心决议的事务编号，供重读失败时报告不可判定的意向。
+         * Retain transaction identifier of missing centre decision, report undecidable intent when rereading failed.
+         *
+         * @param txId transaction identifier
          */
-        MissingDecisionException(long txId) {
+        MissingDecisionException(final long txId) {
             super("metadata decision missing for intent transaction " + txId);
         }
     }
 
     /**
-     * 当前页的意向值，仅在本次读取期间保留。
+     * The intent value of the current page is retained only during this reading.
+     *
+     * @param key business key
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param deleted deleted
+     * @param value value to write
      */
     private record ReadIntent(String key, long txId, long startTs, boolean deleted, byte[] value) {
     }

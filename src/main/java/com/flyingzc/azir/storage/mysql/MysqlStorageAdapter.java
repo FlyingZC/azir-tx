@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -41,164 +57,90 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 /**
- * MySQL MVCC 参与者，以本地水位、事务行和稳定键锁保护迟到请求及终态重放。
+ * Stores transaction intents, rollback markers and committed versions in a MySQL shard.
  */
 public class MysqlStorageAdapter implements StorageAdapter {
+
     private static final int BATCH_SIZE = 512;
+
     private static final int MAX_PAGE_SIZE = 4096;
+
     private static final long TERMINAL_RETENTION_MS = 60_000L;
 
     private final String shardId;
+
     private final DataSource dataSource;
+
     private volatile TransactionMetadataStore metadataStore;
+
     private volatile boolean singleKeyPrewriteReady;
+
     private volatile boolean singleKeyCommitReady;
+
     private volatile boolean singleKeyIntentCommitReady;
+
     private volatile boolean singleKeyCommitV2Ready;
+
     private volatile boolean useSingleKeyCommitV2;
+
     private volatile MysqlVectorReservationStore vectorReservations;
+
     private long pendingScanAfter = Long.MIN_VALUE;
+
     private long terminalGcAfter = Long.MIN_VALUE;
+
     private boolean terminalGcTurn;
 
-    /** 向量后台清理只读此真实前台数据源以核对物理分片权威。 */
+    /**
+     * Vector background Clean read-only This real foreground data source to check physical shard authority.
+     *
+     * @return the operation result
+     */
     DataSource vectorDataSource() {
         return dataSource;
     }
 
-    /** 只在完整意向本地事务成功提交后创建的中心跨分片决议凭据。 */
-    public static final class PrewriteProof {
-        private final long txId;
-        private final long startTs;
-        private final String shardId;
-        private final int mutationCount;
-        private final TransactionMetadataStore authority;
-        private final VectorReservation vectorReservation;
-
-        /** 构造入口仅由同一适配器的持久预写成功路径调用。 */
-        private PrewriteProof(long txId, long startTs, String shardId, int mutationCount,
-                              TransactionMetadataStore authority) {
-            this(txId, startTs, shardId, mutationCount, authority, null);
-        }
-
-        /** 新协议证明额外绑定同一物理预写事务保留的分条序号。 */
-        private PrewriteProof(long txId, long startTs, String shardId, int mutationCount,
-                              TransactionMetadataStore authority, VectorReservation vectorReservation) {
-            this.txId = txId;
-            this.startTs = startTs;
-            this.shardId = shardId;
-            this.mutationCount = mutationCount;
-            this.authority = authority;
-            this.vectorReservation = vectorReservation;
-        }
-
-        /** 返回本地意向所属的全局事务编号。 */
-        public long txId() { return txId; }
-
-        /** 返回分片已校验过的事务读快照。 */
-        public long startTs() { return startTs; }
-
-        /** 返回唯一目标分片路由。 */
-        public String shardId() { return shardId; }
-
-        /** 返回非空完整写集合的持久预写条数。 */
-        public int mutationCount() { return mutationCount; }
-
-        /** 只有向量预写路径才携带经本地事务原子落盘的序号证明。 */
-        public Optional<VectorReservation> vectorReservation() {
-            return Optional.ofNullable(vectorReservation);
-        }
-
-        /** 拒绝把另一控制账本实例的预写结果当作本时间线决议依据。 */
-        public boolean belongsTo(MysqlLocalFirstPublicationLedger ledger) {
-            return authority instanceof MysqlLocalFirstMetadataView view && view.usesLedger(ledger);
-        }
-    }
-
-    /** 中心只接受由私有 PrewriteProof 包装的持久分条保留身份。 */
-    public record VectorReservation(String key, int stripe, long startSequence, long reservedSequence) {
-        /** 已保留序号必须晚于事务的起始分条快照。 */
-        public VectorReservation {
-            Objects.requireNonNull(key, "key");
-            if (key.isBlank() || stripe < 0 || startSequence < 0
-                    || reservedSequence <= startSequence) {
-                throw new IllegalArgumentException("invalid vector reservation proof");
-            }
-        }
-    }
-
-    /** 多笔独立单键逻辑事务可共享一次分片物理提交，但各自保留重放身份。 */
-    public record LocalVectorCommitRequest(long txId, Mutation mutation,
-                                           int stripe, long startSequence) {
-        /** 同批每笔事务必须携带负事务号和有效起始分条边界。 */
-        public LocalVectorCommitRequest {
-            Objects.requireNonNull(mutation, "mutation");
-            if (txId >= 0 || stripe < 0 || startSequence < 0) {
-                throw new IllegalArgumentException("invalid local vector group commit request");
-            }
-        }
-    }
-
-    /** 多笔独立跨片事务在同一参与分片批量预写，仍逐笔签发中心证明。 */
-    public record VectorPrewriteRequest(long txId, long startTs, long expireAtMillis,
-                                        Mutation mutation, int stripe, long startSequence) {
-        /** 批量预写必须有持久身份、有效期限和非负分条起点。 */
-        public VectorPrewriteRequest {
-            Objects.requireNonNull(mutation, "mutation");
-            if (txId == 0 || startTs < 0 || expireAtMillis < 1
-                    || stripe < 0 || startSequence < 0) {
-                throw new IllegalArgumentException("invalid vector cross prewrite request");
-            }
-        }
-    }
-
-    /** 只在真实分片终态已落盘并核对后签发的跨分片最终化证明。 */
-    public static final class IntentTerminalProof {
-        private final String shardId;
-        private final ParticipantRecord record;
-        private final TransactionMetadataStore authority;
-
-        /** 构造入口仅在同一适配器提交或回滚完成后开放。 */
-        private IntentTerminalProof(String shardId, ParticipantRecord record,
-                                    TransactionMetadataStore authority) {
-            this.shardId = shardId;
-            this.record = record;
-            this.authority = authority;
-        }
-
-        /** 返回已持久完成终态的物理分片路由。 */
-        public String shardId() { return shardId; }
-
-        /** 返回已核对的参与者事务编号、快照与终态。 */
-        public ParticipantRecord record() { return record; }
-
-        /** 中心仅接受由同一持久控制账本下的适配器签发的证明。 */
-        public boolean belongsTo(MysqlLocalFirstPublicationLedger ledger) {
-            return authority instanceof MysqlLocalFirstMetadataView view && view.usesLedger(ledger);
-        }
-    }
-
-    /** 构造稍后绑定中心权威的适配器；注入的数据源应自行配置 connectTimeout 和 socketTimeout。 */
-    public MysqlStorageAdapter(String shardId, DataSource dataSource) {
+    /**
+     * Constructs the adaptor for later binding of centre authority; the injected data source should configure its own conectTimeout and socketTimeout.
+     *
+     * @param shardId logical shard identifier
+     * @param dataSource database connection source
+     */
+    public MysqlStorageAdapter(final String shardId, final DataSource dataSource) {
         this(shardId, dataSource, null);
     }
 
-    /** 构造能够解析中心决议的适配器；外部数据源的驱动超时不能由合作式恢复预算替代。 */
-    public MysqlStorageAdapter(String shardId, DataSource dataSource, TransactionMetadataStore metadataStore) {
+    /**
+     * Construct an adaptor that can interpret centre decision; the driver of external data sources timeout cannot be replaced by cooperative recovery budget.
+     *
+     * @param shardId logical shard identifier
+     * @param dataSource database connection source
+     * @param metadataStore metadata store
+     */
+    public MysqlStorageAdapter(final String shardId, final DataSource dataSource, final TransactionMetadataStore metadataStore) {
         this.shardId = Objects.requireNonNull(shardId, "shardId");
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.metadataStore = metadataStore;
     }
 
-    /** 返回参与分片编号。 */
+    /**
+     * Returns the participating shard number.
+     *
+     * @return the operation result
+     */
     @Override
     public String shardId() {
         return shardId;
     }
 
-    /** 仅允许首次绑定或重复绑定同一实例，避免静默替换中心决议权威。 */
+    /**
+     * Only the first binding or repeated binding of the same example is allowed to avoid silent replacement centre decision authority.
+     *
+     * @param store store
+     * @throws IllegalStateException if the operation cannot complete
+     */
     @Override
-    public synchronized void configureMetadataStore(TransactionMetadataStore store) {
+    public synchronized void configureMetadataStore(final TransactionMetadataStore store) {
         Objects.requireNonNull(store, "store");
         if (metadataStore != null && metadataStore != store) {
             throw new IllegalStateException("adapter already belongs to another metadata authority");
@@ -206,19 +148,29 @@ public class MysqlStorageAdapter implements StorageAdapter {
         metadataStore = store;
     }
 
-    /** 表示版本与参与者提交记录能够在同一本地事务中原子落盘。 */
+    /**
+     * Is that version and participant commit records can be dropped on atomic in the same local transaction.
+     *
+     * @return the operation result
+     */
     @Override
     public boolean supportsAtomicDirectCommit() {
         return true;
     }
 
-    /** 只有绑定中心权威后才能解析已发布但尚未物化的意向。 */
+    /**
+     * Intent published but not yet materialization will be parsed only after binding the centre authority.
+     *
+     * @return the operation result
+     */
     @Override
     public boolean supportsCommittedIntentResolution() {
         return metadataStore != null;
     }
 
-    /** 初始化协议表与查询索引，不推断旧数据缺失的历史事务决议。 */
+    /**
+     * Initialize protocol table and query index without extrapolating history of missing old data transaction decision.
+     */
     @Override
     public void initialize() {
         List<String> statements = List.of("""
@@ -274,30 +226,37 @@ public class MysqlStorageAdapter implements StorageAdapter {
             singleKeyIntentCommitReady = true;
             ensureSingleKeyCommitProcedureV2(connection);
             singleKeyCommitV2Ready = true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "initialize schema failed", ex);
         }
     }
 
-    /** 显式启用持久分条序号布局，不影响默认参与者表和旧事务入口。 */
-    public synchronized void initializeVectorProtocol(int stripes) {
+    /**
+     * Visiblely enable the layout of durable sub-column numbers without affecting the default participant table and the old transaction entry.
+     *
+     * @param stripes stripes
+     */
+    public synchronized void initializeVectorProtocol(final int stripes) {
         MysqlVectorReservationStore store = new MysqlVectorReservationStore(dataSource, stripes);
         try {
             store.initialize();
             vectorReservations = store;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "initialize vector reservation protocol failed", ex);
         }
     }
 
-    /** 重启后只探测单键快速例程，缺失时拒绝以未初始化存储运行高性能账本。 */
+    /**
+     * Resuscitation only detects a single-key fast-track routine and, when missing, refuses to run high performance books in uninitialised storage.
+     */
     public void requireInitializedFastPath() {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement query = connection.prepareStatement("""
-                     select routine_name from information_schema.routines
-                     where routine_schema = database()
-                       and routine_name in ('mvcc_prewrite_one_v2', 'mvcc_commit_one_v1', 'mvcc_commit_one_v2')
-                     """)) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement query = connection.prepareStatement("""
+                        select routine_name from information_schema.routines
+                        where routine_schema = database()
+                          and routine_name in ('mvcc_prewrite_one_v2', 'mvcc_commit_one_v1', 'mvcc_commit_one_v2')
+                        """)) {
             boolean prewriteReady = false;
             boolean commitReady = false;
             boolean commitV2Ready = false;
@@ -318,12 +277,14 @@ public class MysqlStorageAdapter implements StorageAdapter {
             singleKeyPrewriteReady = true;
             singleKeyCommitReady = true;
             singleKeyCommitV2Ready = commitV2Ready;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "inspect participant routines failed", ex);
         }
     }
 
-    /** 只有探测到第二版例程后才能显式启用，旧版仍是默认物化路径。 */
+    /**
+     * Only when the second version of the routine is detected will it be visible, and the old version remains the default materialization path.
+     */
     public void enableSingleKeyCommitV2() {
         if (!singleKeyCommitV2Ready) {
             throw illegal(0, "single-key commit v2 routine is not initialized");
@@ -331,8 +292,13 @@ public class MysqlStorageAdapter implements StorageAdapter {
         useSingleKeyCommitV2 = true;
     }
 
-    /** 安装单键预写例程，版本名固定以避免升级时改写正在执行的数据库代码。 */
-    private void ensureSingleKeyPrewriteProcedure(Connection connection) throws SQLException {
+    /**
+     * Install a single key prewrite routine, and version is fixed to avoid rewrite the database code being implemented when it is upgraded.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureSingleKeyPrewriteProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_prewrite_one_v2' limit 1
@@ -416,15 +382,20 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 安装单键意向物化例程，把版本、参与者终态及可选意向清理置于同一本地事务。 */
-    private void ensureSingleKeyCommitProcedure(Connection connection) throws SQLException {
+    /**
+     * Install single-key intent materialization routines to clean version, participant terminal state and optional intent in the same local transaction.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureSingleKeyCommitProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_commit_one_v1' limit 1
@@ -537,15 +508,20 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 安装无需前台写集合的单键意向恢复例程，在分片事务内读取并物化本地意向。 */
-    private void ensureSingleKeyIntentCommitProcedure(Connection connection) throws SQLException {
+    /**
+     * Install a single-key intent recovery routine that does not require foreground write set, read and materialization local intent in shard transaction.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureSingleKeyIntentCommitProcedure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_commit_intent_one_v1' limit 1
@@ -643,15 +619,20 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 安装单键物化第二版，把常见首次提交的意向核对与版本写入合为一条语句。 */
-    private void ensureSingleKeyCommitProcedureV2(Connection connection) throws SQLException {
+    /**
+     * Installs single key materialization version 2, which combines a common first commit intent check with version for writing in a statement.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureSingleKeyCommitProcedureV2(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database() and routine_name = 'mvcc_commit_one_v2' limit 1
@@ -758,47 +739,65 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 end
                 """)) {
             create.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
         }
     }
 
-    /** 查询真实持久化状态，不缓存 ACTIVE 或缺失记录。 */
+    /**
+     * Querys the real durable storage state, does not cache ACTIVE or missing records.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
     @Override
-    public Optional<ParticipantRecord> participantRecord(long txId) {
+    public Optional<ParticipantRecord> participantRecord(final long txId) {
         try (Connection connection = dataSource.getConnection()) {
             return selectParticipant(connection, txId, false);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(txId, "read participant record failed", ex);
         }
     }
 
-    /** 在同一本地快照读取版本和意向，保留点读墓碑语义。 */
+    /**
+     * Read version and intent in the same local snapshot and keep point reading tombstone.
+     *
+     * @param context context
+     * @param key business key
+     * @return the operation result
+     */
     @Override
-    public Optional<VersionedValue> get(ReadContext context, String key) {
+    public Optional<VersionedValue> get(final ReadContext context, final String key) {
         encodeKey(key);
-        return readSnapshot(context, connection ->
-                Optional.ofNullable(MysqlSnapshotReader.visibleValues(connection, context, List.of(key), metadataStore).get(key)));
+        return readSnapshot(context, connection -> Optional.ofNullable(MysqlSnapshotReader.visibleValues(connection, context, List.of(key), metadataStore).get(key)));
     }
 
-    /** 仅内部保护读入口可用固定向量点读，外部不能绕开读者租约访问已回收快照。 */
-    Optional<VersionedValue> getVector(MysqlStripedSnapshotOracle.Snapshot snapshot,
-                                       long requesterTxId, String key, int stripe) {
+    /**
+     * Internally protected reading portals can only be read with a fixed vector point, and external access to reader lease cannot be bypassed.
+     *
+     * @param snapshot snapshot
+     * @param requesterTxId requester tx id
+     * @param key business key
+     * @param stripe stripe
+     * @return the operation result
+     */
+    Optional<VersionedValue> getVector(final MysqlStripedSnapshotOracle.Snapshot snapshot,
+                                       final long requesterTxId, final String key, final int stripe) {
         encodeKey(key);
         if (vectorReservations == null || !(metadataStore instanceof MysqlLocalFirstMetadataView)) {
             throw illegal(requesterTxId, "vector read requires initialized stripe layout and center authority");
         }
-        for (int attempt = 0; ; attempt++) {
+        for (int attempt = 0;; attempt++) {
             try {
                 return transaction(requesterTxId, true, connection -> {
                     requireFresh(requesterTxId, snapshot.decisionEpoch(), readWatermark(connection));
                     return MysqlProductVectorSnapshotReader.get(connection, snapshot,
                             shardId, key, stripe, requesterTxId, metadataStore);
                 });
-            } catch (MysqlSnapshotReader.MissingDecisionException missing) {
-                // 旧本地 RR view 见到已清理意向时，关闭连接后按原全局向量重读一次。
+            } catch (final MysqlSnapshotReader.MissingDecisionException missing) {
+                // When the old local RR view sees cleared intent, close connection and reread it again to the original global vector.
                 if (attempt == 1) {
                     throw uncertain(requesterTxId,
                             "vector intent decision still missing after rebuilding local snapshot", missing);
@@ -807,25 +806,37 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 固定向量范围读仅供持有 GC 保护句柄的包内入口调用。 */
-    ScanPage scanVectorPage(MysqlStripedSnapshotOracle.Snapshot snapshot, long requesterTxId,
-                            KeyRange range, String afterKeyExclusive, int limit) {
+    /**
+     * The fixed vector range is read only for inside access to the package holding GC protected handles.
+     *
+     * @param snapshot snapshot
+     * @param requesterTxId requester tx id
+     * @param range range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    ScanPage scanVectorPage(final MysqlStripedSnapshotOracle.Snapshot snapshot, final long requesterTxId,
+                            final KeyRange range, final String afterKeyExclusive, final int limit) {
         Objects.requireNonNull(range, "range");
         checkLimit(limit);
-        if (range.startKeyInclusive() != null) encodeKey(range.startKeyInclusive());
-        if (range.endKeyExclusive() != null) encodeKey(range.endKeyExclusive());
-        if (afterKeyExclusive != null) encodeKey(afterKeyExclusive);
+        if (range.startKeyInclusive() != null)
+            encodeKey(range.startKeyInclusive());
+        if (range.endKeyExclusive() != null)
+            encodeKey(range.endKeyExclusive());
+        if (afterKeyExclusive != null)
+            encodeKey(afterKeyExclusive);
         if (vectorReservations == null || !(metadataStore instanceof MysqlLocalFirstMetadataView)) {
             throw illegal(requesterTxId, "vector scan requires initialized stripe layout and center authority");
         }
-        for (int attempt = 0; ; attempt++) {
+        for (int attempt = 0;; attempt++) {
             try {
                 return transaction(requesterTxId, true, connection -> {
                     requireFresh(requesterTxId, snapshot.decisionEpoch(), readWatermark(connection));
                     return MysqlProductVectorSnapshotReader.page(connection, snapshot,
                             shardId, range, afterKeyExclusive, limit, requesterTxId, metadataStore);
                 });
-            } catch (MysqlSnapshotReader.MissingDecisionException missing) {
+            } catch (final MysqlSnapshotReader.MissingDecisionException missing) {
                 if (attempt == 1) {
                     throw uncertain(requesterTxId,
                             "vector scan decision still missing after rebuilding local snapshot", missing);
@@ -834,9 +845,15 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 循环合并有界页，需要流式消费的调用方应使用分页接口。 */
+    /**
+     * Cycle bounded page combination. The caller that requires current consumption should use the page break interface.
+     *
+     * @param context context
+     * @param keyRange key range
+     * @return the operation result
+     */
     @Override
-    public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+    public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
         List<VersionedValue> values = new ArrayList<>();
         String after = null;
         do {
@@ -847,25 +864,39 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return values;
     }
 
-    /** 批量读取一页原始键、最新可见版本及意向，返回前关闭所有 JDBC 资源。 */
+    /**
+     * Batch Reads one page original key, latest visible version and intent, closes all JDBC resources before returning.
+     *
+     * @param context context
+     * @param keyRange key range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public ScanPage scanPage(ReadContext context, KeyRange keyRange, String afterKeyExclusive, int limit) {
+    public ScanPage scanPage(final ReadContext context, final KeyRange keyRange, final String afterKeyExclusive, final int limit) {
         checkLimit(limit);
         Objects.requireNonNull(keyRange, "keyRange");
-        return readSnapshot(context, connection ->
-                MysqlSnapshotReader.page(connection, context, keyRange, afterKeyExclusive, limit, metadataStore));
+        return readSnapshot(context, connection -> MysqlSnapshotReader.page(connection, context, keyRange, afterKeyExclusive, limit, metadataStore));
     }
 
-    /** 决议缺失时仅重建一次本地 RR 快照，原全局 readTs、键范围和分页参数始终不变。 */
-    private <T> T readSnapshot(ReadContext context, SqlWork<T> read) {
-        for (int attempt = 0; ; attempt++) {
+    /**
+     * Decision recreates local RR snapshot only once when it is missing, and the original global readTs, key range and page break parameters remain unchanged.
+     *
+     * @param <T> value type
+     * @param context context
+     * @param read read
+     * @return the operation result
+     */
+    private <T> T readSnapshot(final ReadContext context, final SqlWork<T> read) {
+        for (int attempt = 0;; attempt++) {
             try {
                 return transaction(context.txId(), true, connection -> {
                     requireFresh(context.txId(), context.readTs(), readWatermark(connection));
                     return read.execute(connection);
                 });
-            } catch (MysqlSnapshotReader.MissingDecisionException missing) {
-                // transaction 已回滚并关闭旧连接；第二次仍缺失时禁止返回缓存的旧值或空页。
+            } catch (final MysqlSnapshotReader.MissingDecisionException missing) {
+                // Transaction is rollback and closes the old connection; returning the old or empty cache value or page is prohibited when it is still missing.
                 if (attempt == 1) {
                     throw uncertain(context.txId(), "intent decision still missing after rebuilding local snapshot", missing);
                 }
@@ -873,15 +904,28 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 先保护事务终态及稳定键锁，再按有界批次检测冲突并原子写入整份意向。 */
+    /**
+     * First protect transaction terminal state and stabilize key locks, then press bounded batch to detect conflict and atomic write the whole intent.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutations transaction write set
+     */
     @Override
-    public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+    public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
         List<Mutation> writes = normalize(mutations);
         prewriteNormalized(txId, startTs, writes);
     }
 
-    /** 跨分片新协议只对非空完整写集合返回不可由外部构造的持久预写证明。 */
-    public PrewriteProof prewriteWithProof(long txId, long startTs, List<Mutation> mutations) {
+    /**
+     * The new cross-shard protocol only returns an unincorporated durable prewrite certificate to the non-empty complete write set.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutations transaction write set
+     * @return the operation result
+     */
+    public PrewriteProof prewriteWithProof(final long txId, final long startTs, final List<Mutation> mutations) {
         List<Mutation> writes = normalize(mutations);
         TransactionMetadataStore authority = metadataStore;
         if (writes.isEmpty() || !(authority instanceof MysqlLocalFirstMetadataView)) {
@@ -891,9 +935,18 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return new PrewriteProof(txId, startTs, shardId, writes.size(), authority);
     }
 
-    /** 向量跨片预写把真实意向与分条序号在同一分片事务中落盘后签发证明。 */
-    public PrewriteProof prewriteWithVectorProof(long txId, long startTs, Mutation mutation,
-                                                int stripe, long startSequence) {
+    /**
+     * Cross-shard prewrite issues a certificate after landing in the same shard transaction with the real intent number.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @return the operation result
+     */
+    public PrewriteProof prewriteWithVectorProof(final long txId, final long startTs, final Mutation mutation,
+                                                 final int stripe, final long startSequence) {
         List<Mutation> writes = normalize(List.of(Objects.requireNonNull(mutation, "mutation")));
         TransactionMetadataStore authority = metadataStore;
         MysqlVectorReservationStore reservations = vectorReservations;
@@ -906,7 +959,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
                     startSequence, System.currentTimeMillis() + TERMINAL_RETENTION_MS);
             return new PrewriteProof(txId, startTs, shardId, 1, authority,
                     new VectorReservation(mutation.key(), stripe, startSequence, sequence));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw switch (ex.getErrorCode()) {
                 case 38001, 38003, 38004 -> new MvccException(ErrorCode.ILLEGAL_STATE,
                         "vector prewrite has incompatible durable identity", false, txId, ex);
@@ -923,9 +976,18 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 只供容量对照保留原多条 JDBC SQL 的向量预写实现。 */
-    PrewriteProof prewriteWithVectorProofJavaForProbe(long txId, long startTs, Mutation mutation,
-                                                     int stripe, long startSequence) {
+    /**
+     * Only prewrite of the previous JDBC SQL vectors retained against the capacity.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @return the operation result
+     */
+    PrewriteProof prewriteWithVectorProofJavaForProbe(final long txId, final long startTs, final Mutation mutation,
+                                                      final int stripe, final long startSequence) {
         List<Mutation> writes = normalize(List.of(Objects.requireNonNull(mutation, "mutation")));
         TransactionMetadataStore authority = metadataStore;
         MysqlVectorReservationStore reservations = vectorReservations;
@@ -944,7 +1006,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
             lockKeys(connection, List.of(mutation.key()));
             checkWriteConflicts(connection, txId, startTs, writes);
             writeIntents(connection, txId, startTs, writes);
-            // 保留序号和真实 mvcc_intent 共用当前 JDBC 事务及同一稳定键锁。
+            // Keeps the serial number and real mvcc_intent to share the current JDBC transaction with the same stable key lock.
             return reservations.reserve(connection, txId, startTs, mutation, stripe, startSequence);
         });
         return new PrewriteProof(txId, startTs, shardId, 1, authority,
@@ -952,8 +1014,14 @@ public class MysqlStorageAdapter implements StorageAdapter {
                         reserved.startSequence(), reserved.reservedSequence()));
     }
 
-    /** 服务端批量预写一次物理事务，每笔成功后仍返回独立真实分片证明。 */
-    public List<PrewriteProof> prewriteVectorBatchWithProof(List<VectorPrewriteRequest> requests) {
+    /**
+     * The service batch prewrite physical transaction at a time, returns independent real shard certificates after each successful entry.
+     *
+     * @param requests requests
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public List<PrewriteProof> prewriteVectorBatchWithProof(final List<VectorPrewriteRequest> requests) {
         MysqlVectorReservationStore reservations = vectorReservations;
         TransactionMetadataStore authority = metadataStore;
         if (reservations == null || !(authority instanceof MysqlLocalFirstMetadataView)
@@ -978,10 +1046,10 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 VectorPrewriteRequest request = fixed.get(index);
                 proofs.add(new PrewriteProof(request.txId(), request.startTs(), shardId, 1,
                         authority, new VectorReservation(request.mutation().key(),
-                        request.stripe(), request.startSequence(), sequences.get(index))));
+                                request.stripe(), request.startSequence(), sequences.get(index))));
             }
             return List.copyOf(proofs);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw switch (ex.getErrorCode()) {
                 case 38001, 38003, 38004 -> new MvccException(ErrorCode.ILLEGAL_STATE,
                         "vector cross batch has incompatible durable identity", false, null, ex);
@@ -998,38 +1066,54 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 响应丢失或重启后从持久分片行读取真实预写序号。 */
-    public Optional<VectorReservation> vectorReservation(long txId, String key) {
+    /**
+     * Reads the real prewrite serial number from durable shard line after responding to loss or restart.
+     *
+     * @param txId transaction identifier
+     * @param key business key
+     * @return the operation result
+     */
+    public Optional<VectorReservation> vectorReservation(final long txId, final String key) {
         MysqlVectorReservationStore reservations = vectorReservations;
         if (reservations == null) {
             throw illegal(txId, "vector reservation protocol is not initialized");
         }
         try {
-            return reservations.find(txId, key).map(found ->
-                    new VectorReservation(found.key(), found.stripe(),
-                            found.startSequence(), found.reservedSequence()));
-        } catch (SQLException ex) {
+            return reservations.find(txId, key).map(found -> new VectorReservation(found.key(), found.stripe(),
+                    found.startSequence(), found.reservedSequence()));
+        } catch (final SQLException ex) {
             throw storageError(txId, "read vector reservation failed", ex);
         }
     }
 
-    /** 恢复器读取已随真实 mvcc_data 原子物化的分条版本映射。 */
-    public Optional<VectorReservation> committedVectorReservation(long txId, String key) {
+    /**
+     * The recovery reader reads the version map with the actual mvcc_data atomic materialization.
+     *
+     * @param txId transaction identifier
+     * @param key business key
+     * @return the operation result
+     */
+    public Optional<VectorReservation> committedVectorReservation(final long txId, final String key) {
         MysqlVectorReservationStore reservations = vectorReservations;
         if (reservations == null) {
             throw illegal(txId, "vector reservation protocol is not initialized");
         }
         try {
-            return reservations.findCommitted(txId, key).map(found ->
-                    new VectorReservation(found.reservation().key(), found.reservation().stripe(),
-                            found.reservation().startSequence(), found.reservation().reservedSequence()));
-        } catch (SQLException ex) {
+            return reservations.findCommitted(txId, key).map(found -> new VectorReservation(found.reservation().key(), found.reservation().stripe(),
+                    found.reservation().startSequence(), found.reservation().reservedSequence()));
+        } catch (final SQLException ex) {
             throw storageError(txId, "read committed vector reservation failed", ex);
         }
     }
 
-    /** 读取真实参与者的分条水位，用于证明重放不会二次取号。 */
-    public long vectorSequence(int stripe) {
+    /**
+     * Reads the real participant sub-section watermark to prove that replay does not take a secondary number.
+     *
+     * @param stripe stripe
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public long vectorSequence(final int stripe) {
         MysqlVectorReservationStore reservations = vectorReservations;
         if (reservations == null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -1037,14 +1121,22 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
         try {
             return reservations.sequence(stripe);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "read vector stripe sequence failed", ex);
         }
     }
 
-    /** 单分片单键 1PC 不写中心元数据，只在本地锁键后原子保存分条版本。 */
-    public long directCommitVectorLocal(long txId, Mutation mutation, int stripe,
-                                        long startSequence) {
+    /**
+     * Single shard single key 1PC does not write central metadata. Only atomic saves sub-point version after the local lock key.
+     *
+     * @param txId transaction identifier
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @return the operation result
+     */
+    public long directCommitVectorLocal(final long txId, final Mutation mutation, final int stripe,
+                                        final long startSequence) {
         MysqlVectorReservationStore reservations = vectorReservations;
         if (reservations == null) {
             throw illegal(txId, "local vector commit requires initialized stripe layout");
@@ -1052,7 +1144,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
         List<Mutation> writes = normalize(List.of(Objects.requireNonNull(mutation, "mutation")));
         try {
             return reservations.commitLocalFast(txId, writes.getFirst(), stripe, startSequence);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw switch (ex.getErrorCode()) {
                 case 37001, 37004 -> new MvccException(ErrorCode.ILLEGAL_STATE,
                         "local vector commit has incompatible durable identity", false, txId, ex);
@@ -1067,9 +1159,17 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 容量对照保留原 Java 多语句实现，生产入口使用服务器端单次调用。 */
-    long directCommitVectorLocalJavaForProbe(long txId, Mutation mutation, int stripe,
-                                             long startSequence) {
+    /**
+     * The capacity is achieved by retaining the original Java multi-speaker and using a single call from the server end at the production entrance.
+     *
+     * @param txId transaction identifier
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @return the operation result
+     */
+    long directCommitVectorLocalJavaForProbe(final long txId, final Mutation mutation, final int stripe,
+                                             final long startSequence) {
         MysqlVectorReservationStore reservations = vectorReservations;
         if (reservations == null) {
             throw illegal(txId, "local vector commit requires initialized stripe layout");
@@ -1082,13 +1182,18 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 独立逻辑写入共用一个 InnoDB 提交，任一冲突使整批回滚且不确认部分成员。 */
-    public List<Long> directCommitVectorLocalBatch(List<LocalVectorCommitRequest> requests) {
+    /**
+     * Independent logic is written to a common InnoDB commit, where any conflict allows the whole batch of rollback s without identifying some members.
+     *
+     * @param requests requests
+     * @return the operation result
+     */
+    public List<Long> directCommitVectorLocalBatch(final List<LocalVectorCommitRequest> requests) {
         MysqlVectorReservationStore reservations = vectorReservations;
         List<LocalVectorCommitRequest> fixed = validateLocalVectorBatch(requests, reservations);
         try {
             return reservations.commitLocalBatchFast(fixed);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw switch (ex.getErrorCode()) {
                 case 37001, 37004 -> new MvccException(ErrorCode.ILLEGAL_STATE,
                         "local vector batch has incompatible durable identity", false, null, ex);
@@ -1103,8 +1208,13 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 容量对照保留旧 Java 组提交实现，验证服务端组批是否真正减少固定成本。 */
-    List<Long> directCommitVectorLocalBatchJavaForProbe(List<LocalVectorCommitRequest> requests) {
+    /**
+     * The capacity will be achieved by retaining the old Java group commit, and whether the verify service end-end batch actually reduces fixed costs.
+     *
+     * @param requests requests
+     * @return the operation result
+     */
+    List<Long> directCommitVectorLocalBatchJavaForProbe(final List<LocalVectorCommitRequest> requests) {
         MysqlVectorReservationStore reservations = vectorReservations;
         List<LocalVectorCommitRequest> fixed = validateLocalVectorBatch(requests, reservations);
         return transaction(null, false, connection -> {
@@ -1124,9 +1234,16 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 组批前固定调用顺序并拒绝重复事务或键，避免一个业务键被两个成员竞争。 */
+    /**
+     * Sets the order of calls and refuses to repeat transaction or key before the batch, avoiding that a key is competing with two members.
+     *
+     * @param requests requests
+     * @param reservations reservations
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
     private List<LocalVectorCommitRequest> validateLocalVectorBatch(
-            List<LocalVectorCommitRequest> requests, MysqlVectorReservationStore reservations) {
+                                                                    final List<LocalVectorCommitRequest> requests, final MysqlVectorReservationStore reservations) {
         if (reservations == null || requests == null || requests.isEmpty() || requests.size() > 64) {
             throw new IllegalArgumentException("invalid local vector commit batch or stripe layout");
         }
@@ -1144,8 +1261,13 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return List.copyOf(fixed);
     }
 
-    /** COMMIT 响应未知时按持久单键版本核对身份，缺行表示尚无已证明的提交。 */
-    public OptionalLong verifyLocalVectorCommit(LocalVectorCommitRequest request) {
+    /**
+     * COMMIT checked identity on durable single key when responding to unknown. Missing lines indicate that commit is not yet proven.
+     *
+     * @param request request
+     * @return the operation result
+     */
+    public OptionalLong verifyLocalVectorCommit(final LocalVectorCommitRequest request) {
         Objects.requireNonNull(request, "request");
         MysqlVectorReservationStore reservations = vectorReservations;
         if (reservations == null) {
@@ -1153,13 +1275,19 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
         try {
             return reservations.verifyLocalCommit(request);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(request.txId(), "verify local vector commit failed", ex);
         }
     }
 
-    /** 单键例程和多键事务都在本地提交成功后才返回调用者。 */
-    private void prewriteNormalized(long txId, long startTs, List<Mutation> writes) {
+    /**
+     * Single-key routines and multiple-key transaction returns the caller after local commit success.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param writes writes
+     */
+    private void prewriteNormalized(final long txId, final long startTs, final List<Mutation> writes) {
         if (writes.size() == 1 && singleKeyPrewriteReady) {
             prewriteSingleKey(txId, startTs, writes.getFirst());
             return;
@@ -1179,10 +1307,18 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 单键预写用一次服务器调用完成稳定键锁、冲突校验与意向落盘。 */
-    private void prewriteSingleKey(long txId, long startTs, Mutation mutation) {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement call = connection.prepareStatement("call mvcc_prewrite_one_v2(?, ?, ?, ?, ?, ?)")) {
+    /**
+     * Single prewrite completes the stabilization key lock with one call from the server, conflicts validate with intent.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutation mutation
+     * @throws MvccException if the operation cannot complete
+     */
+    private void prewriteSingleKey(final long txId, final long startTs, final Mutation mutation) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement call = connection.prepareStatement("call mvcc_prewrite_one_v2(?, ?, ?, ?, ?, ?)")) {
             if (!connection.getAutoCommit()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "single-key prewrite requires auto-commit connection", false, txId);
@@ -1194,7 +1330,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
             bindValue(call, 5, mutation.value());
             call.setLong(6, System.currentTimeMillis() + TERMINAL_RETENTION_MS);
             call.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw switch (ex.getErrorCode()) {
                 case 31001, 31003 -> illegal(txId, "single-key prewrite protocol state mismatch");
                 case 31002, 31007 -> new MvccException(ErrorCode.TRANSACTION_ABORTED,
@@ -1210,9 +1346,13 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 检查持久意向并冻结预写集合，重复准备保持幂等。 */
+    /**
+     * Check durable intent and freeze the prewrite collection, repeat to keep idempotent.
+     *
+     * @param txId transaction identifier
+     */
     @Override
-    public void prepare(long txId) {
+    public void prepare(final long txId) {
         transaction(txId, false, connection -> {
             lockWatermark(connection, false);
             ParticipantRecord record = requireParticipant(connection, txId);
@@ -1229,49 +1369,70 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 按中心提交决议物化全部持久意向，重放只接受相同提交时间戳。 */
+    /**
+     * All commit decision materialization by centre durable, replay accepts only the same commit timestamp.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     */
     @Override
-    public void commit(long txId, long commitTs) {
+    public void commit(final long txId, final long commitTs) {
         commitTransaction(txId, commitTs, null, true);
     }
 
-    /** 恢复物化成功并复核本地终态后，向中心返回不可伪造的最终化证明。 */
-    public IntentTerminalProof commitIntentWithProof(long txId, long commitTs) {
+    /**
+     * Recovery materialization returned a non-falsible finalization certificate to the centre after success and review of local terminal state.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @return the operation result
+     */
+    public IntentTerminalProof commitIntentWithProof(final long txId, final long commitTs) {
         if (!(metadataStore instanceof MysqlLocalFirstMetadataView)) {
             throw illegal(txId, "cross-shard terminal proof requires local-first authority");
         }
         Optional<Mutation> singleIntent = singleIntendedMutation(txId);
         if (singleIntent.isPresent()) {
-            // 单键恢复复用分片存储过程；例程会再次核对完整持久意向与中心决议。
+            // Single-key recovery repeats the shard storage process; regular processes will again check complete durable intent with centre decision.
             commit(txId, commitTs, List.of(singleIntent.get()));
         } else {
             commit(txId, commitTs);
         }
-        ParticipantRecord record = participantRecord(txId).orElseThrow(() ->
-                illegal(txId, "committed intent has no durable participant terminal"));
+        ParticipantRecord record = participantRecord(txId).orElseThrow(() -> illegal(txId, "committed intent has no durable participant terminal"));
         if (record.status() != TxStatus.COMMITTED || !Objects.equals(record.commitTs(), commitTs)) {
             throw illegal(txId, "committed intent terminal differs from center decision");
         }
         return new IntentTerminalProof(shardId, record, metadataStore);
     }
 
-    /** 向量跨片物化在同一事务写真实版本、保留序号映射和参与者终态。 */
-    public IntentTerminalProof commitVectorIntentWithProof(long txId, long commitTs, Mutation expected) {
+    /**
+     * Vector cross-shard materialization writes real version in the same transaction, retains serial number maps and participant terminal state.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param expected expected
+     * @return the operation result
+     */
+    public IntentTerminalProof commitVectorIntentWithProof(final long txId, final long commitTs, final Mutation expected) {
         if (!(metadataStore instanceof MysqlLocalFirstMetadataView) || vectorReservations == null) {
             throw illegal(txId, "vector materialization requires local-first authority and stripe layout");
         }
         commitTransaction(txId, commitTs,
                 normalize(List.of(Objects.requireNonNull(expected, "expected"))), true, null, true);
-        ParticipantRecord record = participantRecord(txId).orElseThrow(() ->
-                illegal(txId, "vector materialization has no durable participant terminal"));
+        ParticipantRecord record = participantRecord(txId).orElseThrow(() -> illegal(txId, "vector materialization has no durable participant terminal"));
         if (record.status() != TxStatus.COMMITTED || !Objects.equals(record.commitTs(), commitTs)) {
             throw illegal(txId, "vector materialization terminal differs from center decision");
         }
         return new IntentTerminalProof(shardId, record, metadataStore);
     }
 
-    /** 恢复器从持久意向或已物化版本还原单键写入，再走向量原子终态。 */
-    public IntentTerminalProof commitVectorIntentWithProof(CommittedIntentProof proof) {
+    /**
+     * The recovery device is written from the durable intent or has materialization version returned single-key, then the atomic terminal state amount.
+     *
+     * @param proof proof
+     * @return the operation result
+     */
+    public IntentTerminalProof commitVectorIntentWithProof(final CommittedIntentProof proof) {
         Objects.requireNonNull(proof, "proof");
         TxRecord decision = proof.record();
         if (!proof.belongsTo(metadataStore) || decision.status() != TxStatus.COMMITTED
@@ -1286,8 +1447,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
             reservations.materializeFast(decision.txId(), decision.startTs(), decision.commitTs());
             return new IntentTerminalProof(shardId,
                     new ParticipantRecord(decision.txId(), decision.startTs(),
-                            TxStatus.COMMITTED, decision.commitTs()), metadataStore);
-        } catch (SQLException ex) {
+                            TxStatus.COMMITTED, decision.commitTs()),
+                    metadataStore);
+        } catch (final SQLException ex) {
             throw switch (ex.getErrorCode()) {
                 case 39001, 39002, 39003 -> new MvccException(ErrorCode.ILLEGAL_STATE,
                         "vector recovery lacks matching durable participant proof", false, decision.txId(), ex);
@@ -1298,8 +1460,13 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 多分片复用同一中心决议证明，单键路径省去每个分片重复查询中心。 */
-    public IntentTerminalProof commitIntentWithProof(CommittedIntentProof proof) {
+    /**
+     * Multiple shard duplicates the same centre decision certificate, and single-key path saves every shard repeat query center.
+     *
+     * @param proof proof
+     * @return the operation result
+     */
+    public IntentTerminalProof commitIntentWithProof(final CommittedIntentProof proof) {
         Objects.requireNonNull(proof, "proof");
         TxRecord decision = proof.record();
         if (!proof.belongsTo(metadataStore) || decision.status() != TxStatus.COMMITTED
@@ -1307,14 +1474,14 @@ public class MysqlStorageAdapter implements StorageAdapter {
             throw illegal(decision.txId(), "cross-shard committed proof has wrong authority or participant");
         }
         if (singleKeyIntentCommitReady && commitSingleIntended(decision)) {
-            // 例程完成后本地版本与参与者终态已经原子持久化，可直接签发证明。
+            // Local version and participant terminal state are already atomic durable storage after the routine is completed, and can issue a certificate directly.
             return new IntentTerminalProof(shardId,
                     new ParticipantRecord(decision.txId(), decision.startTs(),
-                            TxStatus.COMMITTED, decision.commitTs()), metadataStore);
+                            TxStatus.COMMITTED, decision.commitTs()),
+                    metadataStore);
         }
         commit(decision.txId(), decision.commitTs());
-        ParticipantRecord record = participantRecord(decision.txId()).orElseThrow(() ->
-                illegal(decision.txId(), "committed intent has no durable participant terminal"));
+        ParticipantRecord record = participantRecord(decision.txId()).orElseThrow(() -> illegal(decision.txId(), "committed intent has no durable participant terminal"));
         if (record.startTs() != decision.startTs() || record.status() != TxStatus.COMMITTED
                 || !Objects.equals(record.commitTs(), decision.commitTs())) {
             throw illegal(decision.txId(), "committed intent terminal differs from center decision");
@@ -1322,8 +1489,13 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return new IntentTerminalProof(shardId, record, metadataStore);
     }
 
-    /** 单键意向只读两行判定，重启恢复也能安全选择服务器端原子物化例程。 */
-    private Optional<Mutation> singleIntendedMutation(long txId) {
+    /**
+     * Single-key intent read-only two-line decision, restarting recovery will also securely select the atomic materialization routine for the server.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    private Optional<Mutation> singleIntendedMutation(final long txId) {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select user_key, deleted, value from mvcc_intent where tx_id = ? limit 2
                 """)) {
@@ -1334,28 +1506,49 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 }
                 String key = decodeKey(row.getBytes("user_key"));
                 Mutation mutation = row.getBoolean("deleted")
-                        ? Mutation.delete(key) : Mutation.put(key, row.getBytes("value"));
+                        ? Mutation.delete(key)
+                        : Mutation.put(key, row.getBytes("value"));
                 return row.next() ? Optional.empty() : Optional.of(mutation);
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(txId, "read single cross-shard intent for recovery failed", ex);
         }
     }
 
-    /** 校验完整已知写集合与持久意向一致后提交并清理意向。 */
+    /**
+     * Validate Full known write set corresponds to durable intent and clears intent.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
+     */
     @Override
-    public void commit(long txId, long commitTs, List<Mutation> mutations) {
+    public void commit(final long txId, final long commitTs, final List<Mutation> mutations) {
         commit(txId, commitTs, mutations, true);
     }
 
-    /** 校验真实意向所有权和值后物化，允许保留已提交意向交由后台清理。 */
+    /**
+     * Validate real intent ownership and value after materialization, allowing the retention of commit intent for background cleanup.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
+     * @param cleanupIntents cleanup intents
+     */
     @Override
-    public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+    public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
         commitTransaction(txId, commitTs, normalize(mutations), cleanupIntents);
     }
 
-    /** 仅接受分段账本成功落盘后产生的凭据，省去每个分片重复查询中心决议。 */
-    public void commitDecided(CommittedProof proof, List<Mutation> mutations, boolean cleanupIntents) {
+    /**
+     * Only receipt generated after the successful closing of the batch book is accepted, and each shard repeat query centre decision is saved.
+     *
+     * @param proof proof
+     * @param mutations transaction write set
+     * @param cleanupIntents cleanup intents
+     * @throws MvccException if the operation cannot complete
+     */
+    public void commitDecided(final CommittedProof proof, final List<Mutation> mutations, final boolean cleanupIntents) {
         Objects.requireNonNull(proof, "proof");
         if (!proof.belongsTo(metadataStore) || !proof.participants().contains(shardId)
                 || proof.startTs() >= proof.commitTs()) {
@@ -1365,25 +1558,49 @@ public class MysqlStorageAdapter implements StorageAdapter {
         commitTransaction(proof.txId(), proof.commitTs(), normalize(mutations), cleanupIntents, proof);
     }
 
-    /** 在本地事务中校验中心决议、冻结写集合并原子提交版本与终态。 */
-    private void commitTransaction(long txId, long commitTs, List<Mutation> expected, boolean cleanup) {
+    /**
+     * Validate Center decision, freeze write set and atomic commit version and terminal state in local transaction.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param expected expected
+     * @param cleanup cleanup
+     */
+    private void commitTransaction(final long txId, final long commitTs, final List<Mutation> expected, final boolean cleanup) {
         commitTransaction(txId, commitTs, expected, cleanup, null);
     }
 
-    /** 普通恢复读取持久决议；前台已确认的中心提交使用账本凭据。 */
-    private void commitTransaction(long txId, long commitTs, List<Mutation> expected,
-                                   boolean cleanup, CommittedProof proof) {
+    /**
+     * Normal recovery reads durable decision; foreground confirmed centre commit uses account book receipt.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param expected expected
+     * @param cleanup cleanup
+     * @param proof proof
+     */
+    private void commitTransaction(final long txId, final long commitTs, final List<Mutation> expected,
+                                   final boolean cleanup, final CommittedProof proof) {
         commitTransaction(txId, commitTs, expected, cleanup, proof, false);
     }
 
-    /** 向量路径禁用旧单键例程，并要求版本与保留序号一同持久提交。 */
-    private void commitTransaction(long txId, long commitTs, List<Mutation> expected,
-                                   boolean cleanup, CommittedProof proof, boolean vectorRequired) {
+    /**
+     * Vector path disables the old single-key routine and requires version to be kept with the serial number durable commit.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param expected expected
+     * @param cleanup cleanup
+     * @param proof proof
+     * @param vectorRequired vector required
+     */
+    private void commitTransaction(final long txId, final long commitTs, final List<Mutation> expected,
+                                   final boolean cleanup, final CommittedProof proof, final boolean vectorRequired) {
         Optional<TxRecord> central = proof == null ? decision(txId) : Optional.empty();
         if (!vectorRequired && singleKeyCommitReady && expected != null && expected.size() == 1
                 && (proof != null || central.isPresent() && central.get().status() == TxStatus.COMMITTED
-                && central.get().txId() == txId && central.get().participants().contains(shardId)
-                && Objects.equals(central.get().commitTs(), commitTs))) {
+                        && central.get().txId() == txId && central.get().participants().contains(shardId)
+                        && Objects.equals(central.get().commitTs(), commitTs))) {
             long startTs = proof == null ? central.orElseThrow().startTs() : proof.startTs();
             commitSingleKey(txId, startTs, commitTs, expected.getFirst(), cleanup);
             return;
@@ -1436,12 +1653,23 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 已确认中心决议后，用一次本地调用物化单键版本和参与者终态。 */
-    private void commitSingleKey(long txId, long startTs, long commitTs, Mutation expected, boolean cleanup) {
+    /**
+     * Once the center decision has been confirmed, local calls materialization single keys version and participant terminal state once.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param expected expected
+     * @param cleanup cleanup
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void commitSingleKey(final long txId, final long startTs, final long commitTs, final Mutation expected, final boolean cleanup) {
         String routine = useSingleKeyCommitV2 ? "mvcc_commit_one_v2" : "mvcc_commit_one_v1";
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement call = connection.prepareStatement(
-                     "call " + routine + "(?, ?, ?, ?, ?, ?, ?)")) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement call = connection.prepareStatement(
+                        "call " + routine + "(?, ?, ?, ?, ?, ?, ?)")) {
             call.setLong(1, txId);
             call.setLong(2, startTs);
             call.setLong(3, commitTs);
@@ -1453,7 +1681,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
             if (!connection.getAutoCommit()) {
                 throw new SQLException("single-key commit procedure left a local transaction open");
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() == 32004) {
                 throw new MvccException(ErrorCode.TRANSACTION_ABORTED,
                         "participant is ABORTED", false, txId, ex);
@@ -1466,10 +1694,18 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 一次服务器调用从本地持久单键意向生成版本与终态，多键返回通用路径。 */
-    private boolean commitSingleIntended(TxRecord decision) {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement call = connection.prepareStatement("call mvcc_commit_intent_one_v1(?, ?, ?)")) {
+    /**
+     * A single server call from local durable single key intent to version and terminal state, multiple keys return the common path.
+     *
+     * @param decision decision
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private boolean commitSingleIntended(final TxRecord decision) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement call = connection.prepareStatement("call mvcc_commit_intent_one_v1(?, ?, ?)")) {
             if (!connection.getAutoCommit()) {
                 throw illegal(decision.txId(), "single-key intent recovery requires auto-commit connection");
             }
@@ -1481,7 +1717,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 throw new SQLException("single-key intent recovery left a local transaction open");
             }
             return true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             return switch (ex.getErrorCode()) {
                 case 32106 -> false;
                 case 32104 -> throw new MvccException(ErrorCode.TRANSACTION_ABORTED,
@@ -1496,9 +1732,16 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 原子保存单分片版本与决议；调用者须先发布 PREPARING 候选时间并持有发布屏障。 */
+    /**
+     * Atomic save sheets shard version and decision; callers must first publish PREPARING candidate times and hold release barrier.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
+     */
     @Override
-    public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+    public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
         List<Mutation> writes = normalize(mutations);
         Optional<TxRecord> central = decision(txId);
         transaction(txId, false, connection -> {
@@ -1538,41 +1781,42 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 前台本地提交成功后才产生绑定分片实例的证明，避免中心完成时再次读取分片。 */
-    public static final class LocalCommitProof {
-        private final MysqlShardSegmentFence fence;
-        private final MysqlShardSegmentFence.CandidateProof candidate;
-
-        /** 私有构造保证调用方不能用自建候选记录冒充已成功提交。 */
-        private LocalCommitProof(MysqlShardSegmentFence fence,
-                                 MysqlShardSegmentFence.CandidateProof candidate) {
-            this.fence = fence;
-            this.candidate = candidate;
-        }
-
-        /** 中心只接受与本次物理分片实例相同的提交凭据。 */
-        public boolean belongsTo(MysqlShardSegmentFence expected) {
-            return fence == expected;
-        }
-
-        /** 返回本地事务原子保存的候选身份供中心核对槽和租约。 */
-        public MysqlShardSegmentFence.CandidateProof candidate() {
-            return candidate;
-        }
-    }
-
-    /** 本地先提交兼容入口，忽略成功后生成的前台证明。 */
-    void directCommitFenced(MysqlShardSegmentFence fence, PublicationSegmentLease lease,
-                            long txId, long startTs, long commitTs, long deadlineMillis,
-                            IsolationLevel isolationLevel, List<Mutation> mutations) {
+    /**
+     * Local First commit Compatible Entry, ignores successful foreground certificates.
+     *
+     * @param fence fence
+     * @param lease lease
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param deadlineMillis deadline millis
+     * @param isolationLevel global transaction isolation level
+     * @param mutations transaction write set
+     */
+    void directCommitFenced(final MysqlShardSegmentFence fence, final PublicationSegmentLease lease,
+                            final long txId, final long startTs, final long commitTs, final long deadlineMillis,
+                            final IsolationLevel isolationLevel, final List<Mutation> mutations) {
         directCommitFencedWithProof(fence, lease, txId, startTs, commitTs,
                 deadlineMillis, isolationLevel, mutations);
     }
 
-    /** 只在分片事务已持久提交后返回不可外部构造的前台候选证明。 */
-    LocalCommitProof directCommitFencedWithProof(MysqlShardSegmentFence fence, PublicationSegmentLease lease,
-                                                 long txId, long startTs, long commitTs, long deadlineMillis,
-                                                 IsolationLevel isolationLevel, List<Mutation> mutations) {
+    /**
+     * Only foreground candidates that are not externally constructed return after shard transaction is durable commit.
+     *
+     * @param fence fence
+     * @param lease lease
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param deadlineMillis deadline millis
+     * @param isolationLevel global transaction isolation level
+     * @param mutations transaction write set
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    LocalCommitProof directCommitFencedWithProof(final MysqlShardSegmentFence fence, final PublicationSegmentLease lease,
+                                                 final long txId, final long startTs, final long commitTs, final long deadlineMillis,
+                                                 final IsolationLevel isolationLevel, final List<Mutation> mutations) {
         Objects.requireNonNull(fence, "fence");
         Objects.requireNonNull(isolationLevel, "isolationLevel");
         if (!fence.usesDataSource(dataSource) || !fence.shardId().equals(shardId)) {
@@ -1628,15 +1872,24 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return new LocalCommitProof(fence, proof);
     }
 
-    /** 按完整持久化证据清理意向，不依赖调用方内存键列表。 */
+    /**
+     * Press full durable storage evidence to clean intent, without relying on the caller memory list.
+     *
+     * @param txId transaction identifier
+     * @param mutations transaction write set
+     */
     @Override
-    public void cleanupIntents(long txId, List<Mutation> mutations) {
+    public void cleanupIntents(final long txId, final List<Mutation> mutations) {
         cleanupIntents(txId);
     }
 
-    /** 仅清理本地已提交且已有匹配版本的意向，禁止删除未决写入。 */
+    /**
+     * Only the local commit already has intent matching version, and it is forbidden to delete pending for writing.
+     *
+     * @param txId transaction identifier
+     */
     @Override
-    public void cleanupIntents(long txId) {
+    public void cleanupIntents(final long txId) {
         transaction(txId, false, connection -> {
             lockWatermark(connection, false);
             Optional<ParticipantRecord> record = selectParticipant(connection, txId, true);
@@ -1651,18 +1904,22 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 原子回滚并隔离迟到请求，已提交事务保持原决议且幂等返回成功。 */
+    /**
+     * Atomic rollback and quarantined late request, commit transaction has been maintained as decision and idempotent returned successfully.
+     *
+     * @param txId transaction identifier
+     */
     @Override
-    public void abort(long txId) {
+    public void abort(final long txId) {
         if (metadataStore instanceof MysqlLocalFirstMetadataView localFirst) {
-            // 中心到期判断与决议事务行锁串行，防止前台预写证明被提前物理回滚。
+            // Center Expiry with decision transaction Locked Line to prevent foreground prewrite certificate of advance physical rollback.
             localFirst.assertIntentAbortAllowed(txId);
         }
         Optional<TxRecord> central = decision(txId);
         long startTs = central.map(TxRecord::startTs).orElse(txId);
         transaction(txId, false, connection -> {
             lockWatermark(connection, false);
-            // 新协议的 txId 可独立于快照时间；无意向回滚仍要保留准确的开始时间证明。
+            // The txId of the new protocol can be independent of snapshot time; no intent rollback still needs to keep an accurate start-time certificate.
             ParticipantRecord record = lockParticipant(connection, txId, startTs);
             if (record.status() == TxStatus.COMMITTED) {
                 return null;
@@ -1687,23 +1944,32 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 中心 ABORTED 决议下的物理回滚完成后签发分片最终化证明。 */
-    public IntentTerminalProof abortIntentWithProof(long txId) {
+    /**
+     * Centre Physical rollback under ABORTED decision is issued with an shard finalisation certificate upon completion.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    public IntentTerminalProof abortIntentWithProof(final long txId) {
         if (!(metadataStore instanceof MysqlLocalFirstMetadataView)) {
             throw illegal(txId, "cross-shard abort proof requires local-first authority");
         }
         abort(txId);
-        ParticipantRecord record = participantRecord(txId).orElseThrow(() ->
-                illegal(txId, "aborted intent has no durable participant terminal"));
+        ParticipantRecord record = participantRecord(txId).orElseThrow(() -> illegal(txId, "aborted intent has no durable participant terminal"));
         if (record.status() != TxStatus.ABORTED || record.commitTs() != null) {
             throw illegal(txId, "aborted intent participant differs from center decision");
         }
         return new IntentTerminalProof(shardId, record, metadataStore);
     }
 
-    /** 查找残留意向和本地未发布决议，保留扫描进度避免旧终态占满所有恢复批次。 */
+    /**
+     * Search for residual intent and local not released decision, keep scan progress to avoid the old terminal state full of all recovery batch.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public synchronized Set<Long> findPendingTransactionIds(int limit) {
+    public synchronized Set<Long> findPendingTransactionIds(final int limit) {
         checkLimit(limit);
         try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement("""
                 select tx_id from (select tx_id from mvcc_intent union select tx_id from mvcc_participant_txn) pending
@@ -1726,14 +1992,22 @@ public class MysqlStorageAdapter implements StorageAdapter {
             }
             pendingScanAfter = candidates.size() < limit ? Long.MIN_VALUE : candidates.getLast();
             return result;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "scan pending participants failed", ex);
         }
     }
 
-    /** 独占本地水位后有界清理历史版本、墓碑链及拥有安全回收证据的本地终态。 */
+    /**
+     * Monochrome bounded clean-up history version, tombstone chains and local terminal state with secure collection evidence.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
-    public synchronized int gc(long safePoint, int limit) {
+    public synchronized int gc(final long safePoint, final int limit) {
         if (vectorReservations != null || durableVectorLayoutExists()) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "scalar GC cannot reclaim an initialized vector version chain", false, null);
@@ -1754,8 +2028,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
                         false, null);
             }
             long effective = Math.max(previous, safePoint);
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "update mvcc_local_safe_point set safe_point = ? where singleton_id = 1")) {
+            try (
+                    PreparedStatement statement = connection.prepareStatement(
+                            "update mvcc_local_safe_point set safe_point = ? where singleton_id = 1")) {
                 statement.setLong(1, effective);
                 statement.executeUpdate();
             }
@@ -1771,24 +2046,35 @@ public class MysqlStorageAdapter implements StorageAdapter {
         });
     }
 
-    /** 重启后的适配器也须依据分片持久布局拒绝旧标量 GC，不能只看进程内标志。 */
+    /**
+     * Rebooting adapters must also reject the old standard GC based on shard durable layout, and cannot read only the internal markings of the process.
+     *
+     * @return the operation result
+     */
     private boolean durableVectorLayoutExists() {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement query = connection.prepareStatement("""
-                     select 1 from information_schema.tables
-                     where table_schema = database()
-                       and table_name = 'mvcc_vector_layout_v1'
-                       and table_type = 'BASE TABLE'
-                     limit 1
-                     """); ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement query = connection.prepareStatement("""
+                        select 1 from information_schema.tables
+                        where table_schema = database()
+                          and table_name = 'mvcc_vector_layout_v1'
+                          and table_type = 'BASE TABLE'
+                        limit 1
+                        """); ResultSet row = query.executeQuery()) {
             return row.next();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "inspect durable vector GC layout failed", ex);
         }
     }
 
-    /** 未完成中心发布的本地候选即使事务租约已失效，也固定分片 GC 下界。 */
-    private Long localCandidateFloor(Connection connection) throws SQLException {
+    /**
+     * Unfinished local candidate fixed the lower bounds of shard GC even if transaction lease is no longer valid.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private Long localCandidateFloor(final Connection connection) throws SQLException {
         try (PreparedStatement table = connection.prepareStatement("""
                 select 1 from information_schema.tables
                 where table_schema = database()
@@ -1808,8 +2094,16 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 显式设置并恢复连接隔离级别，提交响应异常始终按结果未知处理。 */
-    private <T> T transaction(Long txId, boolean snapshot, SqlWork<T> work) {
+    /**
+     * Visible settings and recovery connection isolation levels, commit response anomalies are always treated by unknown outcome.
+     *
+     * @param <T> value type
+     * @param txId transaction identifier
+     * @param snapshot snapshot
+     * @param work work
+     * @return the operation result
+     */
+    private <T> T transaction(final Long txId, final boolean snapshot, final SqlWork<T> work) {
         try (Connection connection = dataSource.getConnection()) {
             int originalIsolation = connection.getTransactionIsolation();
             boolean originalAutoCommit = connection.getAutoCommit();
@@ -1824,15 +2118,15 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 connection.commit();
                 ended = true;
                 return result;
-            } catch (SQLException | RuntimeException | Error ex) {
+            } catch (final SQLException | RuntimeException | Error ex) {
                 failure = ex;
                 try {
                     connection.rollback();
                     ended = true;
-                } catch (SQLException rollbackFailure) {
+                } catch (final SQLException rollbackFailure) {
                     ex.addSuppressed(rollbackFailure);
                 }
-                // 进入 COMMIT 后即使随后 ROLLBACK 返回成功，也不能证明先前 COMMIT 未生效。
+                // Entering COMMIT does not prove that the previous COMMIT was in force, even if subsequent ROLLBACK returns successfully.
                 if (commitStarted || !ended) {
                     MvccException uncertain = uncertain(txId, "local transaction outcome is unknown", ex);
                     failure = uncertain;
@@ -1849,7 +2143,7 @@ public class MysqlStorageAdapter implements StorageAdapter {
                     try {
                         connection.setAutoCommit(originalAutoCommit);
                         connection.setTransactionIsolation(originalIsolation);
-                    } catch (SQLException restoreFailure) {
+                    } catch (final SQLException restoreFailure) {
                         if (failure != null) {
                             failure.addSuppressed(restoreFailure);
                         } else {
@@ -1858,16 +2152,24 @@ public class MysqlStorageAdapter implements StorageAdapter {
                     }
                 }
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw uncertain(txId, "connection acquisition or close failed", ex);
         }
     }
 
-    /** 用普通读取建立 RR 快照，后续版本和意向受到同一 read view 及 InnoDB undo 保护。 */
-    private long readWatermark(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select safe_point from mvcc_local_safe_point where singleton_id = 1");
-             ResultSet rows = statement.executeQuery()) {
+    /**
+     * Create RR snapshot, followed by version and intent with normal reading, is protected by the same read view and InnoDB undo.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private long readWatermark(final Connection connection) throws SQLException {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select safe_point from mvcc_local_safe_point where singleton_id = 1");
+                ResultSet rows = statement.executeQuery()) {
             if (!rows.next()) {
                 throw new IllegalStateException("local safe point has not been initialized");
             }
@@ -1875,11 +2177,20 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 写入先持共享水位锁，GC 持独占锁，防止检查后与清理交错。 */
-    private long lockWatermark(Connection connection, boolean exclusive) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select safe_point from mvcc_local_safe_point where singleton_id = 1 " + (exclusive ? "for update" : "for share"));
-             ResultSet rows = statement.executeQuery()) {
+    /**
+     * Write to hold shared watermark lock first, GC holds an exclusive lock to prevent the interlocking of check and cleanup.
+     *
+     * @param connection connection
+     * @param exclusive exclusive
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private long lockWatermark(final Connection connection, final boolean exclusive) throws SQLException {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select safe_point from mvcc_local_safe_point where singleton_id = 1 " + (exclusive ? "for update" : "for share"));
+                ResultSet rows = statement.executeQuery()) {
             if (!rows.next()) {
                 throw new IllegalStateException("local safe point has not been initialized");
             }
@@ -1887,8 +2198,16 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 创建或锁定事务行，重复请求不修改已有开始时间及终态。 */
-    private ParticipantRecord lockParticipant(Connection connection, long txId, long startTs) throws SQLException {
+    /**
+     * Create or lock transaction rows, repeat requests not to modify the start time and terminal state.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private ParticipantRecord lockParticipant(final Connection connection, final long txId, final long startTs) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into mvcc_participant_txn(tx_id, start_ts, status, commit_ts, updated_at)
                 values (?, ?, 'ACTIVE', null, ?) on duplicate key update tx_id = tx_id
@@ -1901,16 +2220,32 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return requireParticipant(connection, txId);
     }
 
-    /** 锁定必须已存在的事务记录，禁止缺证据的提交复活已回收事务。 */
-    private ParticipantRecord requireParticipant(Connection connection, long txId) throws SQLException {
+    /**
+     * Lock transaction records, which must already exist. commit is not allowed to live without evidence collection transaction.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private ParticipantRecord requireParticipant(final Connection connection, final long txId) throws SQLException {
         return selectParticipant(connection, txId, true)
                 .orElseThrow(() -> illegal(txId, "participant record missing or reclaimed"));
     }
 
-    /** 查询参与者记录，可选择锁定行以串行化前台和恢复请求。 */
-    private Optional<ParticipantRecord> selectParticipant(Connection connection, long txId, boolean lock) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select tx_id, start_ts, status, commit_ts from mvcc_participant_txn where tx_id = ?" + (lock ? " for update" : ""))) {
+    /**
+     * Query participant records, select locking lines to string foreground and recovery requests.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param lock lock
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private Optional<ParticipantRecord> selectParticipant(final Connection connection, final long txId, final boolean lock) throws SQLException {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select tx_id, start_ts, status, commit_ts from mvcc_participant_txn where tx_id = ?" + (lock ? " for update" : ""))) {
             statement.setLong(1, txId);
             try (ResultSet rows = statement.executeQuery()) {
                 return rows.next() ? Optional.of(participant(rows)) : Optional.empty();
@@ -1918,18 +2253,33 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 构造保留可空提交时间戳的本地记录。 */
-    private ParticipantRecord participant(ResultSet rows) throws SQLException {
+    /**
+     * Construct to keep an empty local record of commit timestamp.
+     *
+     * @param rows rows
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private ParticipantRecord participant(final ResultSet rows) throws SQLException {
         long commitTs = rows.getLong("commit_ts");
         Long timestamp = rows.wasNull() ? null : commitTs;
         return new ParticipantRecord(rows.getLong("tx_id"), rows.getLong("start_ts"),
                 TxStatus.valueOf(rows.getString("status")), timestamp);
     }
 
-    /** 在已经持有事务行锁且校验过终态时更新参与者状态。 */
-    private void updateParticipant(Connection connection, long txId, TxStatus status, Long commitTs) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "update mvcc_participant_txn set status = ?, commit_ts = ?, updated_at = ? where tx_id = ?")) {
+    /**
+     * Update participant status when transaction line lock is already in place and validate past terminal state.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param status status
+     * @param commitTs durable commit timestamp
+     * @throws SQLException if the operation cannot complete
+     */
+    private void updateParticipant(final Connection connection, final long txId, final TxStatus status, final Long commitTs) throws SQLException {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "update mvcc_participant_txn set status = ?, commit_ts = ?, updated_at = ? where tx_id = ?")) {
             statement.setString(1, status.name());
             if (commitTs == null) {
                 statement.setNull(2, Types.BIGINT);
@@ -1944,15 +2294,21 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 按无符号 UTF-8 顺序获取持久键行排他锁，空键和从未写入的键同样受保护。 */
-    private void lockKeys(Connection connection, List<String> keys) throws SQLException {
+    /**
+     * Press unsigned UTF-8 to get an durable -barlock, with the same protection for empty keys as those never written.
+     *
+     * @param connection connection
+     * @param keys keys
+     * @throws SQLException if the operation cannot complete
+     */
+    private void lockKeys(final Connection connection, final List<String> keys) throws SQLException {
         List<String> ordered = keys.stream().distinct().sorted(Utf8KeyOrder::compare).toList();
         for (int offset = 0; offset < ordered.size(); offset += BATCH_SIZE) {
             List<String> chunk = ordered.subList(offset, Math.min(offset + BATCH_SIZE, ordered.size()));
             String sql = "insert into mvcc_key_lock(user_key) values "
                     + chunk.stream().map(ignored -> "(?)").collect(Collectors.joining(", "))
                     + " on duplicate key update user_key = user_key";
-            // INSERT 按 VALUES 的二进制顺序锁行，不能依赖不存在的意向行或间隙锁。
+            // INSERT locks the row in the binary order of VALUES, and cannot rely on an existing intent line or gap lock.
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 for (int index = 0; index < chunk.size(); index++) {
                     statement.setBytes(index + 1, encodeKey(chunk.get(index)));
@@ -1962,8 +2318,17 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 在稳定键锁内批量核对新版本、外部意向及既有回滚标记。 */
-    private void checkWriteConflicts(Connection connection, long txId, long startTs, List<Mutation> writes) throws SQLException {
+    /**
+     * Checks new version, external intent and existing rollback tags within the stability key lock.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param writes writes
+     * @throws MvccException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private void checkWriteConflicts(final Connection connection, final long txId, final long startTs, final List<Mutation> writes) throws SQLException {
         for (int offset = 0; offset < writes.size(); offset += BATCH_SIZE) {
             List<Mutation> chunk = writes.subList(offset, Math.min(offset + BATCH_SIZE, writes.size()));
             try (PreparedStatement statement = connection.prepareStatement(directCommitConflictSql(chunk.size()))) {
@@ -1975,8 +2340,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
                     }
                 }
             }
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "select tx_id, start_ts from mvcc_intent where user_key in (" + placeholders(chunk.size()) + ")")) {
+            try (
+                    PreparedStatement statement = connection.prepareStatement(
+                            "select tx_id, start_ts from mvcc_intent where user_key in (" + placeholders(chunk.size()) + ")")) {
                 bindMutationKeys(statement, chunk);
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
@@ -1989,8 +2355,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
                     }
                 }
             }
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "select 1 from mvcc_rollback where user_key in (" + placeholders(chunk.size()) + ") and tx_id = ? limit 1")) {
+            try (
+                    PreparedStatement statement = connection.prepareStatement(
+                            "select 1 from mvcc_rollback where user_key in (" + placeholders(chunk.size()) + ") and tx_id = ? limit 1")) {
                 bindMutationKeys(statement, chunk);
                 statement.setLong(chunk.size() + 1, txId);
                 try (ResultSet rows = statement.executeQuery()) {
@@ -2002,8 +2369,16 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 批量写入已经核验归属的意向，整份写集合共享一个本地事务。 */
-    private void writeIntents(Connection connection, long txId, long startTs, List<Mutation> writes) throws SQLException {
+    /**
+     * Batch writes intent for ownership already verified, and the whole write set shares one local transaction.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param writes writes
+     * @throws SQLException if the operation cannot complete
+     */
+    private void writeIntents(final Connection connection, final long txId, final long startTs, final List<Mutation> writes) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into mvcc_intent(user_key, tx_id, start_ts, deleted, value, expire_at) values (?, ?, ?, ?, ?, ?)
                 on duplicate key update deleted = values(deleted), value = values(value), expire_at = values(expire_at)
@@ -2029,10 +2404,18 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 加载本事务实际持久化的完整意向，顺序由 VARBINARY 索引确定。 */
-    private List<IntentRow> loadIntents(Connection connection, long txId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select user_key, tx_id, start_ts, deleted, value from mvcc_intent where tx_id = ? order by user_key")) {
+    /**
+     * The full intent for loading transaction actual durable storage in the order determined by the VARBINARY index.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private List<IntentRow> loadIntents(final Connection connection, final long txId) throws SQLException {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select user_key, tx_id, start_ts, deleted, value from mvcc_intent where tx_id = ? order by user_key")) {
             statement.setLong(1, txId);
             try (ResultSet rows = statement.executeQuery()) {
                 List<IntentRow> result = new ArrayList<>();
@@ -2045,8 +2428,13 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 验证事务及开始时间确实拥有全部待物化意向。 */
-    private void verifyIntentStart(ParticipantRecord record, List<IntentRow> rows) {
+    /**
+     * Verify transaction and start time does indeed have all to be materialization intent.
+     *
+     * @param record record
+     * @param rows rows
+     */
+    private void verifyIntentStart(final ParticipantRecord record, final List<IntentRow> rows) {
         for (IntentRow row : rows) {
             if (row.txId() != record.txId() || row.startTs() != record.startTs()) {
                 throw illegal(record.txId(), "intent ownership differs from participant record");
@@ -2054,8 +2442,14 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 按完整集合比较键、删除标记和字节值，禁止以内存写集合补造缺失意向。 */
-    private void verifyMutations(long txId, List<IntentRow> rows, List<Mutation> expected) {
+    /**
+     * Press the full set comparison key, remove tags and byte values to disable memory write set for missing intent.
+     *
+     * @param txId transaction identifier
+     * @param rows rows
+     * @param expected expected
+     */
+    private void verifyMutations(final long txId, final List<IntentRow> rows, final List<Mutation> expected) {
         if (rows.size() != expected.size()) {
             throw illegal(txId, "known write set does not match all durable intents or versions");
         }
@@ -2069,10 +2463,19 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 只插入不可变版本，主键冲突使整个本地事务回滚，绝不覆盖其他版本。 */
-    private void insertVersions(Connection connection, long txId, long commitTs, List<IntentRow> rows) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value) values (?, ?, ?, ?, ?)")) {
+    /**
+     * Only immutable version, primary key conflict allows the whole local transaction rollback and no other version is overwritten.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param rows rows
+     * @throws SQLException if the operation cannot complete
+     */
+    private void insertVersions(final Connection connection, final long txId, final long commitTs, final List<IntentRow> rows) throws SQLException {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "insert into mvcc_data(user_key, commit_ts, tx_id, deleted, value) values (?, ?, ?, ?, ?)")) {
             int pending = 0;
             for (IntentRow row : rows) {
                 statement.setBytes(1, encodeKey(row.key()));
@@ -2093,16 +2496,31 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 对已知写集合的提交重放核对原事务原时间戳下的全部持久版本。 */
-    private void verifyCommittedWrites(Connection connection, ParticipantRecord record, List<Mutation> expected) throws SQLException {
+    /**
+     * Check all durable version under the original transaction timestamp for the known write set commit replay.
+     *
+     * @param connection connection
+     * @param record record
+     * @param expected expected
+     * @throws SQLException if the operation cannot complete
+     */
+    private void verifyCommittedWrites(final Connection connection, final ParticipantRecord record, final List<Mutation> expected) throws SQLException {
         lockKeys(connection, expected.stream().map(Mutation::key).toList());
         verifyMutations(record.txId(), loadCommittedRows(connection, record), expected);
     }
 
-    /** 查询本事务原提交时间戳的版本，其他事务或其他时间戳不视作等价重放。 */
-    private List<IntentRow> loadCommittedRows(Connection connection, ParticipantRecord record) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select user_key, deleted, value from mvcc_data where tx_id = ? and commit_ts = ? order by user_key")) {
+    /**
+     * Query version of original commit timestamp, other transaction or other timestamp is not considered to be equivalent replay.
+     *
+     * @param connection connection
+     * @param record record
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private List<IntentRow> loadCommittedRows(final Connection connection, final ParticipantRecord record) throws SQLException {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select user_key, deleted, value from mvcc_data where tx_id = ? and commit_ts = ? order by user_key")) {
             statement.setLong(1, record.txId());
             statement.setLong(2, record.commitTs());
             try (ResultSet rows = statement.executeQuery()) {
@@ -2116,8 +2534,14 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 清理前证明全部残留意向已有同事务同值的版本，保留缺失物化证据的意向。 */
-    private void cleanupCommittedIntents(Connection connection, ParticipantRecord record) throws SQLException {
+    /**
+     * Proves that all intent residues have version of the same value as transaction before cleanup, and retains intent missing materialization evidence.
+     *
+     * @param connection connection
+     * @param record record
+     * @throws SQLException if the operation cannot complete
+     */
+    private void cleanupCommittedIntents(final Connection connection, final ParticipantRecord record) throws SQLException {
         List<IntentRow> intents = loadIntents(connection, record.txId());
         if (intents.isEmpty()) {
             return;
@@ -2129,8 +2553,15 @@ public class MysqlStorageAdapter implements StorageAdapter {
         deleteIntents(connection, record.txId());
     }
 
-    /** 将意向转成幂等回滚标记，重放不刷新保留时间。 */
-    private void writeRollbacks(Connection connection, long txId, List<IntentRow> rows) throws SQLException {
+    /**
+     * Convert intent to idempotent rollback, and replay does not refresh the retention time.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param rows rows
+     * @throws SQLException if the operation cannot complete
+     */
+    private void writeRollbacks(final Connection connection, final long txId, final List<IntentRow> rows) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 insert into mvcc_rollback(user_key, tx_id, start_ts, created_at) values (?, ?, ?, ?)
                 on duplicate key update tx_id = tx_id
@@ -2154,16 +2585,29 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 在持有事务锁和全部相关键锁时删除本事务的意向。 */
-    private void deleteIntents(Connection connection, long txId) throws SQLException {
+    /**
+     * Remove intent of this transaction when holding transaction and all key locks.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @throws SQLException if the operation cannot complete
+     */
+    private void deleteIntents(final Connection connection, final long txId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("delete from mvcc_intent where tx_id = ?")) {
             statement.setLong(1, txId);
             statement.executeUpdate();
         }
     }
 
-    /** 判断事务是否仍有待处理意向。 */
-    private boolean hasIntents(Connection connection, long txId) throws SQLException {
+    /**
+     * Determines whether transaction is still to be processed for intent.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private boolean hasIntents(final Connection connection, final long txId) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("select 1 from mvcc_intent where tx_id = ? limit 1")) {
             statement.setLong(1, txId);
             try (ResultSet rows = statement.executeQuery()) {
@@ -2172,12 +2616,21 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 按持久游标处理有界原始键页，所有删除共享预算，未回收键也推进游标。 */
-    private int gcVersions(Connection connection, long safePoint, int limit) throws SQLException {
+    /**
+     * Press durable cursor for bounded original key page, all delete shared budget and advance cursor without collection.
+     *
+     * @param connection connection
+     * @param safePoint oldest retained snapshot timestamp
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private int gcVersions(final Connection connection, final long safePoint, final int limit) throws SQLException {
         byte[] after;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select gc_after_key from mvcc_local_safe_point where singleton_id = 1");
-             ResultSet rows = statement.executeQuery()) {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select gc_after_key from mvcc_local_safe_point where singleton_id = 1");
+                ResultSet rows = statement.executeQuery()) {
             rows.next();
             after = rows.getBytes(1);
         }
@@ -2191,18 +2644,27 @@ public class MysqlStorageAdapter implements StorageAdapter {
             reclaimed += gcKey(connection, key, safePoint, limit - reclaimed);
             last = key;
         }
-        // 长版本链本轮耗尽预算后也前进，下一轮巡回继续清理，避免某一热键饿死后续键。
+        // Long version chain also moves after the current round has run out of budget, and the next tour continues to clean up, avoiding a heat key dying of hunger.
         byte[] next = processed == keys.size() ? null : last;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "update mvcc_local_safe_point set gc_after_key = ? where singleton_id = 1")) {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "update mvcc_local_safe_point set gc_after_key = ? where singleton_id = 1")) {
             statement.setBytes(1, next);
             statement.executeUpdate();
         }
         return reclaimed;
     }
 
-    /** 每个来源只读取一页 keyset 候选键，不在全表版本链上聚合后截断。 */
-    private List<byte[]> collectGcKeys(Connection connection, byte[] after, int limit) throws SQLException {
+    /**
+     * Each source read-only takes a page keyset candidate, which is not cut after aggregation on the full table version chain.
+     *
+     * @param connection connection
+     * @param after after
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private List<byte[]> collectGcKeys(final Connection connection, final byte[] after, final int limit) throws SQLException {
         String predicate = after == null ? "" : " where user_key > ?";
         String sql = "select user_key from ((select distinct user_key from mvcc_data" + predicate
                 + " order by user_key limit ?) union (select user_key from mvcc_key_lock" + predicate
@@ -2226,8 +2688,17 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 清理一个键的历史版本或墓碑链，保留仍有意向的键以免丢失物化校验证据。 */
-    private int gcKey(Connection connection, byte[] key, long safePoint, int limit) throws SQLException {
+    /**
+     * Clears the version or tombstone chain of a key and maintains an intent key to avoid loss of materialization validate evidence.
+     *
+     * @param connection connection
+     * @param key business key
+     * @param safePoint oldest retained snapshot timestamp
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private int gcKey(final Connection connection, final byte[] key, final long safePoint, final int limit) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("select 1 from mvcc_intent where user_key = ?")) {
             statement.setBytes(1, key);
             try (ResultSet rows = statement.executeQuery()) {
@@ -2238,8 +2709,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
         Long latest = null;
         boolean tombstone = false;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "select commit_ts, deleted from mvcc_data where user_key = ? order by commit_ts desc limit 1")) {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "select commit_ts, deleted from mvcc_data where user_key = ? order by commit_ts desc limit 1")) {
             statement.setBytes(1, key);
             try (ResultSet rows = statement.executeQuery()) {
                 if (rows.next()) {
@@ -2250,8 +2722,9 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
         Long boundary = tombstone ? latest : null;
         if (latest != null && !tombstone) {
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "select commit_ts from mvcc_data where user_key = ? and commit_ts <= ? order by commit_ts desc limit 1")) {
+            try (
+                    PreparedStatement statement = connection.prepareStatement(
+                            "select commit_ts from mvcc_data where user_key = ? and commit_ts <= ? order by commit_ts desc limit 1")) {
                 statement.setBytes(1, key);
                 statement.setLong(2, safePoint);
                 try (ResultSet rows = statement.executeQuery()) {
@@ -2264,17 +2737,18 @@ public class MysqlStorageAdapter implements StorageAdapter {
         int reclaimed = 0;
         if (boundary != null) {
             String operator = tombstone ? " <= ?" : " < ?";
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "delete from mvcc_data where user_key = ? and commit_ts" + operator + " order by commit_ts limit ?")) {
+            try (
+                    PreparedStatement statement = connection.prepareStatement(
+                            "delete from mvcc_data where user_key = ? and commit_ts" + operator + " order by commit_ts limit ?")) {
                 statement.setBytes(1, key);
                 statement.setLong(2, boundary);
                 statement.setInt(3, limit);
-                // 升序删除确保最后才移除墓碑，不让分页清理期间的旧值重新可见。
+                // The ascending deletion ensures that the tombstone is last removed and that the old values during the page cleaning are not rediscovered.
                 reclaimed = statement.executeUpdate();
             }
         }
         if (reclaimed < limit) {
-            // 水位排他锁阻止任何写入者获取或重建此键锁，安全地回收已空业务键的稳定锁行。
+            // The watermark exclusionary lock prevents any writer from acquiring or re-establishing this keylock, and securely collection has an empty business key steady lock line.
             try (PreparedStatement statement = connection.prepareStatement("""
                     delete from mvcc_key_lock where user_key = ?
                       and not exists (select 1 from mvcc_data where user_key = ?)
@@ -2289,13 +2763,19 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return reclaimed;
     }
 
-    /** 在获取分片锁之前查询中心完成证据，避免分片锁与发布屏障形成反向等待。 */
-    private List<ParticipantRecord> gcCandidates(long safePoint, int limit) {
+    /**
+     * Query the centre to complete the evidence before you can access the shard lock and avoid a reverse waiting for the shard lock and release of barrier.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    private List<ParticipantRecord> gcCandidates(final long safePoint, final int limit) {
         TransactionMetadataStore authority = metadataStore;
         if (authority == null) {
             return List.of();
         }
-        // 中心下界包含所有尚未 finalized 的终态，低于此下界才允许删除本地恢复证据。
+        // The centre lower bounds contain all terminal state s that have not been Finalized, below which the deletion of local recovery evidence is permitted.
         long finalizedBoundary = authority.oldestActiveStartTs().orElse(Long.MAX_VALUE);
         long boundary = Math.min(safePoint, finalizedBoundary);
         List<ParticipantRecord> records = new ArrayList<>();
@@ -2316,19 +2796,27 @@ public class MysqlStorageAdapter implements StorageAdapter {
                     records.add(participant(rows));
                 }
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw storageError(null, "read terminal GC candidates failed", ex);
         }
         terminalGcAfter = records.size() < limit ? Long.MIN_VALUE : records.getLast().txId();
-        // 中心已删除只可能发生于 finalized 之后；本地水位在删除记录之前原子持久化以阻挡旧请求。
+        // Center has deleted only those that may occur after the finished; local watermark before deleting records atomic durable storage to block old requests.
         return records.stream().filter(record -> {
             Optional<TxRecord> central = decision(record.txId());
             return central.isEmpty() || matchesTerminalDecision(record, central.get());
         }).toList();
     }
 
-    /** 在独占水位内重新核对候选记录，按共享行数预算清理回滚标记和本地终态。 */
-    private int gcTerminalRecords(Connection connection, List<ParticipantRecord> records, int limit) throws SQLException {
+    /**
+     * Recheck candidate records in exclusive watermark, clear rollback tags and local terminal state by sharing rows.
+     *
+     * @param connection connection
+     * @param records records
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private int gcTerminalRecords(final Connection connection, final List<ParticipantRecord> records, final int limit) throws SQLException {
         int reclaimed = 0;
         for (ParticipantRecord record : records) {
             Optional<ParticipantRecord> current = selectParticipant(connection, record.txId(), true);
@@ -2365,33 +2853,57 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return reclaimed;
     }
 
-    /** 中心需保留相同终态和开始时间，缺少证据时本地记录继续保留。 */
-    private boolean hasMatchingTerminalDecision(ParticipantRecord local) {
+    /**
+     * The centre is required to maintain the same terminal state and start time, and local records are maintained in the absence of evidence.
+     *
+     * @param local local
+     * @return the operation result
+     */
+    private boolean hasMatchingTerminalDecision(final ParticipantRecord local) {
         if (local.status() != TxStatus.COMMITTED && local.status() != TxStatus.ABORTED) {
             return false;
         }
         return decision(local.txId()).filter(record -> matchesTerminalDecision(local, record)).isPresent();
     }
 
-    /** 核对中心与本地终态完全一致，任何不匹配都禁止回收本地证据。 */
-    private boolean matchesTerminalDecision(ParticipantRecord local, TxRecord central) {
+    /**
+     * The check centre is fully consistent with local terminal state and collection local evidence is prohibited for any mismatch.
+     *
+     * @param local local
+     * @param central central
+     * @return the operation result
+     */
+    private boolean matchesTerminalDecision(final ParticipantRecord local, final TxRecord central) {
         return central.startTs() == local.startTs() && central.status() == local.status()
                 && Objects.equals(central.commitTs(), local.commitTs());
     }
 
-    /** 查询当前绑定权威，不跨请求缓存不存在或非终态决议。 */
-    private Optional<TxRecord> decision(long txId) {
+    /**
+     * Query the current binding authority, no request cache does not exist or is not terminal state decision.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    private Optional<TxRecord> decision(final long txId) {
         TransactionMetadataStore store = metadataStore;
         try {
             return store == null ? Optional.empty() : store.get(txId);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             throw uncertain(txId, "metadata decision lookup failed", ex);
         }
     }
 
-    /** 意向物化必须引用中心 COMMITTED 决议，不能以内存写集合替代发布协议。 */
-    private void requireCommitDecision(ParticipantRecord local, long commitTs,
-                                       Optional<TxRecord> central, CommittedProof proof) {
+    /**
+     * Intent materialization must refer to COMMITTED decision, which cannot replace the release protocol with memory write set.
+     *
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param central central
+     * @param proof proof
+     * @throws MvccException if the operation cannot complete
+     */
+    private void requireCommitDecision(final ParticipantRecord local, final long commitTs,
+                                       final Optional<TxRecord> central, final CommittedProof proof) {
         boolean confirmed = proof == null ? central.isPresent()
                 && central.get().txId() == local.txId()
                 && central.get().status() == TxStatus.COMMITTED
@@ -2399,15 +2911,20 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 && central.get().startTs() == local.startTs()
                 && central.get().participants().contains(shardId)
                 : proof.txId() == local.txId() && proof.startTs() == local.startTs()
-                && proof.commitTs() == commitTs && proof.participants().contains(shardId);
+                        && proof.commitTs() == commitTs && proof.participants().contains(shardId);
         if (!confirmed) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     "materialization requires matching metadata COMMITTED decision", false, local.txId());
         }
     }
 
-    /** 检查事务终态不可逆，回滚后的迟到请求不能复活意向。 */
-    private void requireNonTerminal(ParticipantRecord record) {
+    /**
+     * Check transaction terminal state irreversible, late request after rollback cannot be revived intent.
+     *
+     * @param record record
+     * @throws MvccException if the operation cannot complete
+     */
+    private void requireNonTerminal(final ParticipantRecord record) {
         if (record.status() == TxStatus.ABORTED) {
             throw new MvccException(ErrorCode.TRANSACTION_ABORTED, "participant is ABORTED", false, record.txId());
         }
@@ -2416,23 +2933,41 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 提交时间严格晚于开始时间且重放不改变原提交时间。 */
-    private void validateCommitTimestamp(ParticipantRecord record, long commitTs) {
+    /**
+     * Commit is strictly later than the start time and replay does not change original commit.
+     *
+     * @param record record
+     * @param commitTs durable commit timestamp
+     */
+    private void validateCommitTimestamp(final ParticipantRecord record, final long commitTs) {
         if (commitTs <= record.startTs()
                 || record.status() == TxStatus.COMMITTED && !Objects.equals(record.commitTs(), commitTs)) {
             throw illegal(record.txId(), "commitTs is invalid or differs from committed participant");
         }
     }
 
-    /** 拒绝安全水位之前的请求，水位本身仍属于合法可见边界。 */
-    private void requireFresh(long txId, long timestamp, long safePoint) {
+    /**
+     * The watermark itself is a legitimate visible border for refusing requests prior to the security of watermark.
+     *
+     * @param txId transaction identifier
+     * @param timestamp timestamp
+     * @param safePoint oldest retained snapshot timestamp
+     * @throws MvccException if the operation cannot complete
+     */
+    private void requireFresh(final long txId, final long timestamp, final long safePoint) {
         if (timestamp < safePoint) {
             throw new MvccException(ErrorCode.SNAPSHOT_TOO_OLD, "timestamp precedes local safe point " + safePoint, false, txId);
         }
     }
 
-    /** 固定写集合字节并按二进制键序去重，重复键以最后一次变更为准。 */
-    private List<Mutation> normalize(List<Mutation> mutations) {
+    /**
+     * Fixed write set bytes and reweighted in binary order, which is the last change.
+     *
+     * @param mutations transaction write set
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private List<Mutation> normalize(final List<Mutation> mutations) {
         TreeMap<String, Mutation> ordered = new TreeMap<>(Utf8KeyOrder::compare);
         for (Mutation mutation : Objects.requireNonNull(mutations, "mutations")) {
             Objects.requireNonNull(mutation, "mutation");
@@ -2450,36 +2985,66 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return List.copyOf(ordered.values());
     }
 
-    /** 构造兼容既有调用的批量版本冲突查询。 */
-    static String directCommitConflictSql(int keyCount) {
+    /**
+     * Construct to compatible with the already called batch version conflict query.
+     *
+     * @param keyCount key count
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    static String directCommitConflictSql(final int keyCount) {
         if (keyCount < 1) {
             throw new IllegalArgumentException("keyCount must be >= 1");
         }
         return "select user_key from mvcc_data where user_key in (" + placeholders(keyCount) + ") and commit_ts > ? limit 1";
     }
 
-    /** 返回既有调用所需的有界冲突检查批次数。 */
-    static int directCommitConflictChunkCount(int keyCount) {
+    /**
+     * Returns the bounded conflict check number required for an existing call.
+     *
+     * @param keyCount key count
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    static int directCommitConflictChunkCount(final int keyCount) {
         if (keyCount < 1) {
             throw new IllegalArgumentException("keyCount must be >= 1");
         }
         return 1 + (keyCount - 1) / BATCH_SIZE;
     }
 
-    /** 生成 JDBC 参数占位符，不插入业务文本。 */
-    private static String placeholders(int count) {
+    /**
+     * Generates a JDBC parameter placeholder, without inserting business text.
+     *
+     * @param count count
+     * @return the operation result
+     */
+    private static String placeholders(final int count) {
         return IntStream.range(0, count).mapToObj(ignored -> "?").collect(Collectors.joining(", "));
     }
 
-    /** 绑定一个写入批次的二进制键参数。 */
-    private void bindMutationKeys(PreparedStatement statement, List<Mutation> writes) throws SQLException {
+    /**
+     * Ties a binary key parameter to write batch.
+     *
+     * @param statement statement
+     * @param writes writes
+     * @throws SQLException if the operation cannot complete
+     */
+    private void bindMutationKeys(final PreparedStatement statement, final List<Mutation> writes) throws SQLException {
         for (int index = 0; index < writes.size(); index++) {
             statement.setBytes(index + 1, encodeKey(writes.get(index).key()));
         }
     }
 
-    /** 显式区分 SQL NULL 与二进制空值。 */
-    private void bindValue(PreparedStatement statement, int parameter, byte[] value) throws SQLException {
+    /**
+     * A visible distinction between SQL Null and binary empty values.
+     *
+     * @param statement statement
+     * @param parameter parameter
+     * @param value value to write
+     * @throws SQLException if the operation cannot complete
+     */
+    private void bindValue(final PreparedStatement statement, final int parameter, final byte[] value) throws SQLException {
         if (value == null) {
             statement.setNull(parameter, Types.BLOB);
         } else {
@@ -2487,15 +3052,26 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
     }
 
-    /** 校验分页和清理批次的统一有界参数。 */
-    private void checkLimit(int limit) {
+    /**
+     * A single bounded parameter for validate page breaks and batch cleanup.
+     *
+     * @param limit maximum number of items
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private void checkLimit(final int limit) {
         if (limit < 1 || limit > MAX_PAGE_SIZE) {
             throw new IllegalArgumentException("limit must be in 1..4096");
         }
     }
 
-    /** 编码数据库 VARBINARY 键，拒绝截断或非法字符引起的键碰撞。 */
-    private static byte[] encodeKey(String key) {
+    /**
+     * Encoding database VARBINARY, which refuses to cut or cause an illegal character-induced key collision.
+     *
+     * @param key business key
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static byte[] encodeKey(final String key) {
         byte[] encoded = Utf8KeyOrder.encode(key);
         if (encoded.length > 256) {
             throw new IllegalArgumentException("UTF-8 key exceeds 256 bytes");
@@ -2503,28 +3079,61 @@ public class MysqlStorageAdapter implements StorageAdapter {
         return encoded;
     }
 
-    /** 将数据库二进制键恢复为业务字符串。 */
-    private static String decodeKey(byte[] key) {
+    /**
+     * Database binary key recovery is the business string.
+     *
+     * @param key business key
+     * @return the operation result
+     */
+    private static String decodeKey(final byte[] key) {
         return new String(key, StandardCharsets.UTF_8);
     }
 
-    /** 构造非重试的协议状态错误。 */
-    private MvccException illegal(long txId, String message) {
+    /**
+     * Error to construct protocol status other than retry.
+     *
+     * @param txId transaction identifier
+     * @param message message
+     * @return the operation result
+     */
+    private MvccException illegal(final long txId, final String message) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, txId);
     }
 
-    /** 显式标记提交或连接生命周期未知，禁止上层把它误认作肯定未提交的冲突。 */
-    private MvccException uncertain(Long txId, String message, Throwable cause) {
+    /**
+     * Visible tag commit or connection life cycle is unknown and it is prohibited to misperceive it as a conflict that certainly does not commit.
+     *
+     * @param txId transaction identifier
+     * @param message message
+     * @param cause cause
+     * @return the operation result
+     */
+    private MvccException uncertain(final Long txId, final String message, final Throwable cause) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, shardId + ": " + message, false, txId, cause);
     }
 
-    /** 保留 SQL 状态及底层原因，调用方仅在已确认回滚时使用冲突映射。 */
-    private MvccException storageError(Long txId, String message, SQLException ex) {
+    /**
+     * Retains SQL status and bottom cause, and the caller only uses a conflict map when rollback is confirmed.
+     *
+     * @param txId transaction identifier
+     * @param message message
+     * @param ex ex
+     * @return the operation result
+     */
+    private MvccException storageError(final Long txId, final String message, final SQLException ex) {
         return MysqlStorageExceptionMapper.toMvccException(shardId, txId, message, ex);
     }
 
-    /** 为既有表补查询索引，并容忍多个初始化者同时添加相同索引。 */
-    private void ensureIndex(Connection connection, String table, String name, String columns) throws SQLException {
+    /**
+     * The index is supplemented by a search for existing tables and allows multiple initialifiers to add the same index simultaneously.
+     *
+     * @param connection connection
+     * @param table table
+     * @param name name
+     * @param columns columns
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureIndex(final Connection connection, final String table, final String name, final String columns) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select 1 from information_schema.statistics
                 where table_schema = database() and table_name = ? and index_name = ? limit 1
@@ -2539,15 +3148,20 @@ public class MysqlStorageAdapter implements StorageAdapter {
         }
         try (PreparedStatement statement = connection.prepareStatement("create index " + name + " on " + table + "(" + columns + ")")) {
             statement.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1061) {
                 throw ex;
             }
         }
     }
 
-    /** 为已存在的本地水位表补持久扫描游标，兼容重复初始化和并发建表。 */
-    private void ensureGcCursorColumn(Connection connection) throws SQLException {
+    /**
+     * Fills the existing local watermark table with durable scan cursor and allows for duplicate initialization and concurrent tabulation.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    private void ensureGcCursorColumn(final Connection connection) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 select 1 from information_schema.columns
                 where table_schema = database() and table_name = 'mvcc_local_safe_point' and column_name = 'gc_after_key'
@@ -2556,24 +3170,335 @@ public class MysqlStorageAdapter implements StorageAdapter {
                 return;
             }
         }
-        try (PreparedStatement statement = connection.prepareStatement(
-                "alter table mvcc_local_safe_point add column gc_after_key varbinary(256) null")) {
+        try (
+                PreparedStatement statement = connection.prepareStatement(
+                        "alter table mvcc_local_safe_point add column gc_after_key varbinary(256) null")) {
             statement.execute();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1060) {
                 throw ex;
             }
         }
     }
 
-    /** 受本地事务包装器管理的 JDBC 工作单元。 */
+    /**
+     * The centre created only after the full intent local transaction successful commit cross-shard decision receipt.
+     */
+    public static final class PrewriteProof {
+
+        private final long txId;
+
+        private final long startTs;
+
+        private final String shardId;
+
+        private final int mutationCount;
+
+        private final TransactionMetadataStore authority;
+
+        private final VectorReservation vectorReservation;
+
+        /**
+         * Construct the entrance to be called only by the durable prewrite successful path of the same adapter.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param shardId logical shard identifier
+         * @param mutationCount mutation count
+         * @param authority authority
+         */
+        private PrewriteProof(final long txId, final long startTs, final String shardId, final int mutationCount,
+                              final TransactionMetadataStore authority) {
+            this(txId, startTs, shardId, mutationCount, authority, null);
+        }
+
+        /**
+         * The new agreement proves that the same physical prewrite transaction retained sub-column number is additionally bound.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param shardId logical shard identifier
+         * @param mutationCount mutation count
+         * @param authority authority
+         * @param vectorReservation vector reservation
+         */
+        private PrewriteProof(final long txId, final long startTs, final String shardId, final int mutationCount,
+                              final TransactionMetadataStore authority, final VectorReservation vectorReservation) {
+            this.txId = txId;
+            this.startTs = startTs;
+            this.shardId = shardId;
+            this.mutationCount = mutationCount;
+            this.authority = authority;
+            this.vectorReservation = vectorReservation;
+        }
+
+        /**
+         * Returns global transaction identifier belonging to local intent.
+         *
+         * @return the operation result
+         */
+        public long txId() {
+            return txId;
+        }
+
+        /**
+         * Returns shard transaction Read snapshot after validate.
+         *
+         * @return the operation result
+         */
+        public long startTs() {
+            return startTs;
+        }
+
+        /**
+         * Returns the only target shard route.
+         *
+         * @return the operation result
+         */
+        public String shardId() {
+            return shardId;
+        }
+
+        /**
+         * Returns the number of non-empty write set durable prewrite bars.
+         *
+         * @return the operation result
+         */
+        public int mutationCount() {
+            return mutationCount;
+        }
+
+        /**
+         * Only vector prewrite path carries serial number certificates from the local transaction atomic landing disc.
+         *
+         * @return the operation result
+         */
+        public Optional<VectorReservation> vectorReservation() {
+            return Optional.ofNullable(vectorReservation);
+        }
+
+        /**
+         * The prewrite result of another control book example is rejected as the basis for this time line decision.
+         *
+         * @param ledger ledger
+         * @return the operation result
+         */
+        public boolean belongsTo(final MysqlLocalFirstPublicationLedger ledger) {
+            return authority instanceof MysqlLocalFirstMetadataView view && view.usesLedger(ledger);
+        }
+    }
+
+    /**
+     * The Centre accepts only the durable subsections packaged by the Private PrewriteProof.
+     *
+     * @param key business key
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @param reservedSequence reserved sequence
+     */
+    public record VectorReservation(String key, int stripe, long startSequence, long reservedSequence) {
+
+        /**
+         * The initial subsection snapshot with a serial number must be kept later than transaction.
+         *
+         * @param key business key
+         * @param stripe stripe
+         * @param startSequence start sequence
+         * @param reservedSequence reserved sequence
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public VectorReservation {
+            Objects.requireNonNull(key, "key");
+            if (key.isBlank() || stripe < 0 || startSequence < 0
+                    || reservedSequence <= startSequence) {
+                throw new IllegalArgumentException("invalid vector reservation proof");
+            }
+        }
+    }
+
+    /**
+     * Multiple separate single-key logic transaction can be shared once with shard Physics commit, but each keeps replay identity.
+     *
+     * @param txId transaction identifier
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     */
+    public record LocalVectorCommitRequest(long txId, Mutation mutation,
+            int stripe, long startSequence) {
+
+        /**
+         * Each transaction in the same batch must carry a negative transaction ID and a valid initial line border.
+         *
+         * @param txId transaction identifier
+         * @param mutation mutation
+         * @param stripe stripe
+         * @param startSequence start sequence
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public LocalVectorCommitRequest {
+            Objects.requireNonNull(mutation, "mutation");
+            if (txId >= 0 || stripe < 0 || startSequence < 0) {
+                throw new IllegalArgumentException("invalid local vector group commit request");
+            }
+        }
+    }
+
+    /**
+     * Several separate cross-shard transaction participating in the same shard batch prewrite still issue centre certificates on a case by case basis.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param expireAtMillis expire at millis
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     */
+    public record VectorPrewriteRequest(long txId, long startTs, long expireAtMillis,
+            Mutation mutation, int stripe, long startSequence) {
+
+        /**
+         * Batch prewrite must have an durable identity period of validity and a non-negative subbar starting point.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param expireAtMillis expire at millis
+         * @param mutation mutation
+         * @param stripe stripe
+         * @param startSequence start sequence
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public VectorPrewriteRequest {
+            Objects.requireNonNull(mutation, "mutation");
+            if (txId == 0 || startTs < 0 || expireAtMillis < 1
+                    || stripe < 0 || startSequence < 0) {
+                throw new IllegalArgumentException("invalid vector cross prewrite request");
+            }
+        }
+    }
+
+    /**
+     * Only the cross-shard finalisation certificate issued after the real shard terminal state has been dropped and checked.
+     */
+    public static final class IntentTerminalProof {
+
+        private final String shardId;
+
+        private final ParticipantRecord record;
+
+        private final TransactionMetadataStore authority;
+
+        /**
+         * The construction entrance is open only after completion of the same adaptor commit or rollback.
+         *
+         * @param shardId logical shard identifier
+         * @param record record
+         * @param authority authority
+         */
+        private IntentTerminalProof(final String shardId, final ParticipantRecord record,
+                                    final TransactionMetadataStore authority) {
+            this.shardId = shardId;
+            this.record = record;
+            this.authority = authority;
+        }
+
+        /**
+         * Returns the physical shard route of terminal state completed by durable.
+         *
+         * @return the operation result
+         */
+        public String shardId() {
+            return shardId;
+        }
+
+        /**
+         * Returns verified participant transaction identifier, snapshot and terminal state.
+         *
+         * @return the operation result
+         */
+        public ParticipantRecord record() {
+            return record;
+        }
+
+        /**
+         * The Centre accepts only certificates issued by adapters under the same durable control book.
+         *
+         * @param ledger ledger
+         * @return the operation result
+         */
+        public boolean belongsTo(final MysqlLocalFirstPublicationLedger ledger) {
+            return authority instanceof MysqlLocalFirstMetadataView view && view.usesLedger(ledger);
+        }
+    }
+
+    /**
+     * Foreground local commit was successful before proof of binding the shard instance was produced to avoid rereading the shard when the centre is finished.
+     */
+    public static final class LocalCommitProof {
+
+        private final MysqlShardSegmentFence fence;
+
+        private final MysqlShardSegmentFence.CandidateProof candidate;
+
+        /**
+         * The private construction sure caller cannot impersonate a successful commit with a self-created candidate record.
+         *
+         * @param fence fence
+         * @param candidate candidate
+         */
+        private LocalCommitProof(final MysqlShardSegmentFence fence,
+                                 final MysqlShardSegmentFence.CandidateProof candidate) {
+            this.fence = fence;
+            this.candidate = candidate;
+        }
+
+        /**
+         * The center accepts only the same commit receipt as this physical shard instance.
+         *
+         * @param expected expected
+         * @return the operation result
+         */
+        public boolean belongsTo(final MysqlShardSegmentFence expected) {
+            return fence == expected;
+        }
+
+        /**
+         * Returns a candidate identity for the local transaction atomic saves for central checker slot and lease.
+         *
+         * @return the operation result
+         */
+        public MysqlShardSegmentFence.CandidateProof candidate() {
+            return candidate;
+        }
+    }
+
+    /**
+     * JDBC work unit managed by local transaction packaging.
+     *
+     * @param <T> value type
+     */
     @FunctionalInterface
     private interface SqlWork<T> {
-        /** 在调用者提供的事务连接中执行工作。 */
+
+        /**
+         * Executes in transaction connection by caller.
+         *
+         * @param connection connection
+         * @return the operation result
+         * @throws SQLException if the operation cannot complete
+         */
         T execute(Connection connection) throws SQLException;
     }
 
-    /** 携带真实所有权及完整字节值的意向或版本校验行。 */
+    /**
+     * Intent or version validate rows with real ownership and full byte values.
+     *
+     * @param key business key
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param deleted deleted
+     * @param value value to write
+     */
     private record IntentRow(String key, long txId, long startTs, boolean deleted, byte[] value) {
     }
 }

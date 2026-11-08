@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -22,49 +38,82 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.Objects;
 
-/** 用全局向量下界和中心最终化凭据退役一笔不再可见的跨片大载荷版本。 */
+/**
+ * Use global vector lower bounds and centre for the finalisation of receipt to retire a non-visible cross-shard large payload version.
+ */
 final class MysqlVectorCrossGarbageCollector {
+
     private final MysqlStorageAdapter foreground;
+
     private final DataSource shard;
+
     private final String shardId;
+
     private final int stripes;
+
     private final MysqlVectorSnapshotLeaseStore protection;
+
     private final MysqlLocalFirstPublicationLedger ledger;
+
     private final int maxInFlight;
+
     private final int retireBatchSize;
+
     private volatile String expectedShardIdentity;
 
-    /** 单键跨片映射身份在键锁与参与者锁之后重新读取。 */
-    private record Mapping(byte[] key, long txId, int stripe, long startSeq, long sequence,
-                           long commitTs, boolean deleted, byte[] payload) {
-    }
-
-    /** 分片游标在一次查询中携带稳定业务键，退役前仍在键锁下重查真实映射。 */
-    private record Candidate(long txId, byte[] key) {
-    }
-
-    /** 必须显式绑定真实参与者、中心最终化权威和相同布局的读者保护。 */
-    MysqlVectorCrossGarbageCollector(MysqlStorageAdapter foreground, DataSource shard,
-                                     String shardId, int stripes,
-                                     MysqlVectorSnapshotLeaseStore protection,
-                                     MysqlLocalFirstPublicationLedger ledger) {
+    /**
+     * A visible binding of real participant, centre finalisation authority and the same layout reader protection is required.
+     *
+     * @param foreground foreground
+     * @param shard logical shard identifier
+     * @param shardId logical shard identifier
+     * @param stripes stripes
+     * @param protection protection
+     * @param ledger ledger
+     */
+    MysqlVectorCrossGarbageCollector(final MysqlStorageAdapter foreground, final DataSource shard,
+                                     final String shardId, final int stripes,
+                                     final MysqlVectorSnapshotLeaseStore protection,
+                                     final MysqlLocalFirstPublicationLedger ledger) {
         this(foreground, shard, shardId, stripes, protection, ledger, 1);
     }
 
-    /** 独立候选之间可在显式并发预算内并行退役，同键稳定锁仍串行冲突历史。 */
-    MysqlVectorCrossGarbageCollector(MysqlStorageAdapter foreground, DataSource shard,
-                                     String shardId, int stripes,
-                                     MysqlVectorSnapshotLeaseStore protection,
-                                     MysqlLocalFirstPublicationLedger ledger, int maxInFlight) {
+    /**
+     * Independent candidates can retire in parallel within the visible concurrent budget and the same-key stabilization lock continues to clash with history.
+     *
+     * @param foreground foreground
+     * @param shard logical shard identifier
+     * @param shardId logical shard identifier
+     * @param stripes stripes
+     * @param protection protection
+     * @param ledger ledger
+     * @param maxInFlight max in flight
+     */
+    MysqlVectorCrossGarbageCollector(final MysqlStorageAdapter foreground, final DataSource shard,
+                                     final String shardId, final int stripes,
+                                     final MysqlVectorSnapshotLeaseStore protection,
+                                     final MysqlLocalFirstPublicationLedger ledger, final int maxInFlight) {
         this(foreground, shard, shardId, stripes, protection, ledger, maxInFlight, 1);
     }
 
-    /** 一笔有界分片事务可退休多个键，出错时凭据和所有大载荷删除整体回滚。 */
-    MysqlVectorCrossGarbageCollector(MysqlStorageAdapter foreground, DataSource shard,
-                                     String shardId, int stripes,
-                                     MysqlVectorSnapshotLeaseStore protection,
-                                     MysqlLocalFirstPublicationLedger ledger,
-                                     int maxInFlight, int retireBatchSize) {
+    /**
+     * An bounded shard transaction can have more than retirement keys, and delete the whole rollback when there is an error receipt and all large payload s.
+     *
+     * @param foreground foreground
+     * @param shard logical shard identifier
+     * @param shardId logical shard identifier
+     * @param stripes stripes
+     * @param protection protection
+     * @param ledger ledger
+     * @param maxInFlight max in flight
+     * @param retireBatchSize retire batch size
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    MysqlVectorCrossGarbageCollector(final MysqlStorageAdapter foreground, final DataSource shard,
+                                     final String shardId, final int stripes,
+                                     final MysqlVectorSnapshotLeaseStore protection,
+                                     final MysqlLocalFirstPublicationLedger ledger,
+                                     final int maxInFlight, final int retireBatchSize) {
         this.foreground = Objects.requireNonNull(foreground, "foreground");
         this.shard = Objects.requireNonNull(shard, "shard");
         this.shardId = Objects.requireNonNull(shardId, "shardId");
@@ -80,30 +129,45 @@ final class MysqlVectorCrossGarbageCollector {
         this.retireBatchSize = retireBatchSize;
     }
 
-    /** 调度器只读真实后台池，用于与发布者分片权威核对。 */
+    /**
+     * Scheduler read-only real background pool to check with publisher shard authority.
+     *
+     * @return the operation result
+     */
     DataSource dataSource() {
         return shard;
     }
 
-    /** 候选扫描必须按构造时的逻辑分片路由执行。 */
+    /**
+     * Candidate scans must be executed by the logical shard route at the time of construction.
+     *
+     * @return the operation result
+     */
     String shardId() {
         return shardId;
     }
 
-    /** 安全向量的分条数量不得与参与者布局漂移。 */
+    /**
+     * The number of pieces of the security vector cannot drift with the participant layout.
+     *
+     * @return the operation result
+     */
     int stripeCount() {
         return stripes;
     }
 
-    /** 初始化确认分片真实身份和持久布局，重启不删除任何原凭据。 */
+    /**
+     * Initialize confirmation of shard real identity and durable layouts, restarting without deleting any original receipt.
+     */
     void initializeProduct() {
         requireCenterAuthority();
         requireShardAuthority();
         requireSafeFloorLayout(protection.currentSafeFloor());
-        try (Connection connection = shard.getConnection();
-             PreparedStatement layout = connection.prepareStatement("""
-                     select stripe_count from mvcc_vector_layout_v1 where singleton_id = 1
-                     """)) {
+        try (
+                Connection connection = shard.getConnection();
+                PreparedStatement layout = connection.prepareStatement("""
+                        select stripe_count from mvcc_vector_layout_v1 where singleton_id = 1
+                        """)) {
             String identity = MysqlVectorDatabaseIdentity.read(connection);
             try (ResultSet row = layout.executeQuery()) {
                 if (!row.next() || row.getInt(1) != stripes) {
@@ -127,13 +191,19 @@ final class MysqlVectorCrossGarbageCollector {
                 insert.executeUpdate();
             }
             expectedShardIdentity = identity;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("initialize vector cross GC failed", ex);
         }
     }
 
-    /** 每轮有界轮转正式跨片映射，失败保留持久回执并在下次环绕时重试。 */
-    int collect(int limit) {
+    /**
+     * Bounded -wheeled cross-shard map per wheel, failed to keep durable receipt and next round retry.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    int collect(final int limit) {
         if (limit < 1 || limit > 512) {
             throw new IllegalArgumentException("vector cross GC scan limit must be in 1..512");
         }
@@ -147,7 +217,7 @@ final class MysqlVectorCrossGarbageCollector {
         List<Candidate> candidates;
         try {
             candidates = nextCandidates(limit);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("scan vector cross GC candidates failed", ex);
         }
         Map<Long, MysqlLocalFirstPublicationLedger.FinalizedVectorProof> proofs =
@@ -179,10 +249,11 @@ final class MysqlVectorCrossGarbageCollector {
             for (CompletableFuture<Integer> task : tasks) {
                 try {
                     reclaimed += task.join();
-                } catch (CompletionException ex) {
+                } catch (final CompletionException ex) {
                     if (firstFailure == null) {
                         firstFailure = ex.getCause() instanceof RuntimeException runtime
-                                ? runtime : new IllegalStateException("cross GC worker failed", ex.getCause());
+                                ? runtime
+                                : new IllegalStateException("cross GC worker failed", ex.getCause());
                     }
                 }
             }
@@ -193,8 +264,13 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 同批按二进制业务键排序取锁，降低与业务写入及其他退役批次的死锁概率。 */
-    private List<List<Candidate>> partitionCandidates(List<Candidate> candidates) {
+    /**
+     * Lined with binary key for the same batch to remove locks and reduce the probability of dying locks with business writing and other decommissioning batch.
+     *
+     * @param candidates candidates
+     * @return the operation result
+     */
+    private List<List<Candidate>> partitionCandidates(final List<Candidate> candidates) {
         if (candidates.isEmpty()) {
             return List.of();
         }
@@ -211,8 +287,14 @@ final class MysqlVectorCrossGarbageCollector {
         return List.copyOf(groups);
     }
 
-    /** 游标与候选选择在同一分片事务中提交，重启后不会永远重扫表头。 */
-    private List<Candidate> nextCandidates(int limit) throws SQLException {
+    /**
+     * Cursor is in the same commit as the candidate for shard transaction and does not always rearrange the header after restarting.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private List<Candidate> nextCandidates(final int limit) throws SQLException {
         return MysqlConnectionContext.inTransaction(shard, connection -> {
             if (!expectedShardIdentity.equals(MysqlVectorDatabaseIdentity.read(connection))) {
                 throw illegal("vector cross GC shard identity changed while scanning candidates");
@@ -254,8 +336,13 @@ final class MysqlVectorCrossGarbageCollector {
         });
     }
 
-    /** 单笔退役只删安全前驱之前的跨片版本；提交凭据与两种大载荷行原子替换。 */
-    int retireOne(long txId) {
+    /**
+     * Single retirement will only delete cross-shard version before the safe pre-discharge; commit receipt with two large payload rows atomic replacement.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    int retireOne(final long txId) {
         if (expectedShardIdentity == null || txId == 0) {
             throw illegal("vector cross GC is uninitialized or has invalid transaction");
         }
@@ -274,25 +361,41 @@ final class MysqlVectorCrossGarbageCollector {
             }
             return retireCandidate(new Candidate(txId, discovered.key()), proof, floor,
                     MysqlDatabaseAuthority.inspect(protection.centerDataSource()));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("retire vector cross version failed", ex);
         }
     }
 
-    /** 批次复用中心证明与安全切面，真正删除仍逐笔持稳定键锁和本地原子回执。 */
-    private int retireCandidate(Candidate candidate,
-                                MysqlLocalFirstPublicationLedger.FinalizedVectorProof proof,
-                                MysqlStripedSnapshotOracle.Snapshot floor,
-                                MysqlDatabaseAuthority.Identity centerIdentity) {
+    /**
+     * Batch Reuse Center certifies the security cut-off, really deletes the still-stabilized key lock and local atomic receipt.
+     *
+     * @param candidate candidate
+     * @param proof proof
+     * @param floor floor
+     * @param centerIdentity center identity
+     * @return the operation result
+     */
+    private int retireCandidate(final Candidate candidate,
+                                final MysqlLocalFirstPublicationLedger.FinalizedVectorProof proof,
+                                final MysqlStripedSnapshotOracle.Snapshot floor,
+                                final MysqlDatabaseAuthority.Identity centerIdentity) {
         return retireBatch(List.of(candidate), proof == null ? Map.of() : Map.of(candidate.txId(), proof),
                 floor, centerIdentity);
     }
 
-    /** 同一键顺序的一组候选共用一次分片提交，任何异常使全组回滚。 */
-    private int retireBatch(List<Candidate> batch,
-                            Map<Long, MysqlLocalFirstPublicationLedger.FinalizedVectorProof> proofs,
-                            MysqlStripedSnapshotOracle.Snapshot floor,
-                            MysqlDatabaseAuthority.Identity centerIdentity) {
+    /**
+     * The group of candidates in the same key order shares shard commit once, and any anomalies make the whole group rollback.
+     *
+     * @param batch batch
+     * @param proofs proofs
+     * @param floor floor
+     * @param centerIdentity center identity
+     * @return the operation result
+     */
+    private int retireBatch(final List<Candidate> batch,
+                            final Map<Long, MysqlLocalFirstPublicationLedger.FinalizedVectorProof> proofs,
+                            final MysqlStripedSnapshotOracle.Snapshot floor,
+                            final MysqlDatabaseAuthority.Identity centerIdentity) {
         String expected = expectedShardIdentity;
         if (expected == null) {
             return 0;
@@ -324,15 +427,24 @@ final class MysqlVectorCrossGarbageCollector {
                 }
                 return reclaimed;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("retire vector cross version failed", ex);
         }
     }
 
-    /** 每个候选仍持稳定键锁、参与者终态锁和完整版本校验。 */
-    private int retireInTransaction(Connection connection, Candidate candidate,
-                                    MysqlLocalFirstPublicationLedger.FinalizedVectorProof proof,
-                                    MysqlStripedSnapshotOracle.Snapshot floor) throws SQLException {
+    /**
+     * Each candidate still holds a stabilization key lock, participant terminal state lock and complete version validate.
+     *
+     * @param connection connection
+     * @param candidate candidate
+     * @param proof proof
+     * @param floor floor
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private int retireInTransaction(final Connection connection, final Candidate candidate,
+                                    final MysqlLocalFirstPublicationLedger.FinalizedVectorProof proof,
+                                    final MysqlStripedSnapshotOracle.Snapshot floor) throws SQLException {
         lockKey(connection, candidate.key());
         requireParticipant(connection, proof);
         Mapping current = mapping(connection, candidate.txId(), true);
@@ -364,10 +476,16 @@ final class MysqlVectorCrossGarbageCollector {
         return 1;
     }
 
-    /** 并发后台已原子退休同一候选时，凭据允许当前批次安全跳过。 */
-    private static boolean retiredReceiptExists(Connection connection,
-                                                 MysqlLocalFirstPublicationLedger.FinalizedVectorProof proof)
-            throws SQLException {
+    /**
+     * Concurrent background allows the current batch safe skip when atomic retirement is the same candidate.
+     *
+     * @param connection connection
+     * @param proof proof
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static boolean retiredReceiptExists(final Connection connection,
+                                                final MysqlLocalFirstPublicationLedger.FinalizedVectorProof proof) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from mvcc_vector_retired_v1
                 where tx_id = ? and start_ts = ? and commit_ts = ? for update
@@ -381,14 +499,18 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 控制租约与最终化记录必须来自同一真实 MySQL 服务器和数据库。 */
+    /**
+     * Control lease and finalization records must come from the same real MySQL server and database.
+     */
     private void requireCenterAuthority() {
         if (!ledger.databaseIdentity().equals(MysqlDatabaseAuthority.inspect(protection.centerDataSource()))) {
             throw illegal("vector cross GC center proof differs from reader safe floor authority");
         }
     }
 
-    /** 后台连接必须始终指向前台适配器的同一物理分片。 */
+    /**
+     * Background connection shall always point to the same physical shard of the foreground adaptor.
+     */
     private void requireShardAuthority() {
         if (!MysqlDatabaseAuthority.inspect(foreground.vectorDataSource())
                 .equals(MysqlDatabaseAuthority.inspect(shard))) {
@@ -396,16 +518,28 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 不能把其他路由或不同分条数的安全向量解释为本分片删除界限。 */
-    private void requireSafeFloorLayout(MysqlStripedSnapshotOracle.Snapshot floor) {
+    /**
+     * The security vector of the other route or a different fraction cannot be interpreted as this shard to remove the boundary.
+     *
+     * @param floor floor
+     */
+    private void requireSafeFloorLayout(final MysqlStripedSnapshotOracle.Snapshot floor) {
         var components = floor.localSequences().get(shardId);
         if (components == null || components.size() != stripes) {
             throw illegal("vector cross GC safe floor differs from shard stripe layout");
         }
     }
 
-    /** 未加锁读取仅用于发现键，最终删除前必须在稳定键锁下重查。 */
-    private static Mapping mapping(Connection connection, long txId, boolean lock) throws SQLException {
+    /**
+     * Unlocked reading is used only for discovery keys, and must be rechecked under a stable key lock before eventually being deleted.
+     *
+     * @param connection connection
+     * @param txId transaction identifier
+     * @param lock lock
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static Mapping mapping(final Connection connection, final long txId, final boolean lock) throws SQLException {
         String sql = "select user_key, tx_id, stripe_id, start_seq, reserved_seq, commit_ts, deleted, payload "
                 + "from mvcc_vector_committed_v1 where tx_id = ?" + (lock ? " for update" : "");
         try (PreparedStatement query = connection.prepareStatement(sql)) {
@@ -426,8 +560,14 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 稳定业务键锁阻止并发本地写或新跨片预写跨越 GC 判断。 */
-    private static void lockKey(Connection connection, byte[] key) throws SQLException {
+    /**
+     * Stable key lock prevents concurrent local writing or new cross-shard prewrite to cross GC judgement.
+     *
+     * @param connection connection
+     * @param key business key
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void lockKey(final Connection connection, final byte[] key) throws SQLException {
         try (PreparedStatement lock = connection.prepareStatement("""
                 insert into mvcc_key_lock(user_key) values (?)
                 on duplicate key update user_key = user_key
@@ -437,10 +577,15 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 分片终态是重放回执的持久锚点，不能接受缺失或不同的本地决议。 */
-    private static void requireParticipant(Connection connection,
-                                           MysqlLocalFirstPublicationLedger.FinalizedVectorProof proof)
-            throws SQLException {
+    /**
+     * Shard terminal state is the durable anchor for replay receipt and cannot accept missing or different local decision.
+     *
+     * @param connection connection
+     * @param proof proof
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void requireParticipant(final Connection connection,
+                                           final MysqlLocalFirstPublicationLedger.FinalizedVectorProof proof) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select start_ts, status, commit_ts from mvcc_participant_txn
                 where tx_id = ? for update
@@ -456,9 +601,15 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 活跃意向、回滚标记、跨分条漂移和旧标量行令整笔退役失败关闭。 */
-    private static boolean hasBlockingHistory(Connection connection, Mapping current)
-            throws SQLException {
+    /**
+     * Active intent, rollback tags, cross-discretion and old scale lines failed to shut down the whole text.
+     *
+     * @param connection connection
+     * @param current current
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static boolean hasBlockingHistory(final Connection connection, final Mapping current) throws SQLException {
         byte[] key = current.key();
         int stripe = current.stripe();
         for (String table : java.util.List.of("mvcc_intent", "mvcc_vector_intent_reservation_v1",
@@ -484,9 +635,17 @@ final class MysqlVectorCrossGarbageCollector {
                 """, key, null);
     }
 
-    /** 读取当前分片锁保护下的存在性，第二参数只用于分条漂移查询。 */
-    private static boolean exists(Connection connection, String sql, byte[] key, Integer stripe)
-            throws SQLException {
+    /**
+     * Reads the existence of the current shard lock protection, and the second parameter is used only for strip-discretion queries.
+     *
+     * @param connection connection
+     * @param sql sql
+     * @param key business key
+     * @param stripe stripe
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static boolean exists(final Connection connection, final String sql, final byte[] key, final Integer stripe) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement(sql)) {
             query.setBytes(1, key);
             if (stripe != null) {
@@ -498,10 +657,18 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 可见前驱由安全切面中的本地与中心已决议版本共同取最大序号。 */
-    private static Long visiblePredecessor(Connection connection, Mapping current,
-                                           long sequenceBound, long decisionBound)
-            throws SQLException {
+    /**
+     * Visible front-drive by the local in a secure cut with the maximum serial number of decision version already taken by the center.
+     *
+     * @param connection connection
+     * @param current current
+     * @param sequenceBound sequence bound
+     * @param decisionBound decision bound
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static Long visiblePredecessor(final Connection connection, final Mapping current,
+                                           final long sequenceBound, final long decisionBound) throws SQLException {
         Long local = latestSequence(connection, """
                 select local_seq from mvcc_vector_local_data_v1
                 where user_key = ? and stripe_id = ? and local_seq <= ?
@@ -526,9 +693,16 @@ final class MysqlVectorCrossGarbageCollector {
         return cross == null ? local : Math.max(local, cross);
     }
 
-    /** 用于遮盖旧版本的跨片前驱必须仍有完整真实载荷。 */
-    private static Mapping mappingByKeySequence(Connection connection, byte[] key, long sequence)
-            throws SQLException {
+    /**
+     * The cross-shard front drive used to mask old version must still be fully real payload.
+     *
+     * @param connection connection
+     * @param key business key
+     * @param sequence sequence
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static Mapping mappingByKeySequence(final Connection connection, final byte[] key, final long sequence) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select user_key, tx_id, stripe_id, start_seq, reserved_seq,
                        commit_ts, deleted, payload
@@ -549,10 +723,20 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 当前读只取一行安全前驱，避免把旧 RR 视图当作 GC 判断依据。 */
-    private static Long latestSequence(Connection connection, String sql, byte[] key,
-                                       int stripe, long bound, Long decisionBound)
-            throws SQLException {
+    /**
+     * The current reading takes only one line of secure forwards and avoids using the old RR view as a basis for GC judgement.
+     *
+     * @param connection connection
+     * @param sql sql
+     * @param key business key
+     * @param stripe stripe
+     * @param bound bound
+     * @param decisionBound decision bound
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static Long latestSequence(final Connection connection, final String sql, final byte[] key,
+                                       final int stripe, final long bound, final Long decisionBound) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement(sql)) {
             query.setBytes(1, key);
             query.setInt(2, stripe);
@@ -566,9 +750,14 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 一笔正式跨片写每片只有一个版本，混入其他行不得生成假重放回执。 */
-    private static void requireOnlyVersionForTransaction(Connection connection, Mapping current)
-            throws SQLException {
+    /**
+     * A formal cross-shard writing of only one version per piece cannot create a false replay receipt.
+     *
+     * @param connection connection
+     * @param current current
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void requireOnlyVersionForTransaction(final Connection connection, final Mapping current) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select user_key, commit_ts from mvcc_data where tx_id = ? for update
                 """)) {
@@ -582,9 +771,14 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 真正的版本载荷必须与持久映射逐字节一致，不能为损坏历史签发凭据。 */
-    private static void requireMatchingData(Connection connection, Mapping current)
-            throws SQLException {
+    /**
+     * The real version payload must match the durable map by bytes and cannot be issued for damage to history receipt.
+     *
+     * @param connection connection
+     * @param current current
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void requireMatchingData(final Connection connection, final Mapping current) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select deleted, value from mvcc_data
                 where user_key = ? and tx_id = ? and commit_ts = ? for update
@@ -601,9 +795,15 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 小凭据先写入同一事务，随后删除两份大载荷，提交失败时一起回滚。 */
-    private static void writeReceipt(Connection connection, Mapping current, long startTs)
-            throws SQLException {
+    /**
+     * Small receipt first writes the same transaction and then deletes two large payload, and one rollback when commit fails.
+     *
+     * @param connection connection
+     * @param current current
+     * @param startTs transaction start timestamp
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void writeReceipt(final Connection connection, final Mapping current, final long startTs) throws SQLException {
         try (PreparedStatement insert = connection.prepareStatement("""
                 insert into mvcc_vector_retired_v1
                   (tx_id, user_key, stripe_id, start_ts, start_seq, reserved_seq,
@@ -626,8 +826,14 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 回执与大载荷删除同事务完成，任何行数不符都回滚。 */
-    private static void deleteLargeRows(Connection connection, Mapping current) throws SQLException {
+    /**
+     * Receipt with Large payload Delete completed with transaction, and none of the rows does not match rollback.
+     *
+     * @param connection connection
+     * @param current current
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void deleteLargeRows(final Connection connection, final Mapping current) throws SQLException {
         try (PreparedStatement data = connection.prepareStatement("""
                 delete from mvcc_data where user_key = ? and tx_id = ? and commit_ts = ?
                 """); PreparedStatement mapping = connection.prepareStatement("""
@@ -647,13 +853,49 @@ final class MysqlVectorCrossGarbageCollector {
         }
     }
 
-    /** 持久映射或数据库身份不符必须停止删除。 */
-    private static MvccException illegal(String message) {
+    /**
+     * Durable map or database identity mismatch must stop deleting.
+     *
+     * @param message message
+     * @return the operation result
+     */
+    private static MvccException illegal(final String message) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, null);
     }
 
-    /** 连接或事务异常后可能已提交回执，调用方必须凭持久状态重试确认。 */
-    private static MvccException unavailable(String message, SQLException cause) {
+    /**
+     * Connection or transaction may be commit receipt after an anomaly, and the caller must confirm it with durable status retry.
+     *
+     * @param message message
+     * @param cause cause
+     * @return the operation result
+     */
+    private static MvccException unavailable(final String message, final SQLException cause) {
         return new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN, message, true, null, cause);
+    }
+
+    /**
+     * Single key cross-shard map identity read again after the key lock and the participant lock.
+     *
+     * @param key business key
+     * @param txId transaction identifier
+     * @param stripe stripe
+     * @param startSeq start seq
+     * @param sequence sequence
+     * @param commitTs durable commit timestamp
+     * @param deleted deleted
+     * @param payload payload
+     */
+    private record Mapping(byte[] key, long txId, int stripe, long startSeq, long sequence,
+            long commitTs, boolean deleted, byte[] payload) {
+    }
+
+    /**
+     * Shard cursor carries the Stable Business Key in a query and rechecks the real map under key lock until retirement.
+     *
+     * @param txId transaction identifier
+     * @param key business key
+     */
+    private record Candidate(long txId, byte[] key) {
     }
 }

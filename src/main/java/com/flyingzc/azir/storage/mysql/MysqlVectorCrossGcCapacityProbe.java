@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -16,14 +32,26 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-/** 在独立跨片容量探针数据库中测量后继写入后的真实版本退休与后台积压。 */
+/**
+ * Measurs the real version retirement and background backlog after writing in an independent cross-shard capacity probe database.
+ */
 public final class MysqlVectorCrossGcCapacityProbe {
-    /** 跨片原始负载由前置容量探针生成，本入口只测恢复后退休阶段。 */
+
+    /**
+     * The original cross-shard load is generated from the pre-capacity probe and only the post- recovery retirement phase of this entry.
+     */
     private MysqlVectorCrossGcCapacityProbe() {
     }
 
-    /** 只允许显式开启的隔离库运行，任何未最终化跨片事务都阻止退役测量。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Only visible-opened silos are allowed to operate, and any unfinalized cross-shard transaction prevents decommissioning measurements.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_VECTOR_CROSS_GC_PROBE", "false"))) {
             throw new IllegalArgumentException("cross GC probe requires AZIR_TX_VECTOR_CROSS_GC_PROBE=true");
         }
@@ -46,9 +74,10 @@ public final class MysqlVectorCrossGcCapacityProbe {
         String controlUrl = env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control");
         String leftUrl = env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23307/shard_1");
         String rightUrl = env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:23308/shard_2");
-        try (HikariDataSource center = pool(controlUrl, user, password);
-             HikariDataSource leftData = pool(leftUrl, user, password);
-             HikariDataSource rightData = pool(rightUrl, user, password)) {
+        try (
+                HikariDataSource center = pool(controlUrl, user, password);
+                HikariDataSource leftData = pool(leftUrl, user, password);
+                HikariDataSource rightData = pool(rightUrl, user, password)) {
             var ledger = new MysqlLocalFirstPublicationLedger(center);
             if (ledger.countUnfinalizedIntentDecisions() != 0) {
                 throw new IllegalStateException("cross GC probe requires fully finalized center decisions");
@@ -77,11 +106,12 @@ public final class MysqlVectorCrossGcCapacityProbe {
             Map<String, DataSource> routes = Map.of("s1", leftData, "s2", rightData);
             var leaderLease = MysqlVectorCutLeaderLease.forProduct(center, routes, stripes);
             leaderLease.initializeProduct();
-            try (HikariDataSource backgroundCenter = backgroundPool(controlUrl, user, password);
-                 HikariDataSource backgroundLeft = backgroundPool(leftUrl, user, password);
-                 HikariDataSource backgroundRight = backgroundPool(rightUrl, user, password);
-                 var leader = MysqlVectorCutLeaderRuntime.forProduct(center, routes, stripes,
-                         ledger::currentPublished, leaderLease, "cross-gc-capacity-leader", 5_000, 200)) {
+            try (
+                    HikariDataSource backgroundCenter = backgroundPool(controlUrl, user, password);
+                    HikariDataSource backgroundLeft = backgroundPool(leftUrl, user, password);
+                    HikariDataSource backgroundRight = backgroundPool(rightUrl, user, password);
+                    var leader = MysqlVectorCutLeaderRuntime.forProduct(center, routes, stripes,
+                            ledger::currentPublished, leaderLease, "cross-gc-capacity-leader", 5_000, 200)) {
                 if (!leader.start()) {
                     throw new IllegalStateException("cross GC probe found another active cut leader");
                 }
@@ -100,10 +130,11 @@ public final class MysqlVectorCrossGcCapacityProbe {
                         "s2", stripes, backgroundLeases, ledger, parallelism, retireBatch);
                 leftCross.initializeProduct();
                 rightCross.initializeProduct();
-                try (var scheduler = new MysqlVectorLocalGcScheduler(leader, backgroundLeases,
-                        Map.of("s1", leftLocal, "s2", rightLocal),
-                        Map.of("s1", leftCross, "s2", rightCross),
-                        Math.min(256, gcLimit), gcLimit, localEveryRounds, intervalMillis)) {
+                try (
+                        var scheduler = new MysqlVectorLocalGcScheduler(leader, backgroundLeases,
+                                Map.of("s1", leftLocal, "s2", rightLocal),
+                                Map.of("s1", leftCross, "s2", rightCross),
+                                Math.min(256, gcLimit), gcLimit, localEveryRounds, intervalMillis)) {
                     long gcStarted = System.nanoTime();
                     scheduler.start();
                     long deadline = gcStarted + TimeUnit.SECONDS.toNanos(seconds);
@@ -119,7 +150,7 @@ public final class MysqlVectorCrossGcCapacityProbe {
                         }
                         if (System.nanoTime() >= nextReport) {
                             System.out.printf("VECTOR_CROSS_GC_WINDOW elapsed_s=%.2f "
-                                            + "left_remaining=%d right_remaining=%d retired=%d runs=%d%n",
+                                    + "left_remaining=%d right_remaining=%d retired=%d runs=%d%n",
                                     elapsed(gcStarted), leftRemaining, rightRemaining,
                                     scheduler.crossReclaimed(), scheduler.stats().runCount());
                             nextReport += TimeUnit.SECONDS.toNanos(5);
@@ -141,11 +172,11 @@ public final class MysqlVectorCrossGcCapacityProbe {
                         throw new IllegalStateException("cross GC probe lost mapping, data, or receipt conservation");
                     }
                     System.out.printf("VECTOR_CROSS_GC_CAPACITY parallelism=%d retire_batch=%d local_every=%d initial_per_shard=%d "
-                                    + "successors_per_shard=%d successor_s=%.2f "
-                                    + "gc_s=%.2f retired=%d retired_per_s=%.2f "
-                                    + "left_remaining=%d right_remaining=%d "
-                                    + "left_receipts=%d right_receipts=%d "
-                                    + "runs=%d failures=%d local_gc_s=%.2f cross_gc_s=%.2f%n",
+                            + "successors_per_shard=%d successor_s=%.2f "
+                            + "gc_s=%.2f retired=%d retired_per_s=%.2f "
+                            + "left_remaining=%d right_remaining=%d "
+                            + "left_receipts=%d right_receipts=%d "
+                            + "runs=%d failures=%d local_gc_s=%.2f cross_gc_s=%.2f%n",
                             parallelism, retireBatch, localEveryRounds,
                             leftBefore, leftSuccessors, successorSeconds,
                             gcSeconds, leftRetired + rightRetired,
@@ -159,25 +190,46 @@ public final class MysqlVectorCrossGcCapacityProbe {
         }
     }
 
-    /** 与原跨片探针使用相同的前台池配置。 */
-    private static HikariDataSource pool(String url, String user, String password) {
+    /**
+     * The same foreground pool configuration as the original cross-shard probe.
+     *
+     * @param url url
+     * @param user user
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String url, final String user, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.create(url, user, password);
     }
 
-    /** 后台扫描与物理删除使用独立小池以限制对业务连接的抢占。 */
-    private static HikariDataSource backgroundPool(String url, String user, String password) {
+    /**
+     * Background Scan and Physical Delete Use of Independent Pools to limit capture of operations connection.
+     *
+     * @param url url
+     * @param user user
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource backgroundPool(final String url, final String user, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.createBackground(url, user, password);
     }
 
-    /** 对每笔已最终化跨片版本写一个同键本地后继，使旧大载荷成为可退役候选。 */
-    private static long addSuccessors(HikariDataSource dataSource, MysqlStorageAdapter adapter)
-            throws SQLException {
+    /**
+     * Writes a single local follow-up to each final cross-shard version, making the old big payload eligible for retirement.
+     *
+     * @param dataSource database connection source
+     * @param adapter adapter
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long addSuccessors(final HikariDataSource dataSource, final MysqlStorageAdapter adapter) throws SQLException {
         List<Mapping> mappings = new ArrayList<>();
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement query = connection.prepareStatement("""
-                     select user_key, tx_id, stripe_id, reserved_seq
-                     from mvcc_vector_committed_v1 order by tx_id
-                     """); ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement query = connection.prepareStatement("""
+                        select user_key, tx_id, stripe_id, reserved_seq
+                        from mvcc_vector_committed_v1 order by tx_id
+                        """); ResultSet row = query.executeQuery()) {
             while (row.next()) {
                 mappings.add(new Mapping(new String(row.getBytes("user_key"), StandardCharsets.UTF_8),
                         row.getLong("tx_id"), row.getInt("stripe_id"), row.getLong("reserved_seq")));
@@ -185,7 +237,7 @@ public final class MysqlVectorCrossGcCapacityProbe {
         }
         for (int index = 0; index < mappings.size(); index++) {
             Mapping mapping = mappings.get(index);
-            // 容量探针把本地后继放在靠近 -1 的独立负号段，不能取反跨片负事务号。
+            // Volume probe places the local follow-on to an independent negative timestamp range near -1, which cannot be countered by a negative cross-shard negative transaction ID.
             adapter.directCommitVectorLocal(-1L - index,
                     Mutation.put(mapping.key(), new byte[]{42}),
                     mapping.stripe(), mapping.sequence());
@@ -193,16 +245,20 @@ public final class MysqlVectorCrossGcCapacityProbe {
         return mappings.size();
     }
 
-    /** 原映射只包含可复现的单键和其真实保留序号。 */
-    private record Mapping(String key, long txId, int stripe, long sequence) {
-    }
-
-    /** 实际物理行数在 GC 前后用于核对凭据与大载荷守恒。 */
-    private static long count(HikariDataSource dataSource, String table) throws SQLException {
+    /**
+     * The actual physical line numbers are used before and after GC to check receipt for consistency with large payload.
+     *
+     * @param dataSource database connection source
+     * @param table table
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long count(final HikariDataSource dataSource, final String table) throws SQLException {
         String sql = "select count(*) from " + table;
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement query = connection.prepareStatement(sql);
-             ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement query = connection.prepareStatement(sql);
+                ResultSet row = query.executeQuery()) {
             if (!row.next()) {
                 throw new SQLException("cross GC probe count returned no row");
             }
@@ -210,14 +266,36 @@ public final class MysqlVectorCrossGcCapacityProbe {
         }
     }
 
-    /** 单调计时只用于本地容量记录，不解释为多机生产延迟。 */
-    private static double elapsed(long startedNanos) {
+    /**
+     * The single-module time is used only for local capacity records and is not interpreted as a delay in multi-machine production.
+     *
+     * @param startedNanos started nanos
+     * @return the operation result
+     */
+    private static double elapsed(final long startedNanos) {
         return (System.nanoTime() - startedNanos) / 1_000_000_000.0;
     }
 
-    /** 只允许显式环境配置覆盖隔离容量探针参数。 */
-    private static String env(String name, String fallback) {
+    /**
+     * Only visible environment configurations are allowed to cover the isolation capacity probe parameters.
+     *
+     * @param name name
+     * @param fallback fallback
+     * @return the operation result
+     */
+    private static String env(final String name, final String fallback) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? fallback : value;
+    }
+
+    /**
+     * The original map contains only a single key that can be repeated and its true retention serial number.
+     *
+     * @param key business key
+     * @param txId transaction identifier
+     * @param stripe stripe
+     * @param sequence sequence
+     */
+    private record Mapping(String key, long txId, int stripe, long sequence) {
     }
 }

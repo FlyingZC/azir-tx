@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""独立核对自动维护、认证双网络、真实后端暂停和丢失提交回复的组合故障历史。"""
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Audit combined automatic-maintenance, authenticated dual-network, backend-pause and lost-commit-reply faults."""
 import argparse
 import copy
 import json
@@ -12,7 +26,7 @@ SCENARIOS = {'BEFORE_APPEND', 'DURABLE_REPLY_LOST', 'ALL_SPLIT_REPLY_LOST'}
 
 
 def verify(case, rows):
-    """成功确认与查询解析分开建模，不将 UNKNOWN、SUBMITTED 或诊断前缀当作最初 ACK。"""
+    """Model commit acknowledgments separately from lookups; UNKNOWN, SUBMITTED and diagnostics are not original acknowledgments."""
     scenario, old, backend = case['scenario'], case['old'], case['backend']
     assert scenario in SCENARIOS
     uuid.UUID(case['group']); uuid.UUID(case['uncertain'])
@@ -116,7 +130,7 @@ def verify(case, rows):
 
 
 def main():
-    """完整三场景和故意坏历史一起验收，不接受残缺证据目录。"""
+    """Require all three scenarios and deliberately invalid controls; reject incomplete evidence directories."""
     parser = argparse.ArgumentParser(); parser.add_argument('directory', type=Path); args = parser.parse_args()
     runs = [(json.loads((path / 'case.json').read_text()), events(path)) for path in sorted(args.directory.iterdir()) if path.is_dir()]
     assert len(runs) == 3 and {case['scenario'] for case, _ in runs} == SCENARIOS

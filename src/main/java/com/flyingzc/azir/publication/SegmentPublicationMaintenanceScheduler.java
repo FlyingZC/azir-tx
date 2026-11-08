@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication;
 
 import com.flyingzc.azir.common.BackgroundTaskStats;
@@ -12,61 +28,122 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** 在独立后台连接预算上周期执行分段恢复与连续水位发布。 */
+/**
+ * Execute the recovery and consecutive watermark in the independent background connection budget cycle.
+ */
 public final class SegmentPublicationMaintenanceScheduler implements AutoCloseable {
+
     private final SegmentPublicationRecoveryRunner recoveryRunner;
+
     private final MysqlSegmentPublicationLedger ledger;
+
     private final SegmentPublicationGcManager gcManager;
+
     private final int recoveryBatchSize;
+
     private final int publicationBatchSize;
+
     private final int gcBatchSize;
+
     private final long recoveryIntervalMillis;
+
     private final long publicationIntervalMillis;
+
     private final long gcIntervalMillis;
+
     private final boolean eventDrivenPublication;
+
     private final ScheduledExecutorService recoveryExecutor;
+
     private final ScheduledExecutorService publicationExecutor;
+
     private final ScheduledExecutorService gcExecutor;
+
     private final BackgroundTaskStats recoveryStats = new BackgroundTaskStats();
+
     private final BackgroundTaskStats publicationStats = new BackgroundTaskStats();
+
     private final BackgroundTaskStats gcStats = new BackgroundTaskStats();
+
     private final AtomicLong lastObservedPublished;
+
     private final AtomicReference<RuntimeException> lastRecoveryFailure = new AtomicReference<>();
+
     private final AtomicReference<RuntimeException> lastPublicationFailure = new AtomicReference<>();
+
     private final AtomicReference<RuntimeException> lastGcFailure = new AtomicReference<>();
+
     private final AtomicBoolean started = new AtomicBoolean();
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private final AtomicBoolean publicationRequestQueued = new AtomicBoolean();
+
     private final AtomicLong publicationRequestVersion = new AtomicLong();
 
-    /** 要求有界批次和正周期，后台数据源由调用方独立配置。 */
-    public SegmentPublicationMaintenanceScheduler(SegmentPublicationRecoveryRunner recoveryRunner,
-                                                   MysqlSegmentPublicationLedger ledger,
-                                                   int recoveryBatchSize, int publicationBatchSize,
-                                                   long recoveryIntervalMillis, long publicationIntervalMillis) {
+    /**
+     * REQUESTS bounded batch and regular, with the background data source configured independently by the caller.
+     *
+     * @param recoveryRunner recovery runner
+     * @param ledger ledger
+     * @param recoveryBatchSize recovery batch size
+     * @param publicationBatchSize publication batch size
+     * @param recoveryIntervalMillis recovery interval millis
+     * @param publicationIntervalMillis publication interval millis
+     */
+    public SegmentPublicationMaintenanceScheduler(final SegmentPublicationRecoveryRunner recoveryRunner,
+                                                  final MysqlSegmentPublicationLedger ledger,
+                                                  final int recoveryBatchSize, final int publicationBatchSize,
+                                                  final long recoveryIntervalMillis, final long publicationIntervalMillis) {
         this(recoveryRunner, ledger, null, recoveryBatchSize, publicationBatchSize, 1,
                 recoveryIntervalMillis, publicationIntervalMillis, 1);
     }
 
-    /** 完整运行时额外启用分片和中心共用安全点的周期 GC。 */
-    public SegmentPublicationMaintenanceScheduler(SegmentPublicationRecoveryRunner recoveryRunner,
-                                                   MysqlSegmentPublicationLedger ledger,
-                                                   SegmentPublicationGcManager gcManager,
-                                                   int recoveryBatchSize, int publicationBatchSize,
-                                                   int gcBatchSize, long recoveryIntervalMillis,
-                                                   long publicationIntervalMillis, long gcIntervalMillis) {
+    /**
+     * Enable shard and Centre safe point cycle GCs when fully running.
+     *
+     * @param recoveryRunner recovery runner
+     * @param ledger ledger
+     * @param gcManager gc manager
+     * @param recoveryBatchSize recovery batch size
+     * @param publicationBatchSize publication batch size
+     * @param gcBatchSize gc batch size
+     * @param recoveryIntervalMillis recovery interval millis
+     * @param publicationIntervalMillis publication interval millis
+     * @param gcIntervalMillis gc interval millis
+     */
+    public SegmentPublicationMaintenanceScheduler(final SegmentPublicationRecoveryRunner recoveryRunner,
+                                                  final MysqlSegmentPublicationLedger ledger,
+                                                  final SegmentPublicationGcManager gcManager,
+                                                  final int recoveryBatchSize, final int publicationBatchSize,
+                                                  final int gcBatchSize, final long recoveryIntervalMillis,
+                                                  final long publicationIntervalMillis, final long gcIntervalMillis) {
         this(recoveryRunner, ledger, gcManager, recoveryBatchSize, publicationBatchSize,
                 gcBatchSize, recoveryIntervalMillis, publicationIntervalMillis, gcIntervalMillis, false);
     }
 
-    /** 可选唤醒复用同一发布线程，周期轮次仍兜底处理无前台等待的终态槽。 */
-    public SegmentPublicationMaintenanceScheduler(SegmentPublicationRecoveryRunner recoveryRunner,
-                                                   MysqlSegmentPublicationLedger ledger,
-                                                   SegmentPublicationGcManager gcManager,
-                                                   int recoveryBatchSize, int publicationBatchSize,
-                                                   int gcBatchSize, long recoveryIntervalMillis,
-                                                   long publicationIntervalMillis, long gcIntervalMillis,
-                                                   boolean eventDrivenPublication) {
+    /**
+     * Optionally, you can use the same release thread to wake up again, and the cycle turns down to process terminal state slots without foreground waiting.
+     *
+     * @param recoveryRunner recovery runner
+     * @param ledger ledger
+     * @param gcManager gc manager
+     * @param recoveryBatchSize recovery batch size
+     * @param publicationBatchSize publication batch size
+     * @param gcBatchSize gc batch size
+     * @param recoveryIntervalMillis recovery interval millis
+     * @param publicationIntervalMillis publication interval millis
+     * @param gcIntervalMillis gc interval millis
+     * @param eventDrivenPublication event driven publication
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public SegmentPublicationMaintenanceScheduler(final SegmentPublicationRecoveryRunner recoveryRunner,
+                                                  final MysqlSegmentPublicationLedger ledger,
+                                                  final SegmentPublicationGcManager gcManager,
+                                                  final int recoveryBatchSize, final int publicationBatchSize,
+                                                  final int gcBatchSize, final long recoveryIntervalMillis,
+                                                  final long publicationIntervalMillis, final long gcIntervalMillis,
+                                                  final boolean eventDrivenPublication) {
         if (recoveryBatchSize < 1 || recoveryBatchSize > 4096
                 || publicationBatchSize < 1 || publicationBatchSize > 4096
                 || gcBatchSize < 1 || gcBatchSize > 4096
@@ -84,15 +161,16 @@ public final class SegmentPublicationMaintenanceScheduler implements AutoCloseab
         this.publicationIntervalMillis = publicationIntervalMillis;
         this.gcIntervalMillis = gcIntervalMillis;
         this.eventDrivenPublication = eventDrivenPublication;
-        this.recoveryExecutor = Executors.newSingleThreadScheduledExecutor(task ->
-                Thread.ofPlatform().daemon().name("mvcc-segment-recovery").unstarted(task));
-        this.publicationExecutor = Executors.newSingleThreadScheduledExecutor(task ->
-                Thread.ofPlatform().daemon().name("mvcc-segment-publication").unstarted(task));
-        this.gcExecutor = gcManager == null ? null : Executors.newSingleThreadScheduledExecutor(task ->
-                Thread.ofPlatform().daemon().name("mvcc-segment-gc").unstarted(task));
+        this.recoveryExecutor = Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform().daemon().name("mvcc-segment-recovery").unstarted(task));
+        this.publicationExecutor = Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform().daemon().name("mvcc-segment-publication").unstarted(task));
+        this.gcExecutor = gcManager == null ? null : Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform().daemon().name("mvcc-segment-gc").unstarted(task));
     }
 
-    /** 启动一次性调度，重复调用不叠加任务。 */
+    /**
+     * Starts a one-time schedule and repeats the call without overlapping tasks.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     public synchronized void start() {
         if (closed.get()) {
             throw new IllegalStateException("segment maintenance scheduler is closed");
@@ -109,22 +187,36 @@ public final class SegmentPublicationMaintenanceScheduler implements AutoCloseab
         }
     }
 
-    /** 返回有界恢复轮次的成功和失败统计。 */
+    /**
+     * Returns bounded recovery round success and failure statistics.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats recoveryStats() {
         return recoveryStats;
     }
 
-    /** 返回连续水位发布轮次的成功和失败统计。 */
+    /**
+     * Returns consecutive watermark rounds of success and failure statistics.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats publicationStats() {
         return publicationStats;
     }
 
-    /** 仅返回已经完成数据库提交的最近发布水位，供前台等待确认。 */
+    /**
+     * Only returns the latest watermark release of database commit completed for foreground awaiting confirmation.
+     *
+     * @return the operation result
+     */
     public long publishedWatermark() {
         return lastObservedPublished.get();
     }
 
-    /** 已提交前台只投递一个合并唤醒，不在前台线程调用数据库发布操作。 */
+    /**
+     * Commit foreground has delivered only one combination awakening, not calling database release on the foreground thread.
+     */
     public void requestPublication() {
         if (!eventDrivenPublication || !started.get() || closed.get()) {
             return;
@@ -133,19 +225,23 @@ public final class SegmentPublicationMaintenanceScheduler implements AutoCloseab
         scheduleRequestedPublication();
     }
 
-    /** 最多留一个待运行请求，执行期间的新决议在尾部补一次唤醒。 */
+    /**
+     * A maximum of one to run and a new decision during execution will be added at the end.
+     */
     private void scheduleRequestedPublication() {
         if (!publicationRequestQueued.compareAndSet(false, true)) {
             return;
         }
         try {
             publicationExecutor.schedule(this::publishRequestedSafely, 1, TimeUnit.MILLISECONDS);
-        } catch (RejectedExecutionException ex) {
+        } catch (final RejectedExecutionException ex) {
             publicationRequestQueued.set(false);
         }
     }
 
-    /** 保留周期兜底，同时避免在上次扫描尾部丢失新提交的通知。 */
+    /**
+     * Keeps the cycle bottom while avoiding the loss of a new commit notification at the end of the previous scan.
+     */
     private void publishRequestedSafely() {
         long observed = publicationRequestVersion.get();
         try {
@@ -158,27 +254,45 @@ public final class SegmentPublicationMaintenanceScheduler implements AutoCloseab
         }
     }
 
-    /** 返回分段 GC 周期的完成与失败统计。 */
+    /**
+     * Returns the completion and failure statistics of the GC cycle.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats gcStats() {
         return gcStats;
     }
 
-    /** 返回最近一次恢复顶层异常供诊断。 */
+    /**
+     * Returns the latest recovery top level anomaly for diagnosis.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastRecoveryFailure() {
         return lastRecoveryFailure.get();
     }
 
-    /** 返回最近一次发布异常供诊断。 */
+    /**
+     * Returns the most recent anomaly published for diagnosis.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastPublicationFailure() {
         return lastPublicationFailure.get();
     }
 
-    /** 返回最近一次 GC 异常供诊断。 */
+    /**
+     * Returns the last GC anomaly for diagnosis.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastGcFailure() {
         return lastGcFailure.get();
     }
 
-    /** 停止新轮次并等待当前数据库任务结束。 */
+    /**
+     * Stops the new rotation and waits for the end of the current database task.
+     */
     @Override
     public synchronized void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -196,44 +310,54 @@ public final class SegmentPublicationMaintenanceScheduler implements AutoCloseab
         }
     }
 
-    /** 单轮恢复异常保留下一次周期机会并公开原因。 */
+    /**
+     * Single-wheel recovery abnormally retains the next cycle opportunity and discloses the reasons.
+     */
     private void recoverSafely() {
         try {
             recoveryStats.recordSuccess(recoveryRunner.recoverOnce(recoveryBatchSize));
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             lastRecoveryFailure.set(ex);
             recoveryStats.recordFailure();
         }
     }
 
-    /** 新槽终态落盘后即使前台退出，也继续尝试推进连续已发布前缀。 */
+    /**
+     * The new slot terminal state continues to attempt to advance successive prefixes even after the foreground exits.
+     */
     private void publishSafely() {
         try {
             long published = ledger.advancePublished(publicationBatchSize);
             publicationStats.recordSuccess(Math.max(0, published - lastObservedPublished.getAndSet(published)));
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             lastPublicationFailure.set(ex);
             publicationStats.recordFailure();
         }
     }
 
-    /** GC 一轮失败保留原阶段与目标安全点，留待下一周期重试。 */
+    /**
+     * The GC round failed to preserve the original phase and target safe point, leaving it for the next cycle retry.
+     */
     private void gcSafely() {
         try {
             gcStats.recordSuccess(gcManager.gcOnce(gcBatchSize));
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             lastGcFailure.set(ex);
             gcStats.recordFailure();
         }
     }
 
-    /** 有界等待后台轮次退出，数据库阻塞仍由连接池和驱动超时保护。 */
-    private void awaitStop(ScheduledExecutorService executor) {
+    /**
+     * Bounded Waits for the background round exit, and the database block is still protected by connection pool and driver timeout.
+     *
+     * @param executor executor
+     */
+    private void awaitStop(final ScheduledExecutorService executor) {
         try {
             if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
                 executor.shutdownNow();
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             executor.shutdownNow();
             Thread.currentThread().interrupt();
         }

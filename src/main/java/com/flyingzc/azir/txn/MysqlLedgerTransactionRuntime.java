@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -24,29 +40,49 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 显式装配账本事务入口与独立连接预算的后台恢复、GC 生命周期。 */
+/**
+ * Visible assembly book transaction entrance and independent connection budget background recovery, GC life cycle.
+ */
 public final class MysqlLedgerTransactionRuntime implements AutoCloseable {
+
     private final TransactionManager transactionManager;
+
     private final PublicationMaintenanceScheduler maintenanceScheduler;
+
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    /** 保存已启动的事务入口和后台任务。 */
-    private MysqlLedgerTransactionRuntime(TransactionManager transactionManager,
-                                          PublicationMaintenanceScheduler maintenanceScheduler) {
+    /**
+     * Saves the start-up transaction entry and background tasks.
+     *
+     * @param transactionManager transaction manager
+     * @param maintenanceScheduler maintenance scheduler
+     */
+    private MysqlLedgerTransactionRuntime(final TransactionManager transactionManager,
+                                          final PublicationMaintenanceScheduler maintenanceScheduler) {
         this.transactionManager = transactionManager;
         this.maintenanceScheduler = maintenanceScheduler;
     }
 
     /**
-     * 在已激活账本的数据库上装配运行时；数据源由调用方持有，后台池必须独立且指向相同库。
+     * When loading database on a activated account book is running; the data source is held by the caller, and the background pool must be independent and point to the same database.
+     *
+     * @param foregroundControl foreground control
+     * @param backgroundControl background control
+     * @param foregroundShards foreground shards
+     * @param backgroundShards background shards
+     * @param transactionOptions transaction options
+     * @param runtimeOptions runtime options
+     * @param metrics metrics
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
      */
-    public static MysqlLedgerTransactionRuntime open(DataSource foregroundControl,
-                                                     DataSource backgroundControl,
-                                                     Map<String, DataSource> foregroundShards,
-                                                     Map<String, DataSource> backgroundShards,
-                                                     TransactionOptions transactionOptions,
-                                                     LedgerRuntimeOptions runtimeOptions,
-                                                     TransactionMetrics metrics) {
+    public static MysqlLedgerTransactionRuntime open(final DataSource foregroundControl,
+                                                     final DataSource backgroundControl,
+                                                     final Map<String, DataSource> foregroundShards,
+                                                     final Map<String, DataSource> backgroundShards,
+                                                     final TransactionOptions transactionOptions,
+                                                     final LedgerRuntimeOptions runtimeOptions,
+                                                     final TransactionMetrics metrics) {
         Objects.requireNonNull(foregroundControl, "foregroundControl");
         Objects.requireNonNull(backgroundControl, "backgroundControl");
         Objects.requireNonNull(transactionOptions, "transactionOptions");
@@ -101,25 +137,25 @@ public final class MysqlLedgerTransactionRuntime implements AutoCloseable {
                     runtimeOptions.recoveryIntervalMillis(), runtimeOptions.gcIntervalMillis());
             scheduler.start();
             return new MysqlLedgerTransactionRuntime(manager, scheduler);
-        } catch (RuntimeException | Error ex) {
+        } catch (final RuntimeException | Error ex) {
             if (scheduler != null) {
                 try {
                     scheduler.close();
-                } catch (RuntimeException closeFailure) {
+                } catch (final RuntimeException closeFailure) {
                     ex.addSuppressed(closeFailure);
                 }
             }
             if (manager != null) {
                 try {
                     manager.close();
-                } catch (RuntimeException closeFailure) {
+                } catch (final RuntimeException closeFailure) {
                     ex.addSuppressed(closeFailure);
                 }
             }
             if (manager == null && registry != null) {
                 try {
                     registry.close();
-                } catch (RuntimeException closeFailure) {
+                } catch (final RuntimeException closeFailure) {
                     ex.addSuppressed(closeFailure);
                 }
             }
@@ -127,17 +163,27 @@ public final class MysqlLedgerTransactionRuntime implements AutoCloseable {
         }
     }
 
-    /** 返回已启用 RC/RR 账本协议的事务管理器。 */
+    /**
+     * Returns the transaction manager of the RC/RR account book protocol that is enabled.
+     *
+     * @return the operation result
+     */
     public TransactionManager transactionManager() {
         return transactionManager;
     }
 
-    /** 返回恢复和 GC 的周期统计与最近失败原因。 */
+    /**
+     * Returns recovery and GC periodic statistics with recent failures.
+     *
+     * @return the operation result
+     */
     public PublicationMaintenanceScheduler maintenanceScheduler() {
         return maintenanceScheduler;
     }
 
-    /** 先停止后台任务，再关闭前台事务执行器；数据源由创建者关闭。 */
+    /**
+     * Stop the background task and then close the foreground transaction implementer; data sources are closed by the creator.
+     */
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
@@ -149,24 +195,38 @@ public final class MysqlLedgerTransactionRuntime implements AutoCloseable {
         }
     }
 
-    /** 比较服务器 UUID 和所选数据库，拒绝后台池误接到不同权威。 */
-    private static void requireSameAuthority(DataSource foreground, DataSource background, String route) {
+    /**
+     * Compares the server UUID with the selected database, rejecting an error receipt of the background pool.
+     *
+     * @param foreground foreground
+     * @param background background
+     * @param route route
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static void requireSameAuthority(final DataSource foreground, final DataSource background, final String route) {
         if (!authority(foreground).equals(authority(background))) {
             throw new IllegalArgumentException("background database authority differs from foreground: " + route);
         }
     }
 
-    /** 读取一条连接实际所属的 MySQL 服务器和数据库。 */
-    private static String authority(DataSource dataSource) {
-        try (Connection connection = dataSource.getConnection();
-             Statement query = connection.createStatement();
-             ResultSet row = query.executeQuery("select @@server_uuid, database()")) {
+    /**
+     * Reads a MySQL server and database that connection actually belongs to.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private static String authority(final DataSource dataSource) {
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement query = connection.createStatement();
+                ResultSet row = query.executeQuery("select @@server_uuid, database()")) {
             if (!row.next() || row.getString(1) == null || row.getString(2) == null) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "ledger runtime datasource requires a selected MySQL database", false, null);
             }
             return row.getString(1) + "\u0000" + row.getString(2);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                     "inspect ledger runtime database authority failed", false, null, ex);
         }

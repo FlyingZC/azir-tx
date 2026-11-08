@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.protocol;
 
 import com.flyingzc.azir.storage.KeyRange;
@@ -10,107 +26,108 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 参与者存储门面，定义协议层访问分片存储所需的读写和清理能力。
+ * Participant Stores the front and defines the reading, writing and cleaning capabilities required for protocol layers to access shard storage.
  */
 public interface ParticipantStore {
+
     /**
-     * 返回参与者所属分片编号。
+     * Returns the participant -owned shard number.
      *
-     * @return 分片编号
+     * @return  Shard Number.
      */
     String shardId();
 
     /**
-     * 按读上下文读取指定业务键的可见版本。
+     * Read the visible version of the specified key by reading context.
      *
-     * @param context 读上下文
-     * @param key 业务键
-     * @return 可见版本
+     * @param context Read Context.
+     * @param key Business Keys.
+     * @return Visible version.
      */
     Optional<VersionedValue> get(ReadContext context, String key);
 
     /**
-     * 按读上下文扫描指定键范围的可见版本。
+     * Scan the visible version of the specified key range by reading context.
      *
-     * @param context 读上下文
-     * @param keyRange 键范围
-     * @return 可见版本列表
+     * @param context Read Context.
+     * @param keyRange Key Range.
+     * @return Visible version list.
      */
     List<VersionedValue> scan(ReadContext context, KeyRange keyRange);
 
     /**
-     * 写入事务意向并检测写冲突。
+     * Write transaction intent and detect write conflict.
      *
-     * @param txId 事务编号
-     * @param startTs 开始时间戳
-     * @param mutations 写集合
+     * @param txId  Transaction identifier.
+     * @param startTs  Start timestamp.
+     * @param mutations  Write set.
      */
     void prewrite(long txId, long startTs, List<Mutation> mutations);
 
     /**
-     * 将事务推进到准备阶段。
+     * Push transaction into the preparatory phase.
      *
-     * @param txId 事务编号
+     * @param txId  Transaction identifier.
      */
     void prepare(long txId);
 
     /**
-     * 提交事务意向并生成已提交版本。
+     * Finalize transaction intents as committed versions.
      *
-     * @param txId 事务编号
-     * @param commitTs 提交时间戳
+     * @param txId  Transaction identifier.
+     * @param commitTs  Commit timestamp.
      */
     void commit(long txId, long commitTs);
 
     /**
-     * 基于已知写集合提交事务意向并可选择清理意向。
+     * Based on the known write set commit transaction intent and can choose to clear intent.
      *
-     * @param txId 事务编号
-     * @param commitTs 提交时间戳
-     * @param mutations 写集合
-     * @param cleanupIntents 是否清理意向
+     * @param txId  Transaction identifier.
+     * @param commitTs  Commit timestamp.
+     * @param mutations  Write set.
+     * @param cleanupIntents Whether to clear intent.
      */
     void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents);
 
     /**
-     * 直接写入已提交版本，跳过显式准备阶段。
+     * Writes directly to commit version, skips the visible preparation phase.
      *
-     * @param txId 事务编号
-     * @param startTs 开始时间戳
-     * @param commitTs 提交时间戳
-     * @param mutations 写集合
+     * @param txId  Transaction identifier.
+     * @param startTs  Start timestamp.
+     * @param commitTs  Commit timestamp.
+     * @param mutations  Write set.
      */
     void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations);
 
     /**
-     * 基于已知写集合清理事务残留意向。
+     * Based on known write set clean-up of transaction residual intent.
      *
-     * @param txId 事务编号
-     * @param mutations 写集合
+     * @param txId  Transaction identifier.
+     * @param mutations  Write set.
      */
     void cleanupIntents(long txId, List<Mutation> mutations);
 
     /**
-     * 回滚事务并清理写意向。
+     * Roll back the transaction and remove its intents.
      *
-     * @param txId 事务编号
+     * @param txId  Transaction identifier.
      */
     void abort(long txId);
 
     /**
-     * 查找仍有待处理意向的事务编号。
+     * Find transaction identifiers with pending intents.
      *
-     * @param limit 查询数量上限
-     * @return 待处理事务编号集合
+     * @param limit Maximum number of queries.
+     * @return Pending transaction identifier setup.
      */
     Set<Long> findPendingTransactionIds(int limit);
 
     /**
-     * 清理安全点之前的历史版本。
+     * Collect obsolete versions before the safe point.
      *
-     * @param safePoint 安全点
-     * @param limit 清理数量上限
-     * @return 清理数量
+     * @param safePoint  Safe point.
+     * @param limit Maximum number of cleanups.
+     * @return Number of cleanups.
      */
     int gc(long safePoint, int limit);
 }

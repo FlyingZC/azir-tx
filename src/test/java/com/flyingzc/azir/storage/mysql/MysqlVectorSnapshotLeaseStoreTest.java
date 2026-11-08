@@ -1,4 +1,24 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.zaxxer.hikari.HikariDataSource;
 import com.flyingzc.azir.common.ErrorCode;
@@ -20,27 +40,32 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
-/** 真实 MySQL 控制库验证进程级向量租约与 GC 下界的先后关系。 */
+/**
+ * The real MySQL control library verify process-level vector lease and the sequence below GC.
+ */
 @Testcontainers
 class MysqlVectorSnapshotLeaseStoreTest {
+
     @Container
     private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4")
             .withDatabaseName("vector_reader").withUsername("test").withPassword("test");
+
     private static HikariDataSource center;
+
     private MysqlVectorSnapshotLeaseStore store;
 
-    /** 测试只连接本容器的隔离控制数据库。 */
+    /**
+     * Test connection only for isolation control database of this container.
+     */
     @BeforeAll
     static void open() {
         center = (HikariDataSource) MysqlDataSourceFactory.create(
                 MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
     }
 
-    /** 关闭本类创建的连接池。 */
+    /**
+     * Closes the connection pool created by this class.
+     */
     @AfterAll
     static void close() {
         if (center != null) {
@@ -48,7 +73,11 @@ class MysqlVectorSnapshotLeaseStoreTest {
         }
     }
 
-    /** 每例显式重建测试专属租约表，生产初始化本身不得清空旧行。 */
+    /**
+     * For each instance, the apparent reconstruction test is exclusive to lease tables. The initialization of production itself must not empty old lines.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeEach
     void reset() throws Exception {
         try (Connection connection = center.getConnection(); Statement sql = connection.createStatement()) {
@@ -59,84 +88,102 @@ class MysqlVectorSnapshotLeaseStoreTest {
         store.initializeProduct();
     }
 
-    /** 活跃进程保护旧切面，单调续租后下界可前进，释放后可到当前切面。 */
+    /**
+     * Active processes protect old cut-off, move down the line after a single renewal of lease and release to current cut-off.
+     */
     @Test
     void activeReaderMustPinAndReleaseVectorGcFloor() {
         try (var guard = store.acquire("reader-a", flat(0), 5_000)) {
-            assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
+            Assertions.assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
             guard.renew(flat(5));
-            assertEquals(flat(5), store.advanceSafeFloor(flat(10)));
-            assertEquals(flat(5), store.currentSafeFloor());
+            Assertions.assertEquals(flat(5), store.advanceSafeFloor(flat(10)));
+            Assertions.assertEquals(flat(5), store.currentSafeFloor());
         }
-        assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
+        Assertions.assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
         MvccException stale = assertThrows(MvccException.class,
                 () -> store.acquire("reader-b", flat(5), 5_000));
-        assertEquals(ErrorCode.SNAPSHOT_TOO_OLD, stale.errorCode());
+        Assertions.assertEquals(ErrorCode.SNAPSHOT_TOO_OLD, stale.errorCode());
     }
 
-    /** 每个分条和中心决议分别取最老有效组件，不能退化成标量界限。 */
+    /**
+     * Each strip and centre decision takes the oldest effective component separately and cannot be degraded to a reference limit.
+     */
     @Test
     void differentStripesMustKeepIndependentFloors() {
         var active = cut(7, List.of(2L, 8L, 3L, 9L), List.of(4L, 6L, 5L, 7L));
         var published = flat(10);
         try (var guard = store.acquire("striped-reader", active, 5_000)) {
-            assertEquals(active, store.advanceSafeFloor(published));
+            Assertions.assertEquals(active, store.advanceSafeFloor(published));
         }
-        assertEquals(published, store.advanceSafeFloor(published));
+        Assertions.assertEquals(published, store.advanceSafeFloor(published));
     }
 
-    /** 旧进程保守截止后不能续租，GC 可在数据库租约过期后推进。 */
+    /**
+     * The old process cannot be renewed after the conservative deadline, and GC can advance after database lease expires.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void expiredGuardCannotKeepAnOldSnapshotAlive() throws Exception {
         var guard = store.acquire("expiring-reader", flat(0), 200);
         Thread.sleep(260);
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 assertThrows(MvccException.class, guard::requireActive).errorCode());
-        assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+        Assertions.assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 assertThrows(MvccException.class, () -> guard.renew(flat(0))).errorCode());
         guard.close();
     }
 
-    /** 同一 owner 未过期不能被接任，关闭后新代数不能复用旧守卫。 */
+    /**
+     * The same owner could not be replaced without expiry and the new algebra could not be used again after closure.
+     */
     @Test
     void ownerGenerationMustFenceDuplicateAcquisition() {
         var original = store.acquire("same-owner", flat(0), 5_000);
-        assertEquals(1, original.generation());
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(1, original.generation());
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class,
                         () -> store.acquire("same-owner", flat(0), 5_000)).errorCode());
         original.close();
         try (var next = store.acquire("same-owner", flat(0), 5_000)) {
-            assertEquals(2, next.generation());
-            assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+            Assertions.assertEquals(2, next.generation());
+            Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                     assertThrows(MvccException.class, original::requireActive).errorCode());
         }
     }
 
-    /** 重启只保留同一路由布局，错误路由集合不能解释已有 GC 下界。 */
+    /**
+     * Restarts to keep only the same path layout, and error route collection does not explain the existing lower bounds of GC.
+     */
     @Test
     void restartPreservesFloorAndRejectsDifferentLayout() {
-        assertEquals(flat(3), store.advanceSafeFloor(flat(3)));
+        Assertions.assertEquals(flat(3), store.advanceSafeFloor(flat(3)));
         var reopened = new MysqlVectorSnapshotLeaseStore(center, List.of("s2", "s1"), 4);
         reopened.initializeProduct();
-        assertEquals(flat(3), reopened.currentSafeFloor());
+        Assertions.assertEquals(flat(3), reopened.currentSafeFloor());
         var mismatched = new MysqlVectorSnapshotLeaseStore(center, List.of("s1", "s3"), 4);
-        assertEquals(ErrorCode.STORAGE_UNAVAILABLE,
+        Assertions.assertEquals(ErrorCode.STORAGE_UNAVAILABLE,
                 assertThrows(MvccException.class, mismatched::initializeProduct).errorCode());
     }
 
-    /** 注册与 GC 同时争用下界行时，只能保护旧读者或拒绝过旧租约。 */
+    /**
+     * Only old reader or old lease can be protected when registration and GC are competing for a lower line.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void leaseRegistrationAndGcAdvanceMustSerialize() throws Exception {
-        try (Connection blocker = center.getConnection();
-             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (
+                Connection blocker = center.getConnection();
+                var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             blocker.setAutoCommit(false);
-            try (Statement lock = blocker.createStatement();
-                 var ignored = lock.executeQuery("""
-                         select generation from mvcc_vector_gc_floor_v1
-                         where singleton_id = 1 for update
-                         """)) {
+            try (
+                    Statement lock = blocker.createStatement();
+                    var ignored = lock.executeQuery("""
+                            select generation from mvcc_vector_gc_floor_v1
+                            where singleton_id = 1 for update
+                            """)) {
                 assertTrue(ignored.next());
             }
             CountDownLatch ready = new CountDownLatch(2);
@@ -146,7 +193,7 @@ class MysqlVectorSnapshotLeaseStoreTest {
                 start.await();
                 try {
                     return (Object) store.acquire("racing-reader", flat(0), 5_000);
-                } catch (MvccException ex) {
+                } catch (final MvccException ex) {
                     return ex;
                 }
             });
@@ -162,40 +209,47 @@ class MysqlVectorSnapshotLeaseStoreTest {
             var floor = advance.get(10, TimeUnit.SECONDS);
             if (outcome instanceof MysqlVectorSnapshotLeaseStore.Guard guard) {
                 try (guard) {
-                    assertEquals(flat(0), floor);
+                    Assertions.assertEquals(flat(0), floor);
                 }
             } else {
-                assertEquals(ErrorCode.SNAPSHOT_TOO_OLD,
+                Assertions.assertEquals(ErrorCode.SNAPSHOT_TOO_OLD,
                         ((MvccException) outcome).errorCode());
-                assertEquals(flat(10), floor);
+                Assertions.assertEquals(flat(10), floor);
             }
         }
     }
 
-    /** 多笔 RR 与在途 RC 共用一条进程租约，最后旧读者退出后下界才前进。 */
+    /**
+     * Multiple RRs share a process lease, which ends with the old reader exit before moving down.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void processRuntimeMustProtectAllActiveReadsWithOneLease() throws Exception {
         AtomicReference<MysqlStripedSnapshotOracle.Snapshot> published = new AtomicReference<>(flat(0));
-        try (var runtime = new MysqlVectorReaderProtectionRuntime(
-                store, published::get, "one-process", 5_000, 1_000, 100)) {
+        try (
+                var runtime = new MysqlVectorReaderProtectionRuntime(
+                        store, published::get, "one-process", 5_000, 1_000, 100)) {
             runtime.start();
             var rr = runtime.beginRead();
             var rc = runtime.beginRead();
-            assertEquals(flat(0), rr.snapshot());
+            Assertions.assertEquals(flat(0), rr.snapshot());
             published.set(flat(10));
             runtime.refresh();
-            assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
-            assertEquals(1, durableLeaseRows());
+            Assertions.assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
+            Assertions.assertEquals(1, durableLeaseRows());
             rc.close();
             runtime.refresh();
-            assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
+            Assertions.assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
             rr.close();
             runtime.refresh();
-            assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
+            Assertions.assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
         }
     }
 
-    /** 进程关闭时在途读先失败关闭，但持久租约必须保留到其句柄退出。 */
+    /**
+     * The process closes without first reading or closing, but durable lease must be kept to its handle for exit.
+     */
     @Test
     void closingProcessMustNotReleaseInFlightReadTooEarly() {
         AtomicReference<MysqlStripedSnapshotOracle.Snapshot> published = new AtomicReference<>(flat(0));
@@ -205,58 +259,66 @@ class MysqlVectorSnapshotLeaseStoreTest {
         var reader = runtime.beginRead();
         published.set(flat(10));
         runtime.close();
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 assertThrows(MvccException.class, reader::requireActive).errorCode());
-        assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
+        Assertions.assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
         reader.close();
-        assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
+        Assertions.assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
     }
 
-    /** 读者数量有界且过旧的发布切面不能重新打开已回收版本。 */
+    /**
+     * Reader Quantities bounded and an old release side cannot reopen collection version.
+     */
     @Test
     void runtimeMustRejectReaderOverflowAndOldPublishedCut() {
         AtomicReference<MysqlStripedSnapshotOracle.Snapshot> published = new AtomicReference<>(flat(0));
-        try (var runtime = new MysqlVectorReaderProtectionRuntime(
-                store, published::get, "bounded-process", 5_000, 1_000, 1)) {
+        try (
+                var runtime = new MysqlVectorReaderProtectionRuntime(
+                        store, published::get, "bounded-process", 5_000, 1_000, 1)) {
             runtime.start();
             try (var reader = runtime.beginRead()) {
-                assertEquals(ErrorCode.RESOURCE_EXHAUSTED,
+                Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED,
                         assertThrows(MvccException.class, runtime::beginRead).errorCode());
             }
             published.set(flat(10));
             runtime.refresh();
             store.advanceSafeFloor(flat(10));
             published.set(flat(5));
-            assertEquals(ErrorCode.SNAPSHOT_TOO_OLD,
+            Assertions.assertEquals(ErrorCode.SNAPSHOT_TOO_OLD,
                     assertThrows(MvccException.class, runtime::beginRead).errorCode());
         }
     }
 
-    /** 中心故障使运行时撤销全部读句柄，而旧租约自然到期前仍保护版本。 */
+    /**
+     * Centre failure allows to undo all read handles while running, while the old lease protects version until its natural maturity.
+     */
     @Test
     void failedRefreshMustRevokeLocalReadersWithoutLosingProtection() {
         AtomicReference<MysqlStripedSnapshotOracle.Snapshot> published = new AtomicReference<>(flat(0));
         AtomicReference<Boolean> fail = new AtomicReference<>(false);
-        try (var runtime = new MysqlVectorReaderProtectionRuntime(
-                store, () -> {
-                    if (fail.get()) {
-                        throw new IllegalStateException("publisher unavailable");
-                    }
-                    return published.get();
-                }, "failing-process", 5_000, 1_000, 100)) {
+        try (
+                var runtime = new MysqlVectorReaderProtectionRuntime(
+                        store, () -> {
+                            if (fail.get()) {
+                                throw new IllegalStateException("publisher unavailable");
+                            }
+                            return published.get();
+                        }, "failing-process", 5_000, 1_000, 100)) {
             runtime.start();
             try (var reader = runtime.beginRead()) {
                 published.set(flat(10));
                 fail.set(true);
                 assertThrows(IllegalStateException.class, runtime::refresh);
-                assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         assertThrows(MvccException.class, reader::requireActive).errorCode());
-                assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
+                Assertions.assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
             }
         }
     }
 
-    /** 取新切面失败时旧读句柄也必须立即失败关闭，租约继续保留到释放。 */
+    /**
+     * The old reading handle must also be shut down immediately when a new cut fails, and lease continues to be saved until release.
+     */
     @Test
     void failedCutAcquisitionMustRevokeExistingReaders() {
         AtomicReference<Boolean> unavailable = new AtomicReference<>(false);
@@ -271,32 +333,50 @@ class MysqlVectorSnapshotLeaseStoreTest {
         var old = runtime.beginRead();
         unavailable.set(true);
         assertThrows(IllegalStateException.class, runtime::beginRead);
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 assertThrows(MvccException.class, old::requireActive).errorCode());
-        assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
+        Assertions.assertEquals(flat(0), store.advanceSafeFloor(flat(10)));
         runtime.close();
         old.close();
-        assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
+        Assertions.assertEquals(flat(10), store.advanceSafeFloor(flat(10)));
     }
 
-    /** 持久租约行数按进程而非事务数量计费。 */
+    /**
+     * Durable lease rows are charged on a process basis instead of an transaction quantity.
+     *
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     */
     private long durableLeaseRows() throws Exception {
-        try (Connection connection = center.getConnection(); Statement query = connection.createStatement();
-             var row = query.executeQuery("select count(*) from mvcc_vector_reader_lease_v1")) {
+        try (
+                Connection connection = center.getConnection(); Statement query = connection.createStatement();
+                var row = query.executeQuery("select count(*) from mvcc_vector_reader_lease_v1")) {
             row.next();
             return row.getLong(1);
         }
     }
 
-    /** 用相同分量构造最小可重复的两分片向量。 */
-    private static MysqlStripedSnapshotOracle.Snapshot flat(long value) {
+    /**
+     * Constructs the minimum repeatable two shard vectors with the same weight.
+     *
+     * @param value value to write
+     * @return the operation result
+     */
+    private static MysqlStripedSnapshotOracle.Snapshot flat(final long value) {
         return cut(value, List.of(value, value, value, value),
                 List.of(value, value, value, value));
     }
 
-    /** 固定路由名构造每条可独立验证的切面。 */
-    private static MysqlStripedSnapshotOracle.Snapshot cut(long decision,
-                                                            List<Long> first, List<Long> second) {
+    /**
+     * A fixed routing by name constructs each tangent that is independent of verify.
+     *
+     * @param decision decision
+     * @param first first
+     * @param second second
+     * @return the operation result
+     */
+    private static MysqlStripedSnapshotOracle.Snapshot cut(final long decision,
+                                                           final List<Long> first, final List<Long> second) {
         return new MysqlStripedSnapshotOracle.Snapshot(
                 decision, Map.of("s1", first, "s2", second));
     }

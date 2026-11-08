@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""独立核对认证网络分裂的外部历史、完整数据和确认凭据，不加载事务引擎。"""
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Audit authenticated network partitions, complete data and commit receipts without loading the transaction engine."""
 import argparse
 import copy
 import hashlib
@@ -11,7 +25,7 @@ from pathlib import Path
 
 
 def digest(blob, live, deleted):
-    """从业务契约重建全部六十八个键，长度和墓碑分别编码。"""
+    """Rebuild all 68 keys from the test contract, encoding lengths and tombstones explicitly."""
     result = hashlib.sha256()
     for shard in ('a', 'b'):
         rows = [(f'cold{i}', None if deleted and i == 0 else f'{shard}:{i}'.encode()) for i in range(32)]
@@ -26,7 +40,7 @@ def digest(blob, live, deleted):
 
 
 def events(path):
-    """父进程统一单调时间并记录 Docker 状态，不用进程内计数推断网络故障。"""
+    """Record Docker state and the parent's monotonic time instead of inferring network faults from in-process counters."""
     rows = []
     for line in (path / 'events.tsv').read_text().splitlines():
         timestamp, node, kind, text = line.split('\t', 3)
@@ -36,7 +50,7 @@ def events(path):
 
 
 def verify(case, rows):
-    """只证明三个定向场景的外部约束，不冒充通用线性化验证器。"""
+    """Check external constraints for three targeted scenarios, not general linearizability."""
     uuid.UUID(case['group'])
     current, running, connected, pending, receipts, uncertain = {}, {}, {}, {}, {}, set()
     started, pids, cuts, heals, kills, data, lookups, errors = set(), set(), 0, 0, [], 0, 0, 0
@@ -127,7 +141,7 @@ def verify(case, rows):
 
 
 def main():
-    """完整场景集合与故意篡改对照一起检查，输出只含脱敏计数。"""
+    """Check the complete scenario set and deliberately corrupted controls; output redacted counts only."""
     parser = argparse.ArgumentParser()
     parser.add_argument('directory', type=Path)
     args = parser.parse_args()

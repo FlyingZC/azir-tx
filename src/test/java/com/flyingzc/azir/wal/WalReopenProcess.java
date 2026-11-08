@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
 
 import java.nio.file.Files;
@@ -6,21 +22,37 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
-/** 在真实重启恢复安装第一个分片版本后停住，以验证恢复期间再次崩溃。 */
+/**
+ * Stops after the real restart recovery installation of the first shard version and crashes again during verify recovery.
+ */
 public final class WalReopenProcess {
-    /** 独立子进程入口不允许实例化。 */
-    private WalReopenProcess() { }
 
-    /** 只有命中实际恢复版本安装边界才通知父进程，不能用启动前暂停代替。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * The entry point of the independent sub-process does not allow for exemplification.
+     */
+    private WalReopenProcess() {
+    }
+
+    /**
+     * Only when the actual recovery version border is installed does you notify your father of the process, which cannot be replaced by a pre-start suspension.
+     *
+     * @param args args
+     * @throws AssertionError if the operation cannot complete
+     * @throws Exception if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         Path root = Path.of(args[0]);
         try (var runtime = WalMvccRuntime.openForTest(root, Set.of("a", "b"), Map.of(), WalOptions.defaults(), stage -> {
             if (stage == WalMvccRuntime.Stage.DURING_RECOVERY) {
                 try {
                     Files.writeString(root.resolve("recovery-ready"), "ready");
                     new CountDownLatch(1).await();
-                } catch (Exception failure) { throw new IllegalStateException(failure); }
+                } catch (final Exception failure) {
+                    throw new IllegalStateException(failure);
+                }
             }
-        })) { throw new AssertionError("recovery barrier was not reached"); }
+        })) {
+            throw new AssertionError("recovery barrier was not reached");
+        }
     }
 }

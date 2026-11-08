@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""独立核对父进程实际收到的确认、强杀、暂停与跨片结果，不读取内核内部状态。"""
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Audit acknowledgments, kills, pauses and cross-shard results observed by the parent, independently of runtime internals."""
 
 import argparse
 import base64
@@ -9,12 +23,12 @@ from pathlib import Path
 
 
 def payload(text):
-    """与测试载荷采用相同公开编码，比较完整双片值而非引用。"""
+    """Use the public test encoding to compare complete values from both shards, not object references."""
     return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
 
 
 def read_events(directory):
-    """父进程使用同一个单调时钟，合并后可核对确认与故障的先后关系。"""
+    """Use the parent's single monotonic clock to order acknowledgments and faults."""
     events = []
     for path in directory.glob("p*/commands-*.txt"):
         for line in path.read_text().splitlines():
@@ -24,7 +38,7 @@ def read_events(directory):
 
 
 def verify(name, events):
-    """验证这三个定向历史的外部不变量，不冒充通用线性化检查器。"""
+    """Check external invariants for these three scenarios; this is not a general linearizability checker."""
     assert len({event["node"] for event in events}) == 3, "missing node history"
     started = [event for event in events if event["text"].startswith("STARTED ")]
     assert len({event["text"] for event in started}) >= 3, "not three distinct processes"
@@ -75,7 +89,7 @@ def verify(name, events):
 
 
 def negative_controls(histories):
-    """故意注入半事务、少数派成功及旧主成功，证明核对器会拒绝坏历史。"""
+    """Inject partial transactions, minority commits and stale-leader commits to verify rejection of invalid histories."""
     rejected = []
     for scenario, events in histories:
         changed = copy.deepcopy(events)
@@ -97,7 +111,7 @@ def negative_controls(histories):
 
 
 def main():
-    """仅打印脱敏核对结果；输入目录中不应包含实际业务数据或凭据。"""
+    """Print redacted audit results only; input directories must not contain real business data or credentials."""
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()

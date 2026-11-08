@@ -1,29 +1,54 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 /**
- * SQL 等上层执行器使用的语句级读取快照，保证一次关系运算内的多次分片扫描共享同一时间戳。
+ * The statement-level used by the SQL Class Upper Executor reads snapshot and ensures that multiple shard scans in a relationship operation share the same timestamp.
  */
 public final class StatementReadSnapshot {
+
     private final long txId;
+
     private final long readTs;
 
     /**
-     * 仅允许事务管理器所在包创建经过隔离级别和安全点校验的快照。
+     * Only transaction manager packages are allowed to create snapshot with isolation level and safe point validate.
+     *
+     * @param txId transaction identifier
+     * @param readTs snapshot read timestamp
      */
-    StatementReadSnapshot(long txId, long readTs) {
+    StatementReadSnapshot(final long txId, final long readTs) {
         this.txId = txId;
         this.readTs = readTs;
     }
 
     /**
-     * 返回快照绑定的事务编号。
+     * Returns snapshot bounded transaction identifier.
+     *
+     * @return the operation result
      */
     public long txId() {
         return txId;
     }
 
     /**
-     * 返回语句读取时间戳。
+     * Return statement to read timestamp.
+     *
+     * @return the operation result
      */
     public long readTs() {
         return readTs;

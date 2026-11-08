@@ -1,43 +1,154 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal.ha;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Objects;
+import java.util.UUID;
 import com.flyingzc.azir.wal.WalReplicaIdentity;
-import java.io.*;
+
 import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
-import java.nio.file.*;
-import java.util.*;
+
 import java.util.zip.CRC32C;
 
-/** 版本回收策略绑定本机身份，重启自动恢复，缺失健康策略时拒绝不完整装配。 */
+/**
+ * Version collection policy binder identity, restart automatic recovery, reject incomplete assembly when a health policy is missing.
+ *
+ * @param identity identity
+ * @param options options
+ */
 record RatisGcPolicy(WalReplicaIdentity identity, RatisGcOptions options) {
-    /** 固定配置不包含数据库凭据或路径。 */
-    RatisGcPolicy { Objects.requireNonNull(identity); Objects.requireNonNull(options); }
-    /** 只读取有界、已校验且属于本节点的策略。 */
-    static RatisGcPolicy load(Path root, WalReplicaIdentity owner) throws IOException {
-        Path file = root.resolve("GC_POLICY"); if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) { return null; }
-        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > 512) { throw new IOException("version GC policy missing or exceeds budget"); }
-        byte[] bytes = Files.readAllBytes(file); if (bytes.length < 79 || ByteBuffer.wrap(bytes).getInt(bytes.length - 4) != crc(Arrays.copyOf(bytes, bytes.length - 4))) { throw new IOException("version GC policy checksum mismatch"); }
+
+    /**
+     * Fixed configuration does not contain database receipt or a path.
+     *
+     * @param identity identity
+     * @param options options
+     */
+    RatisGcPolicy {
+        Objects.requireNonNull(identity);
+        Objects.requireNonNull(options);
+    }
+
+    /**
+     * Read-only takes the bounded, is validate and belongs to this node.
+     *
+     * @param root root
+     * @param owner owner
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
+    static RatisGcPolicy load(final Path root, final WalReplicaIdentity owner) throws IOException {
+        Path file = root.resolve("GC_POLICY");
+        if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+            return null;
+        }
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) || Files.size(file) > 512) {
+            throw new IOException("version GC policy missing or exceeds budget");
+        }
+        byte[] bytes = Files.readAllBytes(file);
+        if (bytes.length < 79 || ByteBuffer.wrap(bytes).getInt(bytes.length - 4) != crc(Arrays.copyOf(bytes, bytes.length - 4))) {
+            throw new IOException("version GC policy checksum mismatch");
+        }
         try {
-            var in = new DataInputStream(new ByteArrayInputStream(bytes, 0, bytes.length - 4)); if (in.readInt() != 0x415A4743 || in.readInt() != 1) { throw new IOException("unsupported version GC policy"); }
+            var in = new DataInputStream(new ByteArrayInputStream(bytes, 0, bytes.length - 4));
+            if (in.readInt() != 0x415A4743 || in.readInt() != 1) {
+                throw new IOException("unsupported version GC policy");
+            }
             var identity = new WalReplicaIdentity(new UUID(in.readLong(), in.readLong()), new UUID(in.readLong(), in.readLong()), in.readUTF());
             var options = new RatisGcOptions(in.readLong(), in.readInt(), in.readInt(), in.readLong(), in.readLong());
-            if (!identity.equals(owner) || in.available() != 0) { throw new IOException("version GC policy owner mismatch"); } return new RatisGcPolicy(identity, options);
-        } catch (IllegalArgumentException malformed) { throw new IOException("invalid version GC policy", malformed); }
+            if (!identity.equals(owner) || in.available() != 0) {
+                throw new IOException("version GC policy owner mismatch");
+            }
+            return new RatisGcPolicy(identity, options);
+        } catch (final IllegalArgumentException malformed) {
+            throw new IOException("invalid version GC policy", malformed);
+        }
     }
-    /** 节点独占目录锁内持久发布，既有正确策略也重新确认文件及目录。 */
-    void publish(Path root) throws IOException { publish(root, RatisPolicyFile.REAL); }
-    /** 包内故障注入与正式路径共用同一编码和真实发布协议。 */
-    void publish(Path root, RatisPolicyFile.Io io) throws IOException {
+
+    /**
+     * Durable is published within the directory lock only at node, with both the right policy and the re-confirmation of files and directories.
+     *
+     * @param root root
+     * @throws IOException if the operation cannot complete
+     */
+    void publish(final Path root) throws IOException {
+        publish(root, RatisPolicyFile.REAL);
+    }
+
+    /**
+     * Failure in the package shares the same coding and real release protocol with the official path.
+     *
+     * @param root root
+     * @param io io
+     * @throws IOException if the operation cannot complete
+     */
+    void publish(final Path root, final RatisPolicyFile.Io io) throws IOException {
         var previous = load(root, identity);
-        if (previous != null && !previous.equals(this)) { throw new IOException("policy already configured differently"); }
+        if (previous != null && !previous.equals(this)) {
+            throw new IOException("policy already configured differently");
+        }
         RatisPolicyFile.publish(root, RatisPolicyFile.Kind.GC, encode(), io);
     }
-    /** 保留既有持久格式，不通过更改版本号逃避旧策略的正确重试。 */
+
+    /**
+     * Keeps the durable format in place and does not avoid the correct retry of the old policy by changing version.
+     *
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
     private byte[] encode() throws IOException {
-        var bytes = new ByteArrayOutputStream(); var out = new DataOutputStream(bytes); out.writeInt(0x415A4743); out.writeInt(1); out.writeLong(identity.engineId().getMostSignificantBits()); out.writeLong(identity.engineId().getLeastSignificantBits()); out.writeLong(identity.groupId().getMostSignificantBits()); out.writeLong(identity.groupId().getLeastSignificantBits()); out.writeUTF(identity.nodeId());
-        out.writeLong(options.intervalMillis()); out.writeInt(options.keyLimit()); out.writeInt(options.rowLimit()); out.writeLong(options.workMillis()); out.writeLong(options.staleAfterMillis()); out.flush(); out.writeInt(crc(bytes.toByteArray())); out.flush();
+        var bytes = new ByteArrayOutputStream();
+        var out = new DataOutputStream(bytes);
+        out.writeInt(0x415A4743);
+        out.writeInt(1);
+        out.writeLong(identity.engineId().getMostSignificantBits());
+        out.writeLong(identity.engineId().getLeastSignificantBits());
+        out.writeLong(identity.groupId().getMostSignificantBits());
+        out.writeLong(identity.groupId().getLeastSignificantBits());
+        out.writeUTF(identity.nodeId());
+        out.writeLong(options.intervalMillis());
+        out.writeInt(options.keyLimit());
+        out.writeInt(options.rowLimit());
+        out.writeLong(options.workMillis());
+        out.writeLong(options.staleAfterMillis());
+        out.flush();
+        out.writeInt(crc(bytes.toByteArray()));
+        out.flush();
         return bytes.toByteArray();
     }
-    /** 全部身份与配置参与校验。 */
-    private static int crc(byte[] bytes) { var checksum = new CRC32C(); checksum.update(bytes); return (int) checksum.getValue(); }
+
+    /**
+     * All identity and configuration participation validate.
+     *
+     * @param bytes bytes
+     * @return the operation result
+     */
+    private static int crc(final byte[] bytes) {
+        var checksum = new CRC32C();
+        checksum.update(bytes);
+        return (int) checksum.getValue();
+    }
 }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
 import java.util.Map;
@@ -5,21 +21,29 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 
 /**
- * SQL 查询结果行，使用列名到字符串值的简单映射表达。
+ * SQL query result rows, with a simple map of the listed to the string value.
+ *
+ * @param columns columns
  */
 public record SqlRow(Map<String, String> columns) {
+
     /**
-     * 构造不可变结果行。
+     * Construct immutable result rows.
+     *
+     * @param columns columns
      */
     public SqlRow {
-        // SQL 外连接和空集聚合会产生 null，不能使用拒绝 null 的 Map.copyOf。
+        // Connection outside SQL and empty aggregations generate nult and cannot use Map.copyof, which rejects nurt.
         columns = Collections.unmodifiableMap(new LinkedHashMap<>(columns));
     }
 
     /**
-     * 按列名读取字符串值。
+     * Reads the string values by listing.
+     *
+     * @param columnName column name
+     * @return the operation result
      */
-    public String get(String columnName) {
+    public String get(final String columnName) {
         String exact = columns.get(columnName);
         if (exact != null || columns.containsKey(columnName)) {
             return exact;

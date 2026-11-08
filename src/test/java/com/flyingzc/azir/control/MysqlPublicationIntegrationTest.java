@@ -1,4 +1,27 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.control;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -28,22 +51,33 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-/** MySQL 发布屏障、持久化序列和合并开始路径的集成回归。 */
+/**
+ * MySQL issues the integrated return of barrier, durable storage sequences and merge start path.
+ */
 @Testcontainers
 class MysqlPublicationIntegrationTest {
+
     @Container
     private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4")
             .withDatabaseName("publication").withUsername("test").withPassword("test");
+
     private HikariDataSource firstPool;
+
     private HikariDataSource secondPool;
+
     private MysqlTransactionMetadataStore first;
+
     private MysqlTransactionMetadataStore second;
+
     private MysqlTimestampOracle tso;
+
     private MysqlSafePointStore safePoint;
 
-    /** 两个独立单连接池绑定同一数据库，并清空本测试自己的控制面表。 */
+    /**
+     * Two standalone connection pool s bound to the same database and emptyed a book to test their control sheets.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @BeforeEach
     void initialize() throws SQLException {
         firstPool = pool();
@@ -65,7 +99,9 @@ class MysqlPublicationIntegrationTest {
         }
     }
 
-    /** 每个测试释放自己的连接池。 */
+    /**
+     * Each test releases its own connection pool.
+     */
     @AfterEach
     void close() {
         if (firstPool != null) {
@@ -76,27 +112,30 @@ class MysqlPublicationIntegrationTest {
         }
     }
 
-    /** 合并校验必须使用数据库时钟；截止时间相等已到期，且查询不得修改原租约。 */
+    /**
+     * The validate merge must use the database clock; the deadline is equal and the query cannot modify the original lease.
+     */
     @Test
     void combinedLeaseValidationHonorsDatabaseClockAndOriginalDeadline() {
         long deadline = 2_000_000_000_000L;
         assertFalse(first.isSnapshotLeaseValid(1, deadline));
         first.registerSnapshot(1, 1, deadline);
         first.withPublicationLock(() -> {
-            try (Connection borrowed = MysqlConnectionContext.connection(firstPool);
-                 var statement = borrowed.createStatement()) {
+            try (
+                    Connection borrowed = MysqlConnectionContext.connection(firstPool);
+                    var statement = borrowed.createStatement()) {
                 try {
                     statement.execute("set timestamp = 1999999999");
                     assertTrue(first.isSnapshotLeaseValid(1, deadline));
                     assertFalse(first.isSnapshotLeaseValid(1, deadline + 1));
                     statement.execute("set timestamp = 2000000000");
                     assertFalse(first.isSnapshotLeaseValid(1, deadline));
-                    assertEquals(deadline, first.snapshotExpiry(1).orElseThrow());
+                    Assertions.assertEquals(deadline, first.snapshotExpiry(1).orElseThrow());
                 } finally {
-                    // 归还持锁连接前恢复真实数据库时钟，避免污染后续用例。
+                    // Return the recovery real database -hours before the lock, avoiding subsequent examples of contamination.
                     statement.execute("set timestamp = 0");
                 }
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw new IllegalStateException(ex);
             }
             return null;
@@ -105,41 +144,47 @@ class MysqlPublicationIntegrationTest {
         assertFalse(first.isSnapshotLeaseValid(1, deadline));
     }
 
-    /** 已释放的 MySQL 租约必须在事务管理器读取和提交入口拒绝，不能只验证存储工具方法。 */
+    /**
+     * The released MySQL lease must be read and rejected at the transaction manager 's commit entrance, not only by an verify storage tool.
+     */
     @Test
     void releasedMysqlLeaseRejectsReadAndCommit() {
         try (var manager = new TransactionManager(tso, first, TransactionOptions.defaults(), Map.of())) {
             var transaction = manager.begin(IsolationLevel.REPEATABLE_READ);
             second.releaseSnapshot(transaction.txId());
-            assertEquals(ErrorCode.TRANSACTION_TIMEOUT,
+            Assertions.assertEquals(ErrorCode.TRANSACTION_TIMEOUT,
                     assertThrows(MvccException.class, () -> manager.beginReadStatement(transaction)).errorCode());
-            assertEquals(ErrorCode.TRANSACTION_TIMEOUT,
+            Assertions.assertEquals(ErrorCode.TRANSACTION_TIMEOUT,
                     assertThrows(MvccException.class, () -> manager.commit(transaction)).errorCode());
-            assertEquals(TxStatus.ACTIVE, first.get(transaction.txId()).orElseThrow().status());
+            Assertions.assertEquals(TxStatus.ACTIVE, first.get(transaction.txId()).orElseThrow().status());
             manager.rollback(transaction);
         }
     }
 
-    /** 单分片条件决议覆盖新记录和本地占位，并保证跨实例重放使用原提交时间戳。 */
+    /**
+     * Single shard condition decision covers new records and local slots and ensures cross-example replay use of original commit timestamp.
+     */
     @Test
     void singleShardConditionalDecisionPreservesReplayAndPendingTimestamp() {
         first.createWithParticipants(1, 1, IsolationLevel.REPEATABLE_READ, Set.of("a"));
         first.markLocalCommitPending(1, 10);
         first.persistSingleShardCommitted(1, "a", 10);
         second.persistSingleShardCommitted(1, "a", 10);
-        assertEquals(TxStatus.COMMITTED, second.get(1).orElseThrow().status());
-        assertEquals(10L, second.get(1).orElseThrow().commitTs());
+        Assertions.assertEquals(TxStatus.COMMITTED, second.get(1).orElseThrow().status());
+        Assertions.assertEquals(10L, second.get(1).orElseThrow().commitTs());
         assertDoesNotThrow(second::assertNoPendingPublications);
         assertThrows(MvccException.class, () -> second.persistSingleShardCommitted(1, "a", 11));
-        assertEquals(10L, first.get(1).orElseThrow().commitTs());
+        Assertions.assertEquals(10L, first.get(1).orElseThrow().commitTs());
 
         first.createWithParticipants(2, 2, IsolationLevel.READ_COMMITTED, Set.of("a"));
         first.persistSingleShardCommitted(2, "a", 12);
-        assertEquals(TxStatus.COMMITTED, second.get(2).orElseThrow().status());
-        assertEquals(Set.of("a"), second.get(2).orElseThrow().participants());
+        Assertions.assertEquals(TxStatus.COMMITTED, second.get(2).orElseThrow().status());
+        Assertions.assertEquals(Set.of("a"), second.get(2).orElseThrow().participants());
     }
 
-    /** 错误时间戳、错误参与者及已中止状态不能被单分片条件更新覆盖。 */
+    /**
+     * Error timestamp, error participant and aborted state cannot be covered by single shard condition updates.
+     */
     @Test
     void singleShardConditionalDecisionRejectsMismatchedOrAbortedState() {
         first.createWithParticipants(1, 1, IsolationLevel.REPEATABLE_READ, Set.of("a"));
@@ -147,24 +192,30 @@ class MysqlPublicationIntegrationTest {
         assertThrows(MvccException.class, () -> second.persistSingleShardCommitted(1, "a", 11));
         assertThrows(MvccException.class, () -> second.persistSingleShardCommitted(1, "b", 10));
         var pending = first.get(1).orElseThrow();
-        assertEquals(TxStatus.PREPARING, pending.status());
-        assertEquals(10L, pending.commitTs());
-        assertEquals(Set.of("a"), pending.participants());
+        Assertions.assertEquals(TxStatus.PREPARING, pending.status());
+        Assertions.assertEquals(10L, pending.commitTs());
+        Assertions.assertEquals(Set.of("a"), pending.participants());
         first.markAborted(1);
         assertThrows(MvccException.class, () -> second.persistSingleShardCommitted(1, "a", 10));
-        assertEquals(TxStatus.ABORTED, first.get(1).orElseThrow().status());
+        Assertions.assertEquals(TxStatus.ABORTED, first.get(1).orElseThrow().status());
         assertNull(first.get(1).orElseThrow().commitTs());
     }
 
-    /** 数据库访问失败保留存储异常，不能返回有效租约。 */
+    /**
+     * Database access failed to keep storage abnormal and cannot return valid lease.
+     */
     @Test
     void combinedLeaseValidationFailsClosedOnStorageFailure() {
         firstPool.close();
-        assertEquals(ErrorCode.STORAGE_UNAVAILABLE,
+        Assertions.assertEquals(ErrorCode.STORAGE_UNAVAILABLE,
                 assertThrows(MvccException.class, () -> first.isSnapshotLeaseValid(1, Long.MAX_VALUE)).errorCode());
     }
 
-    /** 两个元数据对象重入同域屏障，TSO、服务器时钟与安全点只占用一条持锁连接。 */
+    /**
+     * Two metadata objects are in the same field barrier, TSO, server clock and safe point only one lock connection.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void sameDatabaseAndSingleConnectionPoolsReusePublicationConnection() throws SQLException {
         var otherTso = new MysqlTimestampOracle(secondPool);
@@ -174,26 +225,30 @@ class MysqlPublicationIntegrationTest {
                 long txId = otherTso.nextTimestamp();
                 first.registerSnapshot(txId, txId, first.currentTimeMillis() + 60_000);
                 first.create(txId, txId, IsolationLevel.REPEATABLE_READ);
-                assertEquals(100, new GcManager(first, tso, safePoint, Map.of()).advanceSafePoint());
-                assertEquals(1, firstPool.getHikariPoolMXBean().getActiveConnections());
+                Assertions.assertEquals(100, new GcManager(first, tso, safePoint, Map.of()).advanceSafePoint());
+                Assertions.assertEquals(1, firstPool.getHikariPoolMXBean().getActiveConnections());
                 return txId;
             }));
-            assertEquals(101, result);
+            Assertions.assertEquals(101, result);
             assertFalse(occupied.isClosed());
         }
     }
 
-    /** 回调异常不会让命名锁随连接回池而泄漏。 */
+    /**
+     * The back-to-back anomaly does not let the name lock leak with connection back to the pool.
+     */
     @Test
     void callbackFailureReleasesDatabaseLock() {
         assertThrows(IllegalArgumentException.class, () -> first.withPublicationLock(() -> {
             first.create(1, 1, IsolationLevel.REPEATABLE_READ);
             throw new IllegalArgumentException("simulated failure");
         }));
-        assertEquals(1L, second.withPublicationLock(() -> second.get(1).orElseThrow()).txId());
+        Assertions.assertEquals(1L, second.withPublicationLock(() -> second.get(1).orElseThrow()).txId());
     }
 
-    /** 持锁连接丢失后本次发布失败关闭，持久化未知槽仍然阻止另一实例发新快照。 */
+    /**
+     * This release failed to close after the lock connection was lost, and the unknown slot durable storage still prevents another instance from reproducing snapshot.
+     */
     @Test
     void disconnectedLockConnectionCannotResumePublicationOnAnotherConnection() {
         first.create(1, 1, IsolationLevel.REPEATABLE_READ);
@@ -202,23 +257,30 @@ class MysqlPublicationIntegrationTest {
             first.markLocalCommitPending(1, 10);
             try (Connection borrowed = MysqlConnectionContext.connection(firstPool)) {
                 borrowed.abort(Runnable::run);
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 throw new IllegalStateException(ex);
             }
             assertThrows(MvccException.class, () -> first.markCommitted(1, 10));
             assertThrows(MvccException.class, tso::nextTimestamp);
             assertThrows(MvccException.class, () -> first.tryBegin(tso, IsolationLevel.READ_COMMITTED,
-                    60_000, false, () -> { }));
+                    60_000, false, () -> {
+                    }));
             assertThrows(MvccException.class, () -> first.tryCommit(tso, 1, Set.of("a"),
-                    () -> { }, ignored -> { }));
+                    () -> {
+                    }, ignored -> {
+                    }));
             return null;
         }));
-        assertEquals(TxStatus.PREPARING, second.get(1).orElseThrow().status());
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+        Assertions.assertEquals(TxStatus.PREPARING, second.get(1).orElseThrow().status());
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 assertThrows(MvccException.class, second::assertNoPendingPublications).errorCode());
     }
 
-    /** 外部会话持有同库命名锁时明确返回 GET_LOCK 超时错误。 */
+    /**
+     * External session explicitly returns the GET_LOCK timeout error when holding an same database name lock.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void databaseLockTimeoutIsExplicit() throws SQLException {
         try (Connection external = secondPool.getConnection(); var statement = external.createStatement()) {
@@ -227,22 +289,24 @@ class MysqlPublicationIntegrationTest {
                 assertTrue(result.next());
                 name = result.getString(1);
             }
-            try (var lock = external.prepareStatement("select get_lock(?, 0)");
-                 var release = external.prepareStatement("select release_lock(?)")) {
+            try (
+                    var lock = external.prepareStatement("select get_lock(?, 0)");
+                    var release = external.prepareStatement("select release_lock(?)")) {
                 lock.setString(1, name);
                 release.setString(1, name);
                 try (var result = lock.executeQuery()) {
                     assertTrue(result.next());
-                    assertEquals(1, result.getInt(1));
+                    Assertions.assertEquals(1, result.getInt(1));
                 }
                 try {
                     var immediate = new MysqlTransactionMetadataStore(firstPool, 0);
                     var error = assertThrows(MvccException.class, () -> immediate.withPublicationLock(() -> 1));
-                    assertEquals(ErrorCode.LOCK_WAIT_TIMEOUT, error.errorCode());
+                    Assertions.assertEquals(ErrorCode.LOCK_WAIT_TIMEOUT, error.errorCode());
                     assertTrue(error.getMessage().contains("GET_LOCK"));
                     var beginError = assertThrows(MvccException.class, () -> immediate.tryBegin(tso,
-                            IsolationLevel.READ_COMMITTED, 60_000, false, () -> { }));
-                    assertEquals(ErrorCode.LOCK_WAIT_TIMEOUT, beginError.errorCode());
+                            IsolationLevel.READ_COMMITTED, 60_000, false, () -> {
+                            }));
+                    Assertions.assertEquals(ErrorCode.LOCK_WAIT_TIMEOUT, beginError.errorCode());
                 } finally {
                     release.execute();
                 }
@@ -250,24 +314,33 @@ class MysqlPublicationIntegrationTest {
         }
     }
 
-    /** 服务器端例程若遗留本会话命名锁，控制连接必须被显式弃用。 */
+    /**
+     * The control connection must be visibly discarded if the server endroute is left with a session naming lock.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void serverSideProcedureMustDiscardConnectionThatRetainsLock() throws SQLException {
         assertThrows(SQLException.class, () -> MysqlConnectionContext.withPublicationProcedure(firstPool, 1,
                 connection -> {
-                    try (var statement = connection.createStatement();
-                         var result = statement.executeQuery("""
-                                 select get_lock(concat('mvcc:pub:', substring(sha2(database(), 256), 1, 48)), 0)
-                                 """)) {
+                    try (
+                            var statement = connection.createStatement();
+                            var result = statement.executeQuery("""
+                                    select get_lock(concat('mvcc:pub:', substring(sha2(database(), 256), 1, 48)), 0)
+                                    """)) {
                         assertTrue(result.next());
-                        assertEquals(1, result.getInt(1));
+                        Assertions.assertEquals(1, result.getInt(1));
                     }
                     return 1;
                 }));
-        assertEquals(1, second.withPublicationLock(() -> 1));
+        Assertions.assertEquals(1, second.withPublicationLock(() -> 1));
     }
 
-    /** 例程若留下显式数据库事务，不得靠连接池重置 autoCommit 隐式提交。 */
+    /**
+     * If the routine leaves a visible database transaction, no connection pool reset autoCommit hidden commit should be used.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void serverSideProcedureMustDiscardConnectionWithOpenTransaction() throws SQLException {
         assertThrows(SQLException.class, () -> MysqlConnectionContext.withPublicationProcedure(firstPool, 1,
@@ -277,24 +350,31 @@ class MysqlPublicationIntegrationTest {
                     }
                     return 1;
                 }));
-        assertEquals(1, second.withPublicationLock(() -> 1));
+        Assertions.assertEquals(1, second.withPublicationLock(() -> 1));
     }
 
-    /** 已持有发布屏障时只调用 v1，避免服务器端例程重复获取同一命名锁。 */
+    /**
+     * Only v1 is called when barrier is held to avoid the server-end routine retrieving the same name lock.
+     */
     @Test
     void nestedPublicationUsesExistingLockWithoutServerSideReentry() {
         long txId = first.withPublicationLock(() -> {
-            assertEquals(ErrorCode.ILLEGAL_STATE,
+            Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                     assertThrows(MvccException.class, () -> MysqlConnectionContext.withPublicationProcedure(
                             firstPool, 1, connection -> 1)).errorCode());
             return first.tryBegin(tso, IsolationLevel.REPEATABLE_READ, 60_000, false,
-                    () -> { }).orElseThrow().txId();
+                    () -> {
+                    }).orElseThrow().txId();
         });
         assertTrue(first.snapshotExpiry(txId).isPresent());
-        assertEquals(1, second.withPublicationLock(() -> 1));
+        Assertions.assertEquals(1, second.withPublicationLock(() -> 1));
     }
 
-    /** 已决议事务的物化标记和租约释放不应等待另一事务持有的发布屏障。 */
+    /**
+     * Materialization tags and lease releases of decision transaction should not wait for the release of barrier held by another transaction.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void terminalCleanupCanProceedWhilePublicationLockIsHeld() throws Exception {
         first.create(1, 1, IsolationLevel.REPEATABLE_READ);
@@ -309,7 +389,7 @@ class MysqlPublicationIntegrationTest {
                     if (!release.await(5, TimeUnit.SECONDS)) {
                         throw new IllegalStateException("publication hold timed out");
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException(ex);
                 }
@@ -330,7 +410,11 @@ class MysqlPublicationIntegrationTest {
         assertTrue(first.snapshotExpiry(1).isEmpty());
     }
 
-    /** 参与者登记只依赖自身事务行锁，不能占用其他事务的发布屏障。 */
+    /**
+     * Participant registration relies only on its own transaction line lock and cannot occupy other transaction releases.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void participantRegistrationCanProceedWhilePublicationLockIsHeld() throws Exception {
         CountDownLatch entered = new CountDownLatch(1);
@@ -342,7 +426,7 @@ class MysqlPublicationIntegrationTest {
                     if (!release.await(5, TimeUnit.SECONDS)) {
                         throw new IllegalStateException("publication hold timed out");
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException(ex);
                 }
@@ -354,7 +438,7 @@ class MysqlPublicationIntegrationTest {
                     second.createWithParticipants(2, 2, IsolationLevel.REPEATABLE_READ, Set.of("a"));
                     return second.registerParticipants(2, Set.of("b"));
                 });
-                assertEquals(Set.of("a", "b"), registration.get(2, TimeUnit.SECONDS).participants());
+                Assertions.assertEquals(Set.of("a", "b"), registration.get(2, TimeUnit.SECONDS).participants());
             } finally {
                 release.countDown();
                 holder.get(5, TimeUnit.SECONDS);
@@ -362,96 +446,126 @@ class MysqlPublicationIntegrationTest {
         }
     }
 
-    /** 独立兼容号段实例和普通 TSO 交错取号时仍按同库持久化顺序递增。 */
+    /**
+     * Independent timestamp range instance and regular TSO staggered numbers are still increasing in same database durable storage.
+     */
     @Test
     void segmentCompatibilityNeverAllocatesIndependentClientRanges() {
         var left = new MysqlSegmentTimestampOracle(firstPool, 128);
         var right = new MysqlSegmentTimestampOracle(secondPool, 256);
         left.initialize(100);
         right.initialize(100);
-        assertEquals(101, left.nextTimestamp());
-        assertEquals(102, right.nextTimestamp());
-        assertEquals(103, left.nextTimestamp());
-        assertEquals(104, tso.nextTimestamp());
-        assertEquals(105, right.nextTimestamp());
-        assertEquals(2, left.segmentAllocations());
-        assertEquals(2, right.segmentAllocations());
+        Assertions.assertEquals(101, left.nextTimestamp());
+        Assertions.assertEquals(102, right.nextTimestamp());
+        Assertions.assertEquals(103, left.nextTimestamp());
+        Assertions.assertEquals(104, tso.nextTimestamp());
+        Assertions.assertEquals(105, right.nextTimestamp());
+        Assertions.assertEquals(2, left.segmentAllocations());
+        Assertions.assertEquals(2, right.segmentAllocations());
     }
 
-    /** 合并开始返回前必须持久化租约，非延迟模式还要原子登记活动事务。 */
+    /**
+     * Durable storage lease and atomic registration activity transaction in a non-delayed mode are required before the merger starts to return.
+     */
     @Test
     void serverSideBeginPersistsSnapshotAndOptionalMetadata() {
-        var lazy = first.tryBegin(tso, IsolationLevel.REPEATABLE_READ, 60_000, false, () -> { })
+        var lazy = first.tryBegin(tso, IsolationLevel.REPEATABLE_READ, 60_000, false, () -> {
+        })
                 .orElseThrow();
-        assertEquals(lazy.txId(), lazy.startTs());
-        assertEquals(lazy.deadlineMillis(), first.snapshotExpiry(lazy.txId()).orElseThrow().longValue());
+        Assertions.assertEquals(lazy.txId(), lazy.startTs());
+        Assertions.assertEquals(lazy.deadlineMillis(), first.snapshotExpiry(lazy.txId()).orElseThrow().longValue());
         assertTrue(first.get(lazy.txId()).isEmpty());
-        var eager = first.tryBegin(tso, IsolationLevel.READ_COMMITTED, 60_000, true, () -> { })
+        var eager = first.tryBegin(tso, IsolationLevel.READ_COMMITTED, 60_000, true, () -> {
+        })
                 .orElseThrow();
         assertTrue(eager.txId() > lazy.txId());
-        assertEquals(TxStatus.ACTIVE, first.get(eager.txId()).orElseThrow().status());
-        assertEquals(eager.deadlineMillis(), first.snapshotExpiry(eager.txId()).orElseThrow().longValue());
+        Assertions.assertEquals(TxStatus.ACTIVE, first.get(eager.txId()).orElseThrow().status());
+        Assertions.assertEquals(eager.deadlineMillis(), first.snapshotExpiry(eager.txId()).orElseThrow().longValue());
         var restartedStore = new MysqlTransactionMetadataStore(firstPool);
         assertTrue(restartedStore.tryBegin(tso, IsolationLevel.READ_COMMITTED,
-                60_000, false, () -> { }).isPresent());
+                60_000, false, () -> {
+                }).isPresent());
         assertTrue(first.tryBegin(new MysqlTimestampOracle(secondPool), IsolationLevel.READ_COMMITTED,
-                60_000, false, () -> { }).isEmpty());
+                60_000, false, () -> {
+                }).isEmpty());
     }
 
-    /** 单分片本地提交占位存在时，合并开始不得分配时间戳或发布新快照。 */
+    /**
+     * When single shard local commit is in place, consolidation cannot begin to allocate timestamp or release new snapshot.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void serverSideBeginRejectsPendingLocalPublication() throws SQLException {
         first.create(1, 1, IsolationLevel.REPEATABLE_READ);
         first.registerParticipants(1, Set.of("a"));
         first.markLocalCommitPending(1, 10);
         long before;
-        try (Connection connection = firstPool.getConnection();
-             var statement = connection.createStatement();
-             var result = statement.executeQuery("select current_value from mvcc_tso where sequence_name = 'global'")) {
+        try (
+                Connection connection = firstPool.getConnection();
+                var statement = connection.createStatement();
+                var result = statement.executeQuery("select current_value from mvcc_tso where sequence_name = 'global'")) {
             assertTrue(result.next());
             before = result.getLong(1);
         }
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 assertThrows(MvccException.class, () -> first.tryBegin(tso, IsolationLevel.READ_COMMITTED,
-                        60_000, false, () -> { })).errorCode());
-        try (Connection connection = firstPool.getConnection();
-             var statement = connection.createStatement();
-             var result = statement.executeQuery("select current_value from mvcc_tso where sequence_name = 'global'")) {
+                        60_000, false, () -> {
+                        })).errorCode());
+        try (
+                Connection connection = firstPool.getConnection();
+                var statement = connection.createStatement();
+                var result = statement.executeQuery("select current_value from mvcc_tso where sequence_name = 'global'")) {
             assertTrue(result.next());
-            assertEquals(before, result.getLong(1));
+            Assertions.assertEquals(before, result.getLong(1));
         }
     }
 
-    /** 服务器端提交只接受已登记参与者，重复响应必须返回同一持久化决议。 */
+    /**
+     * Server commit accepts only registered participant and repeat responses must return the same durable storage decision.
+     */
     @Test
     void serverSideCommitPreservesDecisionAcrossMetadataInstances() {
-        var started = first.tryBegin(tso, IsolationLevel.REPEATABLE_READ, 60_000, true, () -> { })
+        var started = first.tryBegin(tso, IsolationLevel.REPEATABLE_READ, 60_000, true, () -> {
+        })
                 .orElseThrow();
         first.registerParticipants(started.txId(), Set.of("a", "b"));
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, () -> first.tryCommit(tso, started.txId(),
-                        Set.of("a"), () -> { }, ignored -> { })).errorCode());
-        assertEquals(TxStatus.ACTIVE, second.get(started.txId()).orElseThrow().status());
-        long committedTs = first.tryCommit(tso, started.txId(), Set.of("a", "b"), () -> { }, ignored -> { })
+                        Set.of("a"), () -> {
+                        }, ignored -> {
+                        })).errorCode());
+        Assertions.assertEquals(TxStatus.ACTIVE, second.get(started.txId()).orElseThrow().status());
+        long committedTs = first.tryCommit(tso, started.txId(), Set.of("a", "b"), () -> {
+        }, ignored -> {
+        })
                 .orElseThrow();
         assertTrue(committedTs > started.startTs());
-        assertEquals(committedTs, second.get(started.txId()).orElseThrow().commitTs().longValue());
+        Assertions.assertEquals(committedTs, second.get(started.txId()).orElseThrow().commitTs().longValue());
         var restartedStore = new MysqlTransactionMetadataStore(secondPool);
-        assertEquals(committedTs, restartedStore.tryCommit(new MysqlTimestampOracle(secondPool), started.txId(),
-                Set.of("a", "b"), () -> { }, ignored -> { }).orElseThrow());
+        Assertions.assertEquals(committedTs, restartedStore.tryCommit(new MysqlTimestampOracle(secondPool), started.txId(),
+                Set.of("a", "b"), () -> {
+                }, ignored -> {
+                }).orElseThrow());
     }
 
-    /** 全局序列耗尽时不能回绕或返回重复时间戳。 */
+    /**
+     * Reject exhausted global sequences instead of wrapping around or returning duplicate timestamps.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void timestampOracleMustRejectSequenceExhaustion() throws SQLException {
         try (Connection connection = firstPool.getConnection(); var statement = connection.createStatement()) {
             statement.executeUpdate("update mvcc_tso set current_value = 9223372036854775807 where sequence_name = 'global'");
         }
-        assertEquals(ErrorCode.ILLEGAL_STATE,
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                 assertThrows(MvccException.class, tso::nextTimestamp).errorCode());
     }
 
-    /** 固定租约、单分片占位和不可逆终态在独立元数据对象之间一致。 */
+    /**
+     * Fixed lease, single shard position and irreversible terminal state to be consistent between independent metadata objects.
+     */
     @Test
     void pendingPublicationAndFinalizationSurviveMetadataInstanceChanges() {
         first.create(1, 1, IsolationLevel.REPEATABLE_READ);
@@ -461,22 +575,26 @@ class MysqlPublicationIntegrationTest {
         assertThrows(MvccException.class, () -> second.registerSnapshot(1, 1, deadline + 1));
         first.markLocalCommitPending(1, 10);
         var error = assertThrows(MvccException.class, second::assertNoPendingPublications);
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
         assertFalse(error.retryable());
         second.markCommitted(1, 10);
         first.persistPreparing(1, Set.of("b"));
-        assertEquals(TxStatus.COMMITTED, first.markAborted(1).status());
+        Assertions.assertEquals(TxStatus.COMMITTED, first.markAborted(1).status());
         assertThrows(MvccException.class, () -> first.persistCommitted(1, 11));
         assertDoesNotThrow(second::assertNoPendingPublications);
         first.releaseSnapshot(1);
-        assertEquals(1L, second.oldestActiveStartTs().orElseThrow());
+        Assertions.assertEquals(1L, second.oldestActiveStartTs().orElseThrow());
         second.markFinalized(1);
         assertTrue(first.oldestActiveStartTs().isEmpty());
-        assertEquals(0, first.purgeFinalized(10, Long.MAX_VALUE, 1));
-        assertEquals(1, first.purgeFinalized(11, Long.MAX_VALUE, 1));
+        Assertions.assertEquals(0, first.purgeFinalized(10, Long.MAX_VALUE, 1));
+        Assertions.assertEquals(1, first.purgeFinalized(11, Long.MAX_VALUE, 1));
     }
 
-    /** 同进程竞争者在借池连接前等待，持锁线程仍可使用池中唯一连接推进控制面。 */
+    /**
+     * The competitor waits before borrowing a pool connection, and the lock-to-wire course can still use the only connection in the pool to advance control.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void publicationWaitersDoNotExhaustControlPool() throws Exception {
         var entered = new CountDownLatch(1);
@@ -495,7 +613,7 @@ class MysqlPublicationIntegrationTest {
                     return new MysqlTransactionMetadataStore(firstPool, 5).withPublicationLock(tso::nextTimestamp);
                 });
                 assertTrue(started.await(5, TimeUnit.SECONDS));
-                assertEquals(1, firstPool.getHikariPoolMXBean().getActiveConnections());
+                Assertions.assertEquals(1, firstPool.getHikariPoolMXBean().getActiveConnections());
                 release.countDown();
                 assertTrue(owner.get(5, TimeUnit.SECONDS) < waiter.get(5, TimeUnit.SECONDS));
             } finally {
@@ -504,19 +622,21 @@ class MysqlPublicationIntegrationTest {
         }
     }
 
-    /** MySQL 提交入口在持久化前拒绝错误时间戳和无法无歧义编码的分片标识。 */
+    /**
+     * MySQL commit entrance rejects the error timestamp and the unmistakable shard ID before durable storage.
+     */
     @Test
     void metadataRejectsInvalidCommitTimestampsAndParticipantIdentifiers() {
         first.create(1, 10, IsolationLevel.REPEATABLE_READ);
         first.registerParticipants(1, Set.of("a"));
         for (long commitTs : new long[]{Long.MIN_VALUE, 9, 10}) {
-            assertEquals(ErrorCode.ILLEGAL_STATE,
+            Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                     assertThrows(MvccException.class, () -> first.markLocalCommitPending(1, commitTs)).errorCode());
             assertThrows(MvccException.class, () -> first.markCommitted(1, commitTs));
             assertThrows(MvccException.class, () -> first.persistCommitted(1, Set.of("a"), commitTs));
             assertThrows(MvccException.class, () -> first.markSingleShardCommitted(1, "a", commitTs));
             assertThrows(MvccException.class, () -> first.createCommitted(2, 10, IsolationLevel.REPEATABLE_READ, Set.of("a"), commitTs));
-            assertEquals(TxStatus.ACTIVE, second.get(1).orElseThrow().status());
+            Assertions.assertEquals(TxStatus.ACTIVE, second.get(1).orElseThrow().status());
             assertTrue(second.get(2).isEmpty());
         }
         for (String participant : new String[]{"", " ", "\t", "a,b", ","}) {
@@ -527,38 +647,47 @@ class MysqlPublicationIntegrationTest {
             assertThrows(MvccException.class, () -> first.persistPreparing(1, participants));
             assertThrows(MvccException.class, () -> first.persistCommitted(1, participants, 11));
             assertThrows(MvccException.class, () -> first.markSingleShardCommitted(1, participant, 11));
-            assertEquals(Set.of("a"), second.get(1).orElseThrow().participants());
-            assertEquals(TxStatus.ACTIVE, second.get(1).orElseThrow().status());
+            Assertions.assertEquals(Set.of("a"), second.get(1).orElseThrow().participants());
+            Assertions.assertEquals(TxStatus.ACTIVE, second.get(1).orElseThrow().status());
             assertTrue(second.get(2).isEmpty());
         }
         first.markLocalCommitPending(1, 11);
-        assertEquals(11L, first.markCommitted(1, 11).commitTs());
+        Assertions.assertEquals(11L, first.markCommitted(1, 11).commitTs());
         assertThrows(MvccException.class, () -> first.registerParticipants(1, Set.of("a,b")));
         assertThrows(MvccException.class, () -> first.persistPreparing(1, Set.of(" ")));
     }
 
-    /** 旧 CSV 中的空集合和合法路由仍可读取，空白片段不能被静默丢弃而误标恢复完成。 */
+    /**
+     * The empty collection and legal route in the old CSV is still readable and the blank footage cannot be left silent and mislabeled recovery completed.
+     *
+     * @throws SQLException if the operation cannot complete
+     */
     @Test
     void legacyCsvRemainsCompatibleButMalformedSegmentsFailClosed() throws SQLException {
         first.createPreparing(1, 1, IsolationLevel.REPEATABLE_READ, Set.of("a", "b"));
-        try (Connection connection = firstPool.getConnection();
-             var update = connection.prepareStatement("update mvcc_txn set participants = ? where tx_id = 1")) {
+        try (
+                Connection connection = firstPool.getConnection();
+                var update = connection.prepareStatement("update mvcc_txn set participants = ? where tx_id = 1")) {
             for (String encoded : new String[]{" ", "a,", ",a", "a,,b", "a, ,b"}) {
                 update.setString(1, encoded);
                 update.executeUpdate();
-                assertEquals(ErrorCode.ILLEGAL_STATE,
+                Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                         assertThrows(MvccException.class, () -> second.get(1)).errorCode());
             }
             update.setString(1, "b,a");
             update.executeUpdate();
-            assertEquals(Set.of("a", "b"), second.get(1).orElseThrow().participants());
+            Assertions.assertEquals(Set.of("a", "b"), second.get(1).orElseThrow().participants());
             update.setString(1, "");
             update.executeUpdate();
             assertTrue(second.get(1).orElseThrow().participants().isEmpty());
         }
     }
 
-    /** 创建一条连接的池，以暴露屏障内错误重复借连接。 */
+    /**
+     * Creates a pool of connection to expose errors in barrier to repeat connection.
+     *
+     * @return the operation result
+     */
     private static HikariDataSource pool() {
         var config = new HikariConfig();
         config.setJdbcUrl(MYSQL.getJdbcUrl());
@@ -570,13 +699,18 @@ class MysqlPublicationIntegrationTest {
         return new HikariDataSource(config);
     }
 
-    /** 采用有界等待构造竞争，失败时恢复中断位。 */
-    private static void await(CountDownLatch latch) {
+    /**
+     * Use bounded to wait for the construction of competition, and recovery interrupts a bit when it fails.
+     *
+     * @param latch latch
+     * @throws AssertionError if the operation cannot complete
+     */
+    private static void await(final CountDownLatch latch) {
         try {
             if (!latch.await(5, TimeUnit.SECONDS)) {
                 throw new AssertionError("latch timed out");
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new AssertionError(ex);
         }

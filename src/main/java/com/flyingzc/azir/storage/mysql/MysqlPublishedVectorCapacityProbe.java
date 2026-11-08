@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -20,14 +36,26 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
-/** 测量持久向量组发布后本地写 ACK 吞吐与 RC 读取中心切面的延迟。 */
+/**
+ * Measures the delay of local writing ACK throughput to RC reading center after the durable vector group is released.
+ */
 public final class MysqlPublishedVectorCapacityProbe {
-    /** 隔离容量探针不保存全局配置。 */
+
+    /**
+     * Isolating probe capacity does not save the global configuration.
+     */
     private MysqlPublishedVectorCapacityProbe() {
     }
 
-    /** 必须显式允许重置三个实验库，避免容量程序触碰产品表。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * The repositioning of the three laboratories must be allowed in a visible manner to avoid the capacity program touching the product list.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("published vector probe requires AZIR_TX_RESET=true");
         }
@@ -43,12 +71,13 @@ public final class MysqlPublishedVectorCapacityProbe {
         }
         String username = env("AZIR_TX_USERNAME", "root");
         String password = env("AZIR_TX_PASSWORD", "root");
-        try (HikariDataSource center = pool(env("AZIR_TX_CONTROL_JDBC",
-                "jdbc:mysql://127.0.0.1:23306/control"), username, password);
-             HikariDataSource left = pool(env("AZIR_TX_SHARD1_JDBC",
-                     "jdbc:mysql://127.0.0.1:23306/shard_1"), username, password);
-             HikariDataSource right = pool(env("AZIR_TX_SHARD2_JDBC",
-                     "jdbc:mysql://127.0.0.1:23306/shard_2"), username, password)) {
+        try (
+                HikariDataSource center = pool(env("AZIR_TX_CONTROL_JDBC",
+                        "jdbc:mysql://127.0.0.1:23306/control"), username, password);
+                HikariDataSource left = pool(env("AZIR_TX_SHARD1_JDBC",
+                        "jdbc:mysql://127.0.0.1:23306/shard_1"), username, password);
+                HikariDataSource right = pool(env("AZIR_TX_SHARD2_JDBC",
+                        "jdbc:mysql://127.0.0.1:23306/shard_2"), username, password)) {
             MysqlStripedCrossVersionPrototype.initializeIsolated(left, stripes);
             MysqlStripedCrossVersionPrototype.initializeIsolated(right, stripes);
             Map<String, DataSource> routes = Map.of("s1", left, "s2", right);
@@ -56,9 +85,10 @@ public final class MysqlPublishedVectorCapacityProbe {
                 int port = Integer.parseInt(env("AZIR_TX_VECTOR_TCP_PORT", "23309"));
                 var leases = new MysqlVectorCutLeaderLease(center, routes, stripes);
                 leases.initializeIsolated();
-                try (var runtime = new MysqlVectorCutLeaderRuntime(center, routes, stripes,
-                        () -> 0, leases, "127.0.0.1:" + port, 5_000, 200);
-                     var server = new MysqlVectorCutTcpServer(runtime, port)) {
+                try (
+                        var runtime = new MysqlVectorCutLeaderRuntime(center, routes, stripes,
+                                () -> 0, leases, "127.0.0.1:" + port, 5_000, 200);
+                        var server = new MysqlVectorCutTcpServer(runtime, port)) {
                     if (!runtime.start()) {
                         throw new IllegalStateException("TCP vector cut benchmark found another leader");
                     }
@@ -72,9 +102,10 @@ public final class MysqlPublishedVectorCapacityProbe {
                 int port = Integer.parseInt(env("AZIR_TX_VECTOR_HTTP_PORT", "23308"));
                 var leases = new MysqlVectorCutLeaderLease(center, routes, stripes);
                 leases.initializeIsolated();
-                try (var runtime = new MysqlVectorCutLeaderRuntime(center, routes, stripes,
-                        () -> 0, leases, "127.0.0.1:" + port, 5_000, 200);
-                     var server = new MysqlVectorCutHttpServer(runtime, port)) {
+                try (
+                        var runtime = new MysqlVectorCutLeaderRuntime(center, routes, stripes,
+                                () -> 0, leases, "127.0.0.1:" + port, 5_000, 200);
+                        var server = new MysqlVectorCutHttpServer(runtime, port)) {
                     if (!runtime.start()) {
                         throw new IllegalStateException("remote vector cut benchmark found another leader");
                     }
@@ -84,9 +115,10 @@ public final class MysqlPublishedVectorCapacityProbe {
                             "LEASED_REMOTE");
                 }
             } else {
-                try (var cut = volatileExperiment
-                        ? MysqlPublishedVectorCut.experimentalVolatile(center, routes, stripes, () -> 0)
-                        : new MysqlPublishedVectorCut(center, routes, stripes, () -> 0)) {
+                try (
+                        var cut = volatileExperiment
+                                ? MysqlPublishedVectorCut.experimentalVolatile(center, routes, stripes, () -> 0)
+                                : new MysqlPublishedVectorCut(center, routes, stripes, () -> 0)) {
                     if (volatileExperiment) {
                         cut.initializeVolatile();
                     } else {
@@ -99,17 +131,39 @@ public final class MysqlPublishedVectorCapacityProbe {
         }
     }
 
-    /** 容量探针只复用同一代码库的连接池配置。 */
-    private static HikariDataSource pool(String url, String username, String password) {
+    /**
+     * Volume probe only returns the connection pool configuration of the same code library.
+     *
+     * @param url url
+     * @param username username
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String url, final String username, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.create(url, username, password);
     }
 
-    /** 两片各运行单分片事务，发布器一次更新可同时确认多笔提交。 */
-    private static void run(MysqlPublishedVectorCut cut, MysqlVectorCutLeaderRuntime runtime,
-                            MysqlVectorCutRemoteClient remote, MysqlVectorCutTcpClient tcpRemote,
-                            HikariDataSource left,
-                            HikariDataSource right, int concurrency,
-                            int durationSeconds, int stripes, String mode) throws Exception {
+    /**
+     * Each of the two runs shard transaction and the publisher is updated to confirm multiple commit s at the same time.
+     *
+     * @param cut cut
+     * @param runtime runtime
+     * @param remote remote
+     * @param tcpRemote tcp remote
+     * @param left left
+     * @param right right
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param stripes stripes
+     * @param mode mode
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static void run(final MysqlPublishedVectorCut cut, final MysqlVectorCutLeaderRuntime runtime,
+                            final MysqlVectorCutRemoteClient remote, final MysqlVectorCutTcpClient tcpRemote,
+                            final HikariDataSource left,
+                            final HikariDataSource right, final int concurrency,
+                            final int durationSeconds, final int stripes, final String mode) throws Exception {
         AtomicLong sequence = new AtomicLong(100);
         LongAdder attempts = new LongAdder();
         LongAdder physical = new LongAdder();
@@ -126,8 +180,9 @@ public final class MysqlPublishedVectorCapacityProbe {
         CountDownLatch ready = new CountDownLatch(concurrency);
         CountDownLatch start = new CountDownLatch(1);
         CountDownLatch done = new CountDownLatch(concurrency);
-        try (var background = Executors.newVirtualThreadPerTaskExecutor();
-             var workers = Executors.newFixedThreadPool(concurrency)) {
+        try (
+                var background = Executors.newVirtualThreadPerTaskExecutor();
+                var workers = Executors.newFixedThreadPool(concurrency)) {
             Future<?> publisher = null;
             if (cut != null) {
                 publisher = background.submit(() -> {
@@ -145,7 +200,7 @@ public final class MysqlPublishedVectorCapacityProbe {
                             }
                             LockSupport.parkNanos(200_000);
                         }
-                    } catch (Exception ex) {
+                    } catch (final Exception ex) {
                         firstFailure.compareAndSet(null, "publisher:" + ex);
                         running.set(false);
                     }
@@ -167,7 +222,7 @@ public final class MysqlPublishedVectorCapacityProbe {
                         cutReads.increment();
                         LockSupport.parkNanos(500_000);
                     }
-                } catch (Exception ex) {
+                } catch (final Exception ex) {
                     firstFailure.compareAndSet(null, "reader:" + ex);
                     running.set(false);
                 }
@@ -177,10 +232,11 @@ public final class MysqlPublishedVectorCapacityProbe {
                 final HikariDataSource dataSource = index % 2 == 0 ? left : right;
                 workers.submit(() -> {
                     boolean readySignaled = false;
-                    try (Connection connection = dataSource.getConnection();
-                         PreparedStatement call = connection.prepareStatement("""
-                                 call bench_striped_mvcc_commit_checked_v2(?, ?, ?, ?)
-                                 """)) {
+                    try (
+                            Connection connection = dataSource.getConnection();
+                            PreparedStatement call = connection.prepareStatement("""
+                                    call bench_striped_mvcc_commit_checked_v2(?, ?, ?, ?)
+                                    """)) {
                         ready.countDown();
                         readySignaled = true;
                         start.await();
@@ -210,7 +266,7 @@ public final class MysqlPublishedVectorCapacityProbe {
                                 }
                                 acked.increment();
                                 ackLatencies.add(System.nanoTime() - began);
-                            } catch (Exception ex) {
+                            } catch (final Exception ex) {
                                 failures.increment();
                                 firstFailure.compareAndSet(null, "writer:" + ex);
                                 if (runtime != null && !runtime.isServing()) {
@@ -218,7 +274,7 @@ public final class MysqlPublishedVectorCapacityProbe {
                                 }
                             }
                         }
-                    } catch (Exception ex) {
+                    } catch (final Exception ex) {
                         failures.increment();
                         firstFailure.compareAndSet(null, "writer-setup:" + ex);
                     } finally {
@@ -251,11 +307,11 @@ public final class MysqlPublishedVectorCapacityProbe {
                         + ", persisted=" + persisted + ", watermarks=" + watermarks);
             }
             System.out.printf("PUBLISHED_VECTOR_CAPACITY mode=%s concurrency=%d duration_s=%.2f "
-                            + "attempts=%d physical=%d acked=%d failures=%d ack_tps=%.2f "
-                            + "ack_p99_ms=%.3f cut_reads=%d cut_avg_ms=%.3f cut_p99_ms=%.3f "
-                            + "publish_cycles=%d publish_updates=%d publish_avg_ms=%.3f "
-                            + "publish_p99_ms=%.3f sample_avg_ms=%.3f center_write_avg_ms=%.3f "
-                            + "versions=%d watermark_total=%d%n",
+                    + "attempts=%d physical=%d acked=%d failures=%d ack_tps=%.2f "
+                    + "ack_p99_ms=%.3f cut_reads=%d cut_avg_ms=%.3f cut_p99_ms=%.3f "
+                    + "publish_cycles=%d publish_updates=%d publish_avg_ms=%.3f "
+                    + "publish_p99_ms=%.3f sample_avg_ms=%.3f center_write_avg_ms=%.3f "
+                    + "versions=%d watermark_total=%d%n",
                     mode,
                     concurrency, seconds, attempts.sum(), physical.sum(), acked.sum(), failures.sum(),
                     acked.sum() / seconds, p99(ackLatencies), cutReads.sum(), average(readLatencies),
@@ -266,13 +322,20 @@ public final class MysqlPublishedVectorCapacityProbe {
         }
     }
 
-    /** 分片版本数与水位增量必须等于所有物理成功事务。 */
-    private static long[] persistedCounts(HikariDataSource dataSource) throws SQLException {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement query = connection.prepareStatement("""
-                     select (select count(*) from bench_striped_mvcc_data) as versions,
-                            (select sum(committed_seq) from bench_striped_mvcc_state) as watermarks
-                     """); ResultSet row = query.executeQuery()) {
+    /**
+     * Shard version and watermark increments must equal all physical success transaction.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long[] persistedCounts(final HikariDataSource dataSource) throws SQLException {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement query = connection.prepareStatement("""
+                        select (select count(*) from bench_striped_mvcc_data) as versions,
+                               (select sum(committed_seq) from bench_striped_mvcc_state) as watermarks
+                        """); ResultSet row = query.executeQuery()) {
             if (!row.next()) {
                 throw new SQLException("published vector persistence count returned no row");
             }
@@ -280,20 +343,36 @@ public final class MysqlPublishedVectorCapacityProbe {
         }
     }
 
-    /** 计算一次容量探针中实际完成操作的均值毫秒数。 */
-    private static double average(ConcurrentLinkedQueue<Long> values) {
+    /**
+     * Calculates the average of milliseconds in a single capacity probe that actually completes the operation.
+     *
+     * @param values values
+     * @return the operation result
+     */
+    private static double average(final ConcurrentLinkedQueue<Long> values) {
         return values.stream().mapToLong(Long::longValue).average().orElse(Double.NaN) / 1_000_000.0;
     }
 
-    /** 按实际样本统计 P99，不用连接池等待或外部停机时间代替。 */
-    private static double p99(ConcurrentLinkedQueue<Long> values) {
+    /**
+     * Based on actual sample P99, connection pool is not needed for waiting or external shutdown time.
+     *
+     * @param values values
+     * @return the operation result
+     */
+    private static double p99(final ConcurrentLinkedQueue<Long> values) {
         long[] sorted = values.stream().mapToLong(Long::longValue).sorted().toArray();
         return sorted.length == 0 ? Double.NaN
                 : sorted[Math.max(0, (int) Math.ceil(sorted.length * 0.99) - 1)] / 1_000_000.0;
     }
 
-    /** 只读取探针显式参数，不使用产品默认环境。 */
-    private static String env(String name, String fallback) {
+    /**
+     * Read-only takes the probe visible parameter and does not use the product default environment.
+     *
+     * @param name name
+     * @param fallback fallback
+     * @return the operation result
+     */
+    private static String env(final String name, final String fallback) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? fallback : value;
     }

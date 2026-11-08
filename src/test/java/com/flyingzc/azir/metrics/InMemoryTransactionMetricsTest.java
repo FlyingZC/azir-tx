@@ -1,15 +1,31 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metrics;
 
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
 /**
- * 内存事务指标聚合测试。
+ * Memory transaction Indicator Aggregation Test.
  */
 class InMemoryTransactionMetricsTest {
+
     /**
-     * 验证成功阶段会累加调用次数、成功次数和耗时。
+     * Verify The success phase will be cumulatively called, successful and time-consuming.
      */
     @Test
     void recordSuccessShouldAccumulateStageStats() {
@@ -19,15 +35,15 @@ class InMemoryTransactionMetricsTest {
         metrics.recordSuccess(TransactionStage.COMMIT_TSO, 300L);
 
         TransactionStageStats stats = metrics.snapshot(TransactionStage.COMMIT_TSO);
-        assertEquals(2L, stats.invocationCount());
-        assertEquals(2L, stats.successCount());
-        assertEquals(0L, stats.failureCount());
-        assertEquals(400L, stats.totalNanos());
-        assertEquals(200L, stats.averageNanos());
+        Assertions.assertEquals(2L, stats.invocationCount());
+        Assertions.assertEquals(2L, stats.successCount());
+        Assertions.assertEquals(0L, stats.failureCount());
+        Assertions.assertEquals(400L, stats.totalNanos());
+        Assertions.assertEquals(200L, stats.averageNanos());
     }
 
     /**
-     * 验证失败阶段会累加失败次数和耗时。
+     * The verify failure phase adds to the number of failures and time-consuming.
      */
     @Test
     void recordFailureShouldAccumulateStageStats() {
@@ -36,14 +52,14 @@ class InMemoryTransactionMetricsTest {
         metrics.recordFailure(TransactionStage.BUFFERED_PREWRITE, 500L);
 
         TransactionStageStats stats = metrics.snapshot(TransactionStage.BUFFERED_PREWRITE);
-        assertEquals(1L, stats.invocationCount());
-        assertEquals(0L, stats.successCount());
-        assertEquals(1L, stats.failureCount());
-        assertEquals(500L, stats.totalNanos());
+        Assertions.assertEquals(1L, stats.invocationCount());
+        Assertions.assertEquals(0L, stats.successCount());
+        Assertions.assertEquals(1L, stats.failureCount());
+        Assertions.assertEquals(500L, stats.totalNanos());
     }
 
     /**
-     * 验证未记录阶段返回空快照。
+     * Verify Unrecorded Stage returns empty snapshot.
      */
     @Test
     void unrecordedStageShouldReturnZeroSnapshot() {
@@ -51,10 +67,10 @@ class InMemoryTransactionMetricsTest {
 
         TransactionStageStats stats = metrics.snapshot(TransactionStage.ASYNC_PARTICIPANT_COMMIT);
 
-        assertEquals(0L, stats.invocationCount());
-        assertEquals(0L, stats.successCount());
-        assertEquals(0L, stats.failureCount());
-        assertEquals(0L, stats.totalNanos());
-        assertEquals(0L, stats.averageNanos());
+        Assertions.assertEquals(0L, stats.invocationCount());
+        Assertions.assertEquals(0L, stats.successCount());
+        Assertions.assertEquals(0L, stats.failureCount());
+        Assertions.assertEquals(0L, stats.totalNanos());
+        Assertions.assertEquals(0L, stats.averageNanos());
     }
 }

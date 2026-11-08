@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
 
 import java.io.IOException;
@@ -8,67 +24,157 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.zip.CRC32C;
 
-/** 检查点文件的有界读写与目录同步，不通过非原子覆盖替代发布协议。 */
+/**
+ * Checkpoint file bounded read-write is synchronized with directory, and does not override the release protocol by non- atomic.
+ */
 final class WalFiles {
-    /** 禁止实例化文件协议工具。 */
-    private WalFiles() { }
 
-    /** 新文件必须完整写出并同步，存在同名文件时拒绝覆盖。 */
-    static void writeNew(Path path, byte[] data) throws IOException {
+    /**
+     * Prohibits case-based document protocol tools.
+     */
+    private WalFiles() {
+    }
+
+    /**
+     * The new document must be fully written and synchronized, which is denied when the same name exists.
+     *
+     * @param path path
+     * @param data data
+     * @throws IOException if the operation cannot complete
+     */
+    static void writeNew(final Path path, final byte[] data) throws IOException {
         writeNew(path, data, WalLog.NORMAL_IO);
     }
 
-    /** 在真实写出与刷盘位置注入故障，默认入口不增加额外文件行为。 */
-    static void writeNew(Path path, byte[] data, WalLog.IoHook io) throws IOException {
+    /**
+     * The default entry does not add any additional file behavior to the actual writing and brushing position of failure.
+     *
+     * @param path path
+     * @param data data
+     * @param io io
+     * @throws IOException if the operation cannot complete
+     */
+    static void writeNew(final Path path, final byte[] data, final WalLog.IoHook io) throws IOException {
         try (var channel = FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-            String name = path.getFileName().toString(); write(channel, ByteBuffer.wrap(data), name, io);
-            io.beforeCheckpointForce(name); channel.force(true); io.afterCheckpointForce(name);
+            String name = path.getFileName().toString();
+            write(channel, ByteBuffer.wrap(data), name, io);
+            io.beforeCheckpointForce(name);
+            channel.force(true);
+            io.afterCheckpointForce(name);
         }
     }
 
-    /** 写完整个缓冲区，磁盘无进展视为错误。 */
-    static void write(FileChannel channel, ByteBuffer data) throws IOException {
-        while (data.hasRemaining()) { if (channel.write(data) <= 0) { throw new IOException("file write made no progress"); } }
+    /**
+     * Write a complete buffer section, and the lack of progress on disk is considered an error.
+     *
+     * @param channel channel
+     * @param data data
+     * @throws IOException if the operation cannot complete
+     */
+    static void write(final FileChannel channel, final ByteBuffer data) throws IOException {
+        while (data.hasRemaining()) {
+            if (channel.write(data) <= 0) {
+                throw new IOException("file write made no progress");
+            }
+        }
     }
 
-    /** 对单个检查点文件保留真实偏移和分块写出，注入不能用事后改文件替代。 */
-    static void write(FileChannel channel, ByteBuffer data, String name, WalLog.IoHook io) throws IOException {
+    /**
+     * Retain real offsets and segmenting of single checkpoint files, which cannot be replaced by after-action files.
+     *
+     * @param channel channel
+     * @param data data
+     * @param name name
+     * @param io io
+     * @throws IOException if the operation cannot complete
+     */
+    static void write(final FileChannel channel, final ByteBuffer data, final String name, final WalLog.IoHook io) throws IOException {
         while (data.hasRemaining()) {
             int permitted = io.checkpointWriteLimit(name, channel.position(), data.remaining());
-            if (permitted < 1 || permitted > data.remaining()) { throw new IOException("invalid checkpoint write limit"); }
-            int limit = data.limit(); data.limit(data.position() + permitted);
-            try { if (channel.write(data) <= 0) { throw new IOException("checkpoint write made no progress"); } }
-            finally { data.limit(limit); }
+            if (permitted < 1 || permitted > data.remaining()) {
+                throw new IOException("invalid checkpoint write limit");
+            }
+            int limit = data.limit();
+            data.limit(data.position() + permitted);
+            try {
+                if (channel.write(data) <= 0) {
+                    throw new IOException("checkpoint write made no progress");
+                }
+            } finally {
+                data.limit(limit);
+            }
             io.afterCheckpointWrite(name, channel.position());
         }
     }
 
-    /** 从指定偏移读取完整块，截断不能伪装成合法空数据。 */
-    static byte[] read(FileChannel channel, long offset, int length) throws IOException {
+    /**
+     * Reads the complete block from the specified offset, and the cut-off cannot be disguised as a valid empty data.
+     *
+     * @param channel channel
+     * @param offset offset
+     * @param length length
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
+    static byte[] read(final FileChannel channel, final long offset, final int length) throws IOException {
         var data = ByteBuffer.allocate(length);
         while (data.hasRemaining()) {
-            if (channel.read(data, offset + data.position()) <= 0) { throw new IOException("truncated checkpoint file"); }
+            if (channel.read(data, offset + data.position()) <= 0) {
+                throw new IOException("truncated checkpoint file");
+            }
         }
         return data.array();
     }
 
-    /** 在分配之前检查文件大小，防止畸形文件导致无界内存申请。 */
-    static byte[] readBounded(Path path, long maximum) throws IOException {
+    /**
+     * Checks the file size before distribution to prevent an abnormal file from causing unbounded memory application.
+     *
+     * @param path path
+     * @param maximum maximum
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
+    static byte[] readBounded(final Path path, final long maximum) throws IOException {
         long size = Files.size(path);
-        if (size < 1 || size > maximum) { throw new IOException("checkpoint file size exceeds budget"); }
+        if (size < 1 || size > maximum) {
+            throw new IOException("checkpoint file size exceeds budget");
+        }
         return Files.readAllBytes(path);
     }
 
-    /** 同步目录项，只有原子改名与目录同步完成后才允许删除旧代。 */
-    static void forceDirectory(Path directory) throws IOException {
-        try (var channel = FileChannel.open(directory, StandardOpenOption.READ)) { channel.force(true); }
+    /**
+     * Synchronizes the directory entries, and only after atomic has changed its name to synchronise with the directory is the deletion of the old generation allowed.
+     *
+     * @param directory directory
+     * @throws IOException if the operation cannot complete
+     */
+    static void forceDirectory(final Path directory) throws IOException {
+        try (var channel = FileChannel.open(directory, StandardOpenOption.READ)) {
+            channel.force(true);
+        }
     }
 
-    /** 计算独立数据块校验，保护索引键及载荷，不仅保护返回值。 */
-    static int crc(byte[] data) { return crc(data, 0, data.length); }
+    /**
+     * Calculates a separate data block validate, protects index keys and payload, not only the return value.
+     *
+     * @param data data
+     * @return the operation result
+     */
+    static int crc(final byte[] data) {
+        return crc(data, 0, data.length);
+    }
 
-    /** 对指定区间计算校验，帧校验字段自身不参与计算。 */
-    static int crc(byte[] data, int offset, int length) {
-        var crc = new CRC32C(); crc.update(data, offset, length); return (int) crc.getValue();
+    /**
+     * Calculates validate for the specified range, frame validate field does not participate in the calculation itself.
+     *
+     * @param data data
+     * @param offset offset
+     * @param length length
+     * @return the operation result
+     */
+    static int crc(final byte[] data, final int offset, final int length) {
+        var crc = new CRC32C();
+        crc.update(data, offset, length);
+        return (int) crc.getValue();
     }
 }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.flyingzc.azir.storage.mysql.MysqlDataSourceFactory;
@@ -16,19 +32,23 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * 时间戳分配器基准测试入口。
+ * Timestamp dispenser benchmark test entrance.
  */
 public final class TimestampOracleBenchmark {
+
     /**
-     * 构造 TimestampOracleBenchmark 实例。
+     * Construct a TimestampOracleBenchmark instance.
      */
     private TimestampOracleBenchmark() {
     }
 
     /**
-     * 程序入口方法。
+     * Run the application entry point.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
      */
-    public static void main(String[] args) throws Exception {
+    public static void main(final String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource controlDataSource = MysqlDataSourceFactory.create(config.controlJdbcUrl(), config.username(), config.password());
         try {
@@ -61,12 +81,19 @@ public final class TimestampOracleBenchmark {
     }
 
     /**
-     * 执行基准测试并返回统计结果。
+     * Run the benchmark and return its statistics.
+     *
+     * @param oracle oracle
+     * @param countingOracle counting oracle
+     * @param segmentTso segment tso
+     * @param config config
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
-    private static BenchmarkResult runBenchmark(TimestampOracle oracle,
-                                                CountingTimestampOracle countingOracle,
-                                                MysqlSegmentTimestampOracle segmentTso,
-                                                Config config) throws Exception {
+    private static BenchmarkResult runBenchmark(final TimestampOracle oracle,
+                                                final CountingTimestampOracle countingOracle,
+                                                final MysqlSegmentTimestampOracle segmentTso,
+                                                final Config config) throws Exception {
         LongAdder allocated = new LongAdder();
         var executor = Executors.newFixedThreadPool(config.concurrency());
         CountDownLatch startLatch = new CountDownLatch(1);
@@ -82,7 +109,7 @@ public final class TimestampOracleBenchmark {
                         oracle.nextTimestamp();
                         allocated.increment();
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 } finally {
                     finishLatch.countDown();
@@ -105,9 +132,13 @@ public final class TimestampOracleBenchmark {
     }
 
     /**
-     * 重置基准测试表数据。
+     * Reset the benchmark tables.
+     *
+     * @param dataSource database connection source
+     * @param tables tables
+     * @throws Exception if the operation cannot complete
      */
-    private static void reset(DataSource dataSource, String... tables) throws Exception {
+    private static void reset(final DataSource dataSource, final String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
                 statement.execute("delete from " + table);
@@ -116,27 +147,54 @@ public final class TimestampOracleBenchmark {
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void close(DataSource dataSource) throws Exception {
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
     /**
-     * 基准测试配置对象。
+     * Read a string-valued environment variable.
+     *
+     * @param key business key
+     * @param defaultValue default value
+     * @return the operation result
+     */
+    private static String env(final String key, final String defaultValue) {
+        String value = System.getenv(key);
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    /**
+     * Benchmark configuration.
+     *
+     * @param controlJdbcUrl control jdbc url
+     * @param username username
+     * @param password password
+     * @param resetTable reset table
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param mode mode
+     * @param batchSize batch size
      */
     private record Config(String controlJdbcUrl,
-                          String username,
-                          String password,
-                          boolean resetTable,
-                          int concurrency,
-                          int durationSeconds,
-                          Mode mode,
-                          int batchSize) {
+            String username,
+            String password,
+            boolean resetTable,
+            int concurrency,
+            int durationSeconds,
+            Mode mode,
+            int batchSize) {
+
         /**
-         * 从环境变量读取配置对象。
+         * Read configuration from environment variables.
+         *
+         * @return the operation result
          */
         private static Config fromEnv() {
             return new Config(
@@ -147,21 +205,28 @@ public final class TimestampOracleBenchmark {
                     Integer.parseInt(env("AZIR_TX_BENCH_CONCURRENCY", "50")),
                     Integer.parseInt(env("AZIR_TX_BENCH_DURATION_SECONDS", "10")),
                     Mode.valueOf(env("AZIR_TX_TSO_MODE", "DIRECT")),
-                    Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "1"))
-            );
+                    Integer.parseInt(env("AZIR_TX_TSO_BATCH_SIZE", "1")));
         }
     }
 
     /**
-     * 基准测试结果对象。
+     * Benchmark results.
+     *
+     * @param elapsedSeconds elapsed seconds
+     * @param allocated allocated
+     * @param remoteCalls remote calls
      */
     private record BenchmarkResult(double elapsedSeconds,
-                                   long allocated,
-                                   long remoteCalls) {
+            long allocated,
+            long remoteCalls) {
+
         /**
-         * 将基准测试结果格式化为一行文本。
+         * Format benchmark results as a single line.
+         *
+         * @param config config
+         * @return the operation result
          */
-        private String toLine(Config config) {
+        private String toLine(final Config config) {
             double allocatedTps = allocated / elapsedSeconds;
             double remoteCallTps = remoteCalls / elapsedSeconds;
             double remoteCallsPerAllocation = allocated == 0L ? 0.0 : (double) remoteCalls / allocated;
@@ -179,15 +244,7 @@ public final class TimestampOracleBenchmark {
     }
 
     /**
-     * 读取字符串环境变量配置。
-     */
-    private static String env(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value == null || value.isBlank() ? defaultValue : value;
-    }
-
-    /**
-     * 基准测试运行模式枚举。
+     * Benchmark Test run mode count.
      */
     private enum Mode {
         DIRECT,

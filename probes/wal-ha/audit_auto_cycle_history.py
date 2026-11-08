@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""独立核对自动镜像/日志回收强杀的外部确认历史和实际指针证据，不读取内核对象。"""
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Audit external acknowledgments and durable pointers across snapshot/log-collection kills without reading runtime objects."""
 import argparse
 import copy
 import json
@@ -12,7 +26,7 @@ CONCURRENT = {'AFTER_IMAGE_PREPARED', 'AFTER_IMAGE_COMPLETE', 'AFTER_IMAGE_PUBLI
 
 
 def verify(case, history, directory):
-    """定向故障检查不冒充通用线性化证明，确认只来自实际 COMMITTED 回复。"""
+    """This targeted fault audit is not a general linearizability proof; acknowledgments come only from actual COMMITTED replies."""
     boundary = case['boundary']
     assert case['passed'] and boundary in BOUNDARIES
     source = case['source']
@@ -110,7 +124,7 @@ def verify(case, history, directory):
 
 
 def main():
-    """必须包含七个完整场景，坏历史对照确保检查器不会静默接受丢数或缺失故障。"""
+    """Require seven complete scenarios and invalid-history controls that detect data loss and missing faults."""
     parser = argparse.ArgumentParser()
     parser.add_argument('directory', type=Path)
     args = parser.parse_args()

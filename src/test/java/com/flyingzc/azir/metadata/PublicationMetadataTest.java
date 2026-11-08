@@ -1,4 +1,27 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metadata;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.common.ErrorCode;
 import com.flyingzc.azir.common.IsolationLevel;
@@ -8,11 +31,14 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-/** 验证固定租约、终态单调性和有界元数据清理。 */
+/**
+ * Verify Fixed lease, terminal state Monolytic and bounded Metadata Clearing.
+ */
 class PublicationMetadataTest {
-    /** 默认租约合同拒绝缺失、截止不匹配、过期和已释放记录，不续期或缓存有效性。 */
+
+    /**
+     * Default lease contract rejection of missing, mismatched, expired and released records, non-renewal or suspense validity.
+     */
     @Test
     void leaseValidationRequiresOriginalLiveLease() {
         var store = new InMemoryTransactionMetadataStore();
@@ -22,12 +48,14 @@ class PublicationMetadataTest {
         assertFalse(store.isSnapshotLeaseValid(1, Long.MAX_VALUE - 1));
         store.registerSnapshot(2, 2, 1);
         assertFalse(store.isSnapshotLeaseValid(2, 1));
-        assertEquals(1L, store.snapshotExpiry(2).orElseThrow());
+        Assertions.assertEquals(1L, store.snapshotExpiry(2).orElseThrow());
         store.releaseSnapshot(1);
         assertFalse(store.isSnapshotLeaseValid(1, Long.MAX_VALUE));
     }
 
-    /** 畸形持久记录不能构造成可供读侧静默忽略的元数据。 */
+    /**
+     * Malformed durable records cannot create metadata that can be read silently ignored.
+     */
     @Test
     void recordRejectsMissingCommittedTimestampStatusAndIsolation() {
         assertThrows(MvccException.class,
@@ -40,27 +68,31 @@ class PublicationMetadataTest {
         assertDoesNotThrow(() -> new TxRecord(1, 1, IsolationLevel.REPEATABLE_READ, Set.of(), TxStatus.COMMITTED, 2L));
     }
 
-    /** 所有提交入口都拒绝不晚于开始时间的提交时间戳，失败不得改变原状态。 */
+    /**
+     * All commit entrances reject commit timestamp no later than the start time and fail not to change status.
+     */
     @Test
     void commitTimestampMustBeStrictlyAfterStartTimestamp() {
         var store = new InMemoryTransactionMetadataStore();
         store.create(1, 10, IsolationLevel.REPEATABLE_READ);
         store.registerParticipants(1, Set.of("a"));
         for (long commitTs : new long[]{Long.MIN_VALUE, 9, 10}) {
-            assertEquals(ErrorCode.ILLEGAL_STATE,
+            Assertions.assertEquals(ErrorCode.ILLEGAL_STATE,
                     assertThrows(MvccException.class, () -> store.markLocalCommitPending(1, commitTs)).errorCode());
             assertThrows(MvccException.class, () -> store.markCommitted(1, commitTs));
             assertThrows(MvccException.class, () -> store.persistCommitted(1, Set.of("a"), commitTs));
             assertThrows(MvccException.class, () -> store.markSingleShardCommitted(1, "a", commitTs));
             assertThrows(MvccException.class, () -> store.createCommitted(2, 10, IsolationLevel.REPEATABLE_READ, Set.of("a"), commitTs));
-            assertEquals(TxStatus.ACTIVE, store.get(1).orElseThrow().status());
+            Assertions.assertEquals(TxStatus.ACTIVE, store.get(1).orElseThrow().status());
             assertTrue(store.get(2).isEmpty());
         }
         store.markLocalCommitPending(1, 11);
-        assertEquals(11L, store.markCommitted(1, 11).commitTs());
+        Assertions.assertEquals(11L, store.markCommitted(1, 11).commitTs());
     }
 
-    /** CSV 路由标识在创建、登记、快速更新及终态重放入口都必须合法。 */
+    /**
+     * The CSV route sign must be legal in the creation, registration, rapid updating and terminal state replay entry.
+     */
     @Test
     void participantIdentifiersCannotBeBlankOrContainCsvSeparators() {
         var store = new InMemoryTransactionMetadataStore();
@@ -74,16 +106,18 @@ class PublicationMetadataTest {
             assertThrows(MvccException.class, () -> store.persistCommitted(1, participants, 3));
             assertThrows(MvccException.class, () -> store.markSingleShardCommitted(1, participant, 3));
             assertTrue(store.get(2).isEmpty());
-            assertEquals(TxStatus.ACTIVE, store.get(1).orElseThrow().status());
+            Assertions.assertEquals(TxStatus.ACTIVE, store.get(1).orElseThrow().status());
         }
         store.markCommitted(1, Set.of("valid-shard"), 3);
         assertThrows(MvccException.class, () -> store.registerParticipants(1, Set.of("a,b")));
         assertThrows(MvccException.class, () -> store.persistPreparing(1, Set.of(" ")));
         assertThrows(MvccException.class, () -> store.markCommitted(1, Set.of(","), 3));
-        assertEquals(Set.of("valid-shard"), store.get(1).orElseThrow().participants());
+        Assertions.assertEquals(Set.of("valid-shard"), store.get(1).orElseThrow().participants());
     }
 
-    /** 单分片未知提交占位阻止新快照，只有真实终态才能清除该发布障碍。 */
+    /**
+     * The single shard unknown commit position prevents the new snapshot and only real terminal state can remove this release barrier.
+     */
     @Test
     void pendingLocalCommitBlocksPublicationUntilTerminalDecision() {
         var store = new InMemoryTransactionMetadataStore();
@@ -93,7 +127,7 @@ class PublicationMetadataTest {
         store.markLocalCommitPending(1, 10);
         store.markLocalCommitPending(1, 10);
         var error = assertThrows(MvccException.class, store::assertNoPendingPublications);
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
         assertFalse(error.retryable());
         assertThrows(MvccException.class, () -> store.markLocalCommitPending(1, 11));
         assertThrows(MvccException.class, () -> store.markCommitted(1, 11));
@@ -103,38 +137,44 @@ class PublicationMetadataTest {
         assertDoesNotThrow(store::assertNoPendingPublications);
     }
 
-    /** 延迟创建元数据的快照也必须阻止安全点跨越。 */
+    /**
+     * Snapshots with lazily created metadata must also prevent the safe point from advancing past them.
+     */
     @Test
     void lazySnapshotPinsOldestTimestampAndCannotBeRenewed() {
         var store = new InMemoryTransactionMetadataStore();
         store.registerSnapshot(10, 10, 100);
-        assertEquals(10L, store.oldestActiveStartTs().orElseThrow());
+        Assertions.assertEquals(10L, store.oldestActiveStartTs().orElseThrow());
         store.registerSnapshot(10, 20, 100);
-        assertEquals(10L, store.oldestActiveStartTs().orElseThrow());
+        Assertions.assertEquals(10L, store.oldestActiveStartTs().orElseThrow());
         assertThrows(MvccException.class, () -> store.registerSnapshot(10, 10, 200));
-        assertEquals(0, store.expireSnapshots(99, 1));
-        assertEquals(1, store.expireSnapshots(100, 1));
+        Assertions.assertEquals(0, store.expireSnapshots(99, 1));
+        Assertions.assertEquals(1, store.expireSnapshots(100, 1));
         assertTrue(store.snapshotExpiry(10).isEmpty());
     }
 
-    /** 重复提交必须保留时间戳，快速更新和回滚都不得撤销提交。 */
+    /**
+     * Repeat commit must keep timestamp and cannot cancel commit for quick updates or rollback.
+     */
     @Test
     void terminalStatusAndCommitTimestampAreImmutable() {
         var store = new InMemoryTransactionMetadataStore();
         store.create(10, 10, IsolationLevel.REPEATABLE_READ);
         store.registerParticipants(10, Set.of("a"));
         store.registerParticipants(10, Set.of("b"));
-        assertEquals(Set.of("a", "b"), store.get(10).orElseThrow().participants());
+        Assertions.assertEquals(Set.of("a", "b"), store.get(10).orElseThrow().participants());
         store.persistCommitted(10, 20);
         store.persistPreparing(10, Set.of("c"));
-        assertEquals(TxStatus.COMMITTED, store.markAborted(10).status());
-        assertEquals(Set.of("a", "b"), store.registerParticipants(10, Set.of("c")).participants());
+        Assertions.assertEquals(TxStatus.COMMITTED, store.markAborted(10).status());
+        Assertions.assertEquals(Set.of("a", "b"), store.registerParticipants(10, Set.of("c")).participants());
         var error = assertThrows(MvccException.class, () -> store.persistCommitted(10, 21));
-        assertEquals(ErrorCode.ILLEGAL_STATE, error.errorCode());
-        assertEquals(20L, store.markCommitted(10, 20).commitTs());
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE, error.errorCode());
+        Assertions.assertEquals(20L, store.markCommitted(10, 20).commitTs());
     }
 
-    /** 恢复候选按事务编号分页，并跳过仍持有租约的未决事务。 */
+    /**
+     * Recovery candidate press transaction identifier page break and skip pending transaction that still holds lease.
+     */
     @Test
     void recoveryCandidatesUseLeasesAndCursor() {
         var store = new InMemoryTransactionMetadataStore();
@@ -142,26 +182,30 @@ class PublicationMetadataTest {
         store.registerSnapshot(1, 1, 100);
         store.create(2, 2, IsolationLevel.REPEATABLE_READ);
         store.createCommitted(3, 3, IsolationLevel.REPEATABLE_READ, Set.of(), 4);
-        assertEquals(2L, store.findRecoveryCandidates(99, 0, 1).getFirst().txId());
-        assertEquals(3L, store.findRecoveryCandidates(99, 2, 1).getFirst().txId());
-        assertEquals(1L, store.findRecoveryCandidates(100, 0, 1).getFirst().txId());
+        Assertions.assertEquals(2L, store.findRecoveryCandidates(99, 0, 1).getFirst().txId());
+        Assertions.assertEquals(3L, store.findRecoveryCandidates(99, 2, 1).getFirst().txId());
+        Assertions.assertEquals(1L, store.findRecoveryCandidates(100, 0, 1).getFirst().txId());
     }
 
-    /** 仅完成物化且早于安全点与保留期限的终态可以被清理。 */
+    /**
+     * Terminal state that completes only materialization and is earlier than safe point and retains the duration can be cleaned up.
+     */
     @Test
     void purgeRequiresFinalizationAndHonorsBatchLimit() {
         var store = new InMemoryTransactionMetadataStore();
         store.createCommitted(1, 1, IsolationLevel.REPEATABLE_READ, Set.of(), 5);
         store.createCommitted(2, 2, IsolationLevel.REPEATABLE_READ, Set.of(), 6);
-        assertEquals(0, store.purgeFinalized(10, Long.MAX_VALUE, 10));
+        Assertions.assertEquals(0, store.purgeFinalized(10, Long.MAX_VALUE, 10));
         store.markFinalized(1);
         store.markFinalized(2);
-        assertEquals(0, store.purgeFinalized(5, Long.MAX_VALUE, 10));
-        assertEquals(1, store.purgeFinalized(10, Long.MAX_VALUE, 1));
-        assertEquals(1, store.purgeFinalized(10, Long.MAX_VALUE, 1));
+        Assertions.assertEquals(0, store.purgeFinalized(5, Long.MAX_VALUE, 10));
+        Assertions.assertEquals(1, store.purgeFinalized(10, Long.MAX_VALUE, 1));
+        Assertions.assertEquals(1, store.purgeFinalized(10, Long.MAX_VALUE, 1));
     }
 
-    /** 同实例屏障可重入且异常退出后仍能使用。 */
+    /**
+     * The same example barrier can be re-entered and used after an abnormal exit.
+     */
     @Test
     void publicationLockIsReentrantAndReleasedAfterFailure() {
         var store = new InMemoryTransactionMetadataStore();
@@ -169,6 +213,6 @@ class PublicationMetadataTest {
             store.withPublicationLock(() -> store.create(1, 1, IsolationLevel.REPEATABLE_READ));
             throw new IllegalArgumentException("failure");
         }));
-        assertEquals(1L, store.withPublicationLock(() -> store.get(1).orElseThrow()).txId());
+        Assertions.assertEquals(1L, store.withPublicationLock(() -> store.get(1).orElseThrow()).txId());
     }
 }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.MutationType;
@@ -11,18 +27,31 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Objects;
 
-/** 正式跨片单键预写在一次服务器调用内原子保存真实意向与分条序号。 */
+/**
+ * Formal cross-shard single key prewrite saves real intent and strip serial numbers in atomic on a single server call.
+ */
 final class MysqlVectorCrossPrewriteProcedure {
+
     private final DataSource dataSource;
+
     private volatile boolean ready;
 
-    /** 预写例程必须操作产品参与者与向量表所在的同一物理数据库。 */
-    MysqlVectorCrossPrewriteProcedure(DataSource dataSource) {
+    /**
+     * The prewrite routine must operate the product participant in the same physical database as the vector table.
+     *
+     * @param dataSource database connection source
+     */
+    MysqlVectorCrossPrewriteProcedure(final DataSource dataSource) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     }
 
-    /** 缺失时安装版本化例程，重启重用原持久意向及预约水位。 */
-    void ensure(Connection connection) throws SQLException {
+    /**
+     * Install version routines when they are missing, restart the original durable intent and book watermark.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    void ensure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database()
@@ -175,7 +204,7 @@ final class MysqlVectorCrossPrewriteProcedure {
                 """)) {
             create.execute();
             ready = true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
@@ -183,9 +212,21 @@ final class MysqlVectorCrossPrewriteProcedure {
         }
     }
 
-    /** JDBC 自动提交连接只返回真实持久预写后的本地序号。 */
-    long prewrite(long txId, long startTs, Mutation mutation, int stripe,
-                  long startSequence, long expireAtMillis) throws SQLException {
+    /**
+     * JDBC autocommit connection returns only the real local serial number after durable prewrite.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutation mutation
+     * @param stripe stripe
+     * @param startSequence start sequence
+     * @param expireAtMillis expire at millis
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    long prewrite(final long txId, final long startTs, final Mutation mutation, final int stripe,
+                  final long startSequence, final long expireAtMillis) throws SQLException {
         if (!ready) {
             throw new IllegalStateException("vector cross prewrite procedure is not initialized");
         }

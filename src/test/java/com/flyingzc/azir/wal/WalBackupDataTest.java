@@ -1,4 +1,25 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
@@ -7,57 +28,109 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import static org.junit.jupiter.api.Assertions.*;
 
-/** 备份格式的实际读写、截断和身份验证，不能用完整文件摘要代替内容语义检查。 */
+/**
+ * The actual reading and writing, cut-off and identity verify in the backup format cannot be replaced by a full file summary for content semantic examination.
+ */
 class WalBackupDataTest {
-    /** Unicode、空键和删除版本完整往返，消费者只需持有一行。 */
-    @Test void streamsValuesAndTombstonesInBinaryKeyOrder() throws Exception {
-        var header = header(); var bytes = new ByteArrayOutputStream(); var writer = new WalBackupData.Writer(bytes, header);
-        List<String> keys = List.of("", "a\u0000b", "中", "x\uE000", "x😀").stream().sorted(com.flyingzc.azir.storage.Utf8KeyOrder::compare).toList();
-        for (int i = 0; i < keys.size(); i++) { writer.accept(new WalBackupRow(keys.get(i), new WalValue(i + 1, i == 2 ? null : new byte[]{(byte) i}))); }
-        assertEquals(keys.size(), writer.finish()); var rows = new ArrayList<WalBackupRow>();
-        assertEquals(keys.size(), WalBackupData.read(new ByteArrayInputStream(bytes.toByteArray()), header, rows::add));
-        assertEquals(keys, rows.stream().map(WalBackupRow::key).toList()); assertTrue(rows.get(2).version().deleted());
-        for (int i = 0; i < rows.size(); i++) { if (i != 2) { assertArrayEquals(new byte[]{(byte) i}, rows.get(i).version().value()); } }
-    }
 
-    /** 每一种不完整前缀都必须拒绝，即使它刚好包含若干完整行。 */
-    @Test void everyTruncatedPrefixIsRejected() throws Exception {
-        byte[] valid = encoded();
-        for (int size = 0; size < valid.length; size++) {
-            byte[] prefix = java.util.Arrays.copyOf(valid, size);
-            assertThrows(IOException.class, () -> WalBackupData.read(new ByteArrayInputStream(prefix), header(), row -> { }));
+    /**
+     * Unicode, empty keys and delete version complete round trip with only one line held by the consumer.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void streamsValuesAndTombstonesInBinaryKeyOrder() throws Exception {
+        var header = header();
+        var bytes = new ByteArrayOutputStream();
+        var writer = new WalBackupData.Writer(bytes, header);
+        List<String> keys = List.of("", "a\u0000b", "中", "x\uE000", "x😀").stream().sorted(com.flyingzc.azir.storage.Utf8KeyOrder::compare).toList();
+        for (int i = 0; i < keys.size(); i++) {
+            writer.accept(new WalBackupRow(keys.get(i), new WalValue(i + 1, i == 2 ? null : new byte[]{(byte) i})));
+        }
+        Assertions.assertEquals(keys.size(), writer.finish());
+        var rows = new ArrayList<WalBackupRow>();
+        Assertions.assertEquals(keys.size(), WalBackupData.read(new ByteArrayInputStream(bytes.toByteArray()), header, rows::add));
+        Assertions.assertEquals(keys, rows.stream().map(WalBackupRow::key).toList());
+        assertTrue(rows.get(2).version().deleted());
+        for (int i = 0; i < rows.size(); i++) {
+            if (i != 2) {
+                assertArrayEquals(new byte[]{(byte) i}, rows.get(i).version().value());
+            }
         }
     }
 
-    /** 后续字节、错误行数和错误引擎身份都不能被当成同一份完整备份。 */
-    @Test void rejectsTrailingDataWrongFooterAndIdentity() throws Exception {
-        byte[] bytes = encoded(); byte[] trailing = java.util.Arrays.copyOf(bytes, bytes.length + 1);
-        assertThrows(IOException.class, () -> WalBackupData.read(new ByteArrayInputStream(trailing), header(), row -> { }));
-        bytes[bytes.length - 1] ^= 1;
-        assertThrows(IOException.class, () -> WalBackupData.read(new ByteArrayInputStream(bytes), header(), row -> { }));
-        assertThrows(IOException.class, () -> WalBackupData.read(new ByteArrayInputStream(encoded()),
-                new WalBackupData.Header(UUID.randomUUID(), "a", header().boundary()), row -> { }));
+    /**
+     * Every incomplete prefix must be rejected, even if it happens to contain a number of complete lines.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void everyTruncatedPrefixIsRejected() throws Exception {
+        byte[] valid = encoded();
+        for (int size = 0; size < valid.length; size++) {
+            byte[] prefix = java.util.Arrays.copyOf(valid, size);
+            assertThrows(IOException.class, () -> WalBackupData.read(new ByteArrayInputStream(prefix), header(), row -> {
+            }));
+        }
     }
 
-    /** 重复或倒序键、越界版本和重复结束均必须在编码时拒绝。 */
-    @Test void writerRejectsInvalidOrderAndBoundary() throws Exception {
+    /**
+     * Subsequent bytes, error lines and error engine identity cannot be used as the same complete backup.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void rejectsTrailingDataWrongFooterAndIdentity() throws Exception {
+        byte[] bytes = encoded();
+        byte[] trailing = java.util.Arrays.copyOf(bytes, bytes.length + 1);
+        assertThrows(IOException.class, () -> WalBackupData.read(new ByteArrayInputStream(trailing), header(), row -> {
+        }));
+        bytes[bytes.length - 1] ^= 1;
+        assertThrows(IOException.class, () -> WalBackupData.read(new ByteArrayInputStream(bytes), header(), row -> {
+        }));
+        assertThrows(IOException.class, () -> WalBackupData.read(new ByteArrayInputStream(encoded()),
+                new WalBackupData.Header(UUID.randomUUID(), "a", header().boundary()), row -> {
+                }));
+    }
+
+    /**
+     * Repeats or reverses keys, crosses version and repeats end must be rejected at the encoding.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void writerRejectsInvalidOrderAndBoundary() throws Exception {
         var writer = new WalBackupData.Writer(new ByteArrayOutputStream(), header());
         writer.accept(new WalBackupRow("b", new WalValue(1, null)));
         assertThrows(IOException.class, () -> writer.accept(new WalBackupRow("b", new WalValue(2, null))));
         assertThrows(IOException.class, () -> writer.accept(new WalBackupRow("a", new WalValue(2, null))));
         assertThrows(IOException.class, () -> writer.accept(new WalBackupRow("c", new WalValue(11, null))));
-        writer.finish(); assertThrows(IOException.class, writer::finish);
+        writer.finish();
+        assertThrows(IOException.class, writer::finish);
         assertThrows(IllegalArgumentException.class, () -> new WalBackupRow("k", new WalValue(0, null)));
     }
 
-    /** 提供可稳定复现且不同测试调用一致的头部。 */
-    private static WalBackupData.Header header() { return new WalBackupData.Header(new UUID(1, 2), "a", new WalCheckpoint(10, "0".repeat(64))); }
+    /**
+     * Provides a stable re-emergence and consistent call for different tests on the head.
+     *
+     * @return the operation result
+     */
+    private static WalBackupData.Header header() {
+        return new WalBackupData.Header(new UUID(1, 2), "a", new WalCheckpoint(10, "0".repeat(64)));
+    }
 
-    /** 生成真实的完整格式样本，供逐字节截断和损坏测试使用。 */
+    /**
+     * Generates a genuine, complete-format sample for use in the byte cut and damage test.
+     *
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
     private static byte[] encoded() throws IOException {
-        var buffer = new ByteArrayOutputStream(); var writer = new WalBackupData.Writer(buffer, header());
-        writer.accept(new WalBackupRow("key", new WalValue(1, new byte[]{1, 2, 3}))); writer.finish(); return buffer.toByteArray();
+        var buffer = new ByteArrayOutputStream();
+        var writer = new WalBackupData.Writer(buffer, header());
+        writer.accept(new WalBackupRow("key", new WalValue(1, new byte[]{1, 2, 3})));
+        writer.finish();
+        return buffer.toByteArray();
     }
 }

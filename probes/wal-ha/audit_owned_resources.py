@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""只核对证据中明确记录的自有容器、网络及探针进程，不停止或删除任何资源。"""
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Inspect only explicitly recorded test-owned containers, networks and probe processes; do not stop or delete resources."""
 import argparse
 import json
 import re
@@ -8,7 +22,7 @@ from pathlib import Path
 
 
 def owned_resources(base):
-    """从测试创建记录取精确身份，不把任意散列或主机 PID 当作测试资源。"""
+    """Read exact identities from test creation records, not arbitrary hashes or host PIDs."""
     containers, networks, pids = set(), set(), set()
     for path in base.rglob('*.log'):
         containers.update(re.findall(r'Container [^\n]+ is starting: ([a-f0-9]{64})', path.read_text(errors='replace')))
@@ -30,13 +44,13 @@ def owned_resources(base):
 
 
 def inspect(base):
-    """核对 Docker 可访问后逐项检查，不能将服务不可用误判为资源已清理。"""
+    """Verify Docker availability before inspection; an unavailable service is not proof of resource cleanup."""
     containers, networks, pids = owned_resources(base)
     server = subprocess.run(['docker', 'version', '--format', '{{.Server.Version}}'], capture_output=True, text=True, timeout=30)
     assert server.returncode == 0 and server.stdout.strip(), 'Docker server audit unavailable'
     present = []
     for kind, ids in [('container', containers), ('network', networks)]:
-        # 分批控制命令参数和输出规模，只检查上述创建记录的明确对象。
+        # Bound command arguments and output in batches, inspecting only objects from explicit creation records.
         ordered = sorted(ids)
         for offset in range(0, len(ordered), 64):
             result = subprocess.run(['docker', kind, 'inspect', *ordered[offset:offset + 64]], capture_output=True, text=True, timeout=30)
@@ -56,7 +70,7 @@ def inspect(base):
 
 
 def main():
-    """输出只含脱敏计数与残留身份；发现残留只报错，由明确授权的清理流程处理。"""
+    """Report redacted counts and remaining identities; report leftovers without cleaning them up."""
     parser = argparse.ArgumentParser()
     parser.add_argument('directory', type=Path)
     args = parser.parse_args()

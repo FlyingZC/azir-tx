@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -6,37 +22,57 @@ import com.flyingzc.azir.txn.TransactionManager;
 import java.util.Objects;
 
 /**
- * Azir SQL 引擎，负责创建绑定事务管理器和 SQL 组件的会话。
+ * The Azir SQL engine, responsible for creating session components that bind the transaction manager and SQL components.
  */
 public final class AzirSqlEngine implements SqlEngine {
+
     private final TransactionManager transactionManager;
+
     private final SqlPlanner planner;
+
     private final ShardResolver shardResolver;
+
     private final SqlValueCodec valueCodec;
+
     private final IsolationLevel defaultIsolationLevel;
+
     private final SqlStorageKeyCodec keyCodec;
+
     private final SqlExecutionOptions executionOptions;
 
     /**
-     * 构造 Azir SQL 引擎。
+     * Construct the Azir SQL engine.
+     *
+     * @param transactionManager transaction manager
+     * @param planner planner
+     * @param shardResolver shard resolver
+     * @param valueCodec value codec
+     * @param defaultIsolationLevel default isolation level
      */
-    public AzirSqlEngine(TransactionManager transactionManager,
-                         SqlPlanner planner,
-                         ShardResolver shardResolver,
-                         SqlValueCodec valueCodec,
-                         IsolationLevel defaultIsolationLevel) {
+    public AzirSqlEngine(final TransactionManager transactionManager,
+                         final SqlPlanner planner,
+                         final ShardResolver shardResolver,
+                         final SqlValueCodec valueCodec,
+                         final IsolationLevel defaultIsolationLevel) {
         this(transactionManager, planner, shardResolver, valueCodec, defaultIsolationLevel, SqlExecutionOptions.defaults());
     }
 
     /**
-     * 构造可配置分页大小与结果预算的引擎，保留计划器可插拔接口。
+     * Construct an engine that can configure page size and result budget, save the planner to insert interface.
+     *
+     * @param transactionManager transaction manager
+     * @param planner planner
+     * @param shardResolver shard resolver
+     * @param valueCodec value codec
+     * @param defaultIsolationLevel default isolation level
+     * @param executionOptions execution options
      */
-    public AzirSqlEngine(TransactionManager transactionManager,
-                         SqlPlanner planner,
-                         ShardResolver shardResolver,
-                         SqlValueCodec valueCodec,
-                         IsolationLevel defaultIsolationLevel,
-                         SqlExecutionOptions executionOptions) {
+    public AzirSqlEngine(final TransactionManager transactionManager,
+                         final SqlPlanner planner,
+                         final ShardResolver shardResolver,
+                         final SqlValueCodec valueCodec,
+                         final IsolationLevel defaultIsolationLevel,
+                         final SqlExecutionOptions executionOptions) {
         this.transactionManager = transactionManager;
         this.planner = planner;
         this.shardResolver = shardResolver;
@@ -47,35 +83,49 @@ public final class AzirSqlEngine implements SqlEngine {
     }
 
     /**
-     * 创建使用 Calcite 计划器的 Azir SQL 引擎。
+     * Creates the Azir SQL engine using Calcite Schemer.
+     *
+     * @param transactionManager transaction manager
+     * @param shardResolver shard resolver
+     * @param valueCodec value codec
+     * @param defaultIsolationLevel default isolation level
+     * @return the operation result
      */
-    public static AzirSqlEngine calcite(TransactionManager transactionManager,
-                                        ShardResolver shardResolver,
-                                        SqlValueCodec valueCodec,
-                                        IsolationLevel defaultIsolationLevel) {
+    public static AzirSqlEngine calcite(final TransactionManager transactionManager,
+                                        final ShardResolver shardResolver,
+                                        final SqlValueCodec valueCodec,
+                                        final IsolationLevel defaultIsolationLevel) {
         return calcite(transactionManager, shardResolver, valueCodec, defaultIsolationLevel, SqlExecutionOptions.defaults());
     }
 
     /**
-     * 创建配置分页大小和结果预算的 Calcite 引擎。
+     * Creates the Calcite engine that configures page size and result budget.
+     *
+     * @param transactionManager transaction manager
+     * @param shardResolver shard resolver
+     * @param valueCodec value codec
+     * @param defaultIsolationLevel default isolation level
+     * @param executionOptions execution options
+     * @return the operation result
      */
-    public static AzirSqlEngine calcite(TransactionManager transactionManager,
-                                        ShardResolver shardResolver,
-                                        SqlValueCodec valueCodec,
-                                        IsolationLevel defaultIsolationLevel,
-                                        SqlExecutionOptions executionOptions) {
+    public static AzirSqlEngine calcite(final TransactionManager transactionManager,
+                                        final ShardResolver shardResolver,
+                                        final SqlValueCodec valueCodec,
+                                        final IsolationLevel defaultIsolationLevel,
+                                        final SqlExecutionOptions executionOptions) {
         return new AzirSqlEngine(
                 transactionManager,
                 new CalciteSqlPlanner(),
                 shardResolver,
                 valueCodec,
                 defaultIsolationLevel,
-                executionOptions
-        );
+                executionOptions);
     }
 
     /**
-     * 创建新的 SQL 会话。
+     * Creates new SQL session.
+     *
+     * @return the operation result
      */
     @Override
     public SqlSession openSession() {
@@ -86,7 +136,6 @@ public final class AzirSqlEngine implements SqlEngine {
                 valueCodec,
                 keyCodec,
                 defaultIsolationLevel,
-                executionOptions
-        );
+                executionOptions);
     }
 }

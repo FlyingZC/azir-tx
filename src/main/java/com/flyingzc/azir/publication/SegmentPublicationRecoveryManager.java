@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -14,16 +30,27 @@ import java.util.Objects;
 
 import static com.flyingzc.azir.metadata.TransactionMetadataValidation.validateParticipant;
 
-/** 按分段槽与中心元数据的同一持久终态恢复参与者和过期未决事务。 */
+/**
+ * The same durable terminal state recovery participant and expired pending transaction by segment slot with central metadata.
+ */
 public final class SegmentPublicationRecoveryManager {
+
     private final MysqlSegmentPublicationLedger ledger;
+
     private final TransactionMetadataStore metadataStore;
+
     private final Map<String, StorageAdapter> adapters;
 
-    /** 校验恢复路由并让参与者读取使用相同中心元数据权威。 */
-    public SegmentPublicationRecoveryManager(MysqlSegmentPublicationLedger ledger,
-                                             TransactionMetadataStore metadataStore,
-                                             Map<String, StorageAdapter> adapters) {
+    /**
+     * Validate recovery route and allow participant to read the same central metadata authority.
+     *
+     * @param ledger ledger
+     * @param metadataStore metadata store
+     * @param adapters adapters
+     */
+    public SegmentPublicationRecoveryManager(final MysqlSegmentPublicationLedger ledger,
+                                             final TransactionMetadataStore metadataStore,
+                                             final Map<String, StorageAdapter> adapters) {
         this.ledger = Objects.requireNonNull(ledger, "ledger");
         this.metadataStore = Objects.requireNonNull(metadataStore, "metadataStore");
         this.adapters = Map.copyOf(adapters);
@@ -36,8 +63,14 @@ public final class SegmentPublicationRecoveryManager {
         });
     }
 
-    /** 有槽终态时幂等补物化；无槽且租约已失效时安全中止遗留意向。 */
-    public boolean recover(long txId) {
+    /**
+     * Idempotent to materialization with slot terminal state; security aborted intent when no slot and lease expired.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    public boolean recover(final long txId) {
         PublicationEntry entry = ledger.findByTxId(txId).orElse(null);
         TxRecord record = metadataStore.get(txId).orElse(null);
         if (entry != null) {
@@ -82,8 +115,15 @@ public final class SegmentPublicationRecoveryManager {
         return true;
     }
 
-    /** 本地候选到期或 owner 被 fencing 后，以分片终态证明补同一个中心时间槽。 */
-    private boolean recoverLocalPending(PublicationEntry entry, TxRecord record) {
+    /**
+     * Local Candidates are due or owner is replaced by the same central slot with shard terminal proof.
+     *
+     * @param entry entry
+     * @param record record
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private boolean recoverLocalPending(final PublicationEntry entry, final TxRecord record) {
         long txId = entry.txId();
         long now = metadataStore.currentTimeMillis();
         if (!ledger.localPendingRecoverable(entry.commitTs(), now)) {
@@ -97,11 +137,10 @@ public final class SegmentPublicationRecoveryManager {
         }
         String participant = record.participants().iterator().next();
         StorageAdapter adapter = requireAdapter(participant, txId);
-        // 本地 abort 与在途 directCommit 在参与者事务行上串行，再读取真正持久终态。
+        // Local abort and directcommittee in transit line participant transaction to read the real durable terminal state.
         adapter.abort(txId);
-        ParticipantRecord local = adapter.participantRecord(txId).orElseThrow(() ->
-                new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                        "segmented local candidate has no participant proof", false, txId));
+        ParticipantRecord local = adapter.participantRecord(txId).orElseThrow(() -> new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                "segmented local candidate has no participant proof", false, txId));
         if (local.txId() != txId || local.startTs() != record.startTs()) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
                     "segmented local proof has wrong transaction identity", false, txId);
@@ -121,8 +160,14 @@ public final class SegmentPublicationRecoveryManager {
         return recover(txId);
     }
 
-    /** 中心与槽必须同为 COMMITTED 或 ABORTED，才可重放相应的参与者终态。 */
-    private void materialize(PublicationEntry entry, TxRecord record) {
+    /**
+     * Centers and slots must be the same as COMMITTED or ABORTED for replay to match participant terminal state.
+     *
+     * @param entry entry
+     * @param record record
+     * @throws MvccException if the operation cannot complete
+     */
+    private void materialize(final PublicationEntry entry, final TxRecord record) {
         if (entry.status() == PublicationEntryStatus.COMMITTED) {
             if (record.status() != TxStatus.COMMITTED || record.commitTs() == null
                     || record.commitTs() != entry.commitTs()) {
@@ -150,13 +195,14 @@ public final class SegmentPublicationRecoveryManager {
                 ParticipantRecord local = adapter.participantRecord(entry.txId()).orElse(null);
                 if (local != null && (local.startTs() != record.startTs()
                         || local.status() != (entry.status() == PublicationEntryStatus.COMMITTED
-                                ? TxStatus.COMMITTED : TxStatus.ABORTED)
+                                ? TxStatus.COMMITTED
+                                : TxStatus.ABORTED)
                         || (entry.status() == PublicationEntryStatus.COMMITTED
                                 && !Objects.equals(local.commitTs(), entry.commitTs())))) {
                     throw new MvccException(ErrorCode.ILLEGAL_STATE,
                             "participant terminal proof differs from segmented decision", false, entry.txId());
                 }
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 failure = accumulate(failure, ex);
             }
         }
@@ -165,8 +211,13 @@ public final class SegmentPublicationRecoveryManager {
         }
     }
 
-    /** 中心未决事务到期后逐分片 fencing，任一失败保留未 finalized 记录供下轮重试。 */
-    private void abortParticipants(TxRecord record) {
+    /**
+     * Center pending transaction expires by shard closing, with any failure to keep unfinalized records for next round retry.
+     *
+     * @param record record
+     * @throws MvccException if the operation cannot complete
+     */
+    private void abortParticipants(final TxRecord record) {
         RuntimeException failure = null;
         for (String participant : record.participants()) {
             try {
@@ -178,7 +229,7 @@ public final class SegmentPublicationRecoveryManager {
                     throw new MvccException(ErrorCode.ILLEGAL_STATE,
                             "expired undecided participant was not fenced", false, record.txId());
                 }
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 failure = accumulate(failure, ex);
             }
         }
@@ -187,8 +238,15 @@ public final class SegmentPublicationRecoveryManager {
         }
     }
 
-    /** 缺少物理分片路由时禁止把中心记录提前标记为已完成。 */
-    private StorageAdapter requireAdapter(String shardId, long txId) {
+    /**
+     * In the absence of physical shard route, it is prohibited to mark the centre record as completed.
+     *
+     * @param shardId logical shard identifier
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private StorageAdapter requireAdapter(final String shardId, final long txId) {
         StorageAdapter adapter = adapters.get(shardId);
         if (adapter == null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -197,8 +255,14 @@ public final class SegmentPublicationRecoveryManager {
         return adapter;
     }
 
-    /** 在保留首个故障的同时收集其余分片异常。 */
-    private RuntimeException accumulate(RuntimeException first, RuntimeException next) {
+    /**
+     * Keeps the first failure while collecting the remaining shard anomalies.
+     *
+     * @param first first
+     * @param next next
+     * @return the operation result
+     */
+    private RuntimeException accumulate(final RuntimeException first, final RuntimeException next) {
         if (first == null) {
             return next;
         }

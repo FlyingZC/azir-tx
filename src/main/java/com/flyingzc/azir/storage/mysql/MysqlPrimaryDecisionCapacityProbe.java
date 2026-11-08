@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -22,18 +38,25 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 主分片单次登记预写、次片预写、主决议、切面和有界物化的隔离容量探针。 */
+/**
+ * Primary shard Single registration prewrite, secondary prewrite, main decision, cut face and bounded materialization quarantine capacity probe.
+ */
 public final class MysqlPrimaryDecisionCapacityProbe {
-    /** 每个后台任务只保存已经 ACK 的事务身份。 */
-    private record Committed(long txId, String primaryKey, String secondaryKey, long decisionSequence) {
-    }
 
-    /** 容量探针不保存全局运行状态。 */
+    /**
+     * Volume probe does not save global running state.
+     */
     private MysqlPrimaryDecisionCapacityProbe() {
     }
 
-    /** 显式重置隔离数据库后运行有限并发和有限持续时间的完整写入实验。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * A full writing experiment with limited concurrent and limited duration after the visible reset-separation database.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("primary decision probe requires AZIR_TX_RESET=true");
         }
@@ -49,34 +72,57 @@ public final class MysqlPrimaryDecisionCapacityProbe {
         }
         String user = env("AZIR_TX_USERNAME", "root");
         String password = env("AZIR_TX_PASSWORD", "root");
-        try (HikariDataSource primary = pool(env("AZIR_TX_SHARD1_JDBC",
-                "jdbc:mysql://127.0.0.1:23307/shard_1"), user, password);
-             HikariDataSource secondary = pool(env("AZIR_TX_SHARD2_JDBC",
-                     "jdbc:mysql://127.0.0.1:23308/shard_2"), user, password)) {
+        try (
+                HikariDataSource primary = pool(env("AZIR_TX_SHARD1_JDBC",
+                        "jdbc:mysql://127.0.0.1:23307/shard_1"), user, password);
+                HikariDataSource secondary = pool(env("AZIR_TX_SHARD2_JDBC",
+                        "jdbc:mysql://127.0.0.1:23308/shard_2"), user, password)) {
             MysqlStripedCrossVersionPrototype.initializeIsolated(primary, stripes);
             MysqlStripedCrossVersionPrototype.initializeIsolated(secondary, stripes);
             var decisions = new MysqlPrimaryDecisionPrototype(primary, secondary, stripes);
             decisions.initializeIsolated();
             decisions.resetIsolated();
-            try (var reader = new MysqlPrimaryVectorReadPrototype(
-                    "s1", primary, "s2", secondary, stripes, decisions)) {
+            try (
+                    var reader = new MysqlPrimaryVectorReadPrototype(
+                            "s1", primary, "s2", secondary, stripes, decisions)) {
                 run(primary, secondary, decisions, reader, concurrency, seconds,
                         stripes, backgroundWorkers, backlogLimit);
             }
         }
     }
 
-    /** 与当前产品容量探针复用同一 JDBC 池配置。 */
-    private static HikariDataSource pool(String url, String user, String password) {
+    /**
+     * Same JDBC pool configuration as current product capacity probe.
+     *
+     * @param url url
+     * @param user user
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String url, final String user, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.create(url, user, password);
     }
 
-    /** 所有客户端独立申请事务号，后台持续物化且队列容量形成明确背压。 */
-    private static void run(HikariDataSource primary, HikariDataSource secondary,
-                            MysqlPrimaryDecisionPrototype decisions,
-                            MysqlPrimaryVectorReadPrototype reader,
-                            int concurrency, int seconds, int stripes,
-                            int backgroundWorkers, int backlogLimit) throws Exception {
+    /**
+     * All clients apply for transaction ID, background on a continuous materialization basis and line capacity to form a clear back pressure.
+     *
+     * @param primary original Percolator primary identity
+     * @param secondary secondary
+     * @param decisions decisions
+     * @param reader reader
+     * @param concurrency concurrency
+     * @param seconds seconds
+     * @param stripes stripes
+     * @param backgroundWorkers background workers
+     * @param backlogLimit backlog limit
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static void run(final HikariDataSource primary, final HikariDataSource secondary,
+                            final MysqlPrimaryDecisionPrototype decisions,
+                            final MysqlPrimaryVectorReadPrototype reader,
+                            final int concurrency, final int seconds, final int stripes,
+                            final int backgroundWorkers, final int backlogLimit) throws Exception {
         ArrayBlockingQueue<Committed> backlog = new ArrayBlockingQueue<>(backlogLimit);
         AtomicLong nextId = new AtomicLong(1);
         LongAdder acknowledged = new LongAdder();
@@ -92,8 +138,9 @@ public final class MysqlPrimaryDecisionCapacityProbe {
         CountDownLatch ready = new CountDownLatch(concurrency);
         CountDownLatch start = new CountDownLatch(1);
         CountDownLatch frontDone = new CountDownLatch(concurrency);
-        try (var clients = Executors.newFixedThreadPool(concurrency);
-             var recovery = Executors.newFixedThreadPool(backgroundWorkers)) {
+        try (
+                var clients = Executors.newFixedThreadPool(concurrency);
+                var recovery = Executors.newFixedThreadPool(backgroundWorkers)) {
             for (int worker = 0; worker < backgroundWorkers; worker++) {
                 recovery.submit(() -> {
                     while (producersRunning.get() || !backlog.isEmpty()) {
@@ -109,7 +156,7 @@ public final class MysqlPrimaryDecisionCapacityProbe {
                                     committed.secondaryKey(), committed.txId(),
                                     committed.decisionSequence(), tx -> committedSequence(decisions, tx));
                             materialized.increment();
-                        } catch (Throwable failure) {
+                        } catch (final Throwable failure) {
                             failures.increment();
                             firstFailure.compareAndSet(null, failure);
                         }
@@ -136,7 +183,7 @@ public final class MysqlPrimaryDecisionCapacityProbe {
                                     primaryStripe, secondaryStripe, 0, 0,
                                     System.currentTimeMillis() + 60_000, decisionStripe);
                             long stage = System.nanoTime();
-                            // 主持久身份必须先于次片预写，避免崩溃后出现无主决议的孤儿意向。
+                            // The main durable identity must precede the secondary prewrite to avoid orphan intent after collapse.
                             long primarySequence = decisions.registerAndPrewritePrimary(registration);
                             long secondarySequence = MysqlStripedCrossVersionPrototype.prewrite(
                                     secondary, secondaryKey, value, secondaryStripe, txId, 0);
@@ -164,7 +211,7 @@ public final class MysqlPrimaryDecisionCapacityProbe {
                             acknowledged.increment();
                             ackLatencies.add(System.nanoTime() - began);
                         }
-                    } catch (Throwable failure) {
+                    } catch (final Throwable failure) {
                         failures.increment();
                         firstFailure.compareAndSet(null, failure);
                     } finally {
@@ -193,7 +240,7 @@ public final class MysqlPrimaryDecisionCapacityProbe {
             double elapsed = (measuredEnd - measuredStart) / 1_000_000_000.0;
             long p99 = ackLatencies.isEmpty() ? 0
                     : ackLatencies.get(Math.min(ackLatencies.size() - 1,
-                    (int) Math.ceil(ackLatencies.size() * 0.99) - 1));
+                            (int) Math.ceil(ackLatencies.size() * 0.99) - 1));
             long durableDecisions = count(primary,
                     "select count(*) from bench_primary_txn_v2 where status = 'COMMITTED'");
             long durableDecisionSequence = count(primary,
@@ -203,11 +250,11 @@ public final class MysqlPrimaryDecisionCapacityProbe {
             long secondaryVersions = count(secondary,
                     "select count(*) from bench_striped_mvcc_cross_data");
             System.out.printf("primary decision: clients=%d stripes=%d bg_workers=%d seconds=%.3f ack=%d "
-                            + "tps=%.1f p99_ms=%.3f materialized=%d backlog_max=%d "
-                            + "backlog_at_stop=%d backlog_final=%d drain_seconds=%.3f "
-                            + "durable_decisions=%d decision_seq_sum=%d versions=%d/%d "
-                            + "failures=%d prewrite_avg_ms=%.3f "
-                            + "decision_avg_ms=%.3f cut_avg_ms=%.3f%n",
+                    + "tps=%.1f p99_ms=%.3f materialized=%d backlog_max=%d "
+                    + "backlog_at_stop=%d backlog_final=%d drain_seconds=%.3f "
+                    + "durable_decisions=%d decision_seq_sum=%d versions=%d/%d "
+                    + "failures=%d prewrite_avg_ms=%.3f "
+                    + "decision_avg_ms=%.3f cut_avg_ms=%.3f%n",
                     concurrency, stripes, backgroundWorkers, elapsed, count,
                     count / elapsed, p99 / 1_000_000.0,
                     materialized.sum(), highWater.get(), pendingAtStop,
@@ -226,18 +273,33 @@ public final class MysqlPrimaryDecisionCapacityProbe {
         }
     }
 
-    /** 物化只接受主分片持久 COMMITTED 状态与同一决议序号。 */
-    private static OptionalLong committedSequence(MysqlPrimaryDecisionPrototype decisions, long txId) {
+    /**
+     * Materialization accepts the same decision serial number only for primary shard durable COMMITTED.
+     *
+     * @param decisions decisions
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    private static OptionalLong committedSequence(final MysqlPrimaryDecisionPrototype decisions, final long txId) {
         var decision = decisions.decision(txId).orElseThrow();
         return decision.status() == TxStatus.COMMITTED
-                ? OptionalLong.of(decision.decisionSequence()) : OptionalLong.empty();
+                ? OptionalLong.of(decision.decisionSequence())
+                : OptionalLong.empty();
     }
 
-    /** 从物理表读取最终行数，防止后台任务计数掩盖实际持久化缺口。 */
-    private static long count(HikariDataSource dataSource, String sql) throws SQLException {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement query = connection.prepareStatement(sql);
-             ResultSet result = query.executeQuery()) {
+    /**
+     * Reads the final line number from the physical table to prevent background task count from covering the actual durable storage gap.
+     *
+     * @param dataSource database connection source
+     * @param sql sql
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long count(final HikariDataSource dataSource, final String sql) throws SQLException {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement query = connection.prepareStatement(sql);
+                ResultSet result = query.executeQuery()) {
             if (!result.next()) {
                 throw new SQLException("primary decision count query returned no row");
             }
@@ -245,14 +307,37 @@ public final class MysqlPrimaryDecisionCapacityProbe {
         }
     }
 
-    /** 阶段累计时间按实际 ACK 数换算为每笔平均毫秒。 */
-    private static double averageMillis(long totalNanos, long count) {
+    /**
+     * The cumulative period of the phase is converted to an average millisecond for each ACK number.
+     *
+     * @param totalNanos total nanos
+     * @param count count
+     * @return the operation result
+     */
+    private static double averageMillis(final long totalNanos, final long count) {
         return count == 0 ? 0 : totalNanos / 1_000_000.0 / count;
     }
 
-    /** 测试参数来自环境变量，缺失时使用隔离实验默认值。 */
-    private static String env(String key, String defaultValue) {
+    /**
+     * Test parameters are derived from environmental variables and use the quarantine test default when missing.
+     *
+     * @param key business key
+     * @param defaultValue default value
+     * @return the operation result
+     */
+    private static String env(final String key, final String defaultValue) {
         String value = System.getenv(key);
         return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    /**
+     * Only transaction identity of already ACK is saved for each background job.
+     *
+     * @param txId transaction identifier
+     * @param primaryKey primary key
+     * @param secondaryKey secondary key
+     * @param decisionSequence decision sequence
+     */
+    private record Committed(long txId, String primaryKey, String secondaryKey, long decisionSequence) {
     }
 }

@@ -1,4 +1,26 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.zaxxer.hikari.HikariDataSource;
 import com.flyingzc.azir.api.Transaction;
@@ -46,24 +68,29 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
-/** 真实两分片 MySQL 下验证账本事务入口的全局 RC/RR 快照。 */
+/**
+ * Global RC/RR snapshot at transaction entrance for real two shard MySQL accounts.
+ */
 @Testcontainers
 class LedgerTransactionManagerIntegrationTest {
+
     @Container
     private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4")
             .withDatabaseName("bootstrap").withUsername("test").withPassword("test");
+
     private static HikariDataSource control;
+
     private static HikariDataSource firstData;
+
     private static HikariDataSource secondData;
+
     private MysqlPublicationLedger ledger;
 
-    /** 创建隔离控制库和两个物理分片。 */
+    /**
+     * Creates a quarantine control library and two physical shard.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeAll
     static void initializeDatabases() throws Exception {
         createDatabase("control");
@@ -78,30 +105,49 @@ class LedgerTransactionManagerIntegrationTest {
         new MysqlStorageAdapter("s2", secondData).initialize();
     }
 
-    /** 用容器内管理员创建库并授权给隔离测试用户。 */
-    private static void createDatabase(String database) throws Exception {
+    /**
+     * Create a library with an in-container administrator and authorize quarantine test users.
+     *
+     * @param database database
+     * @throws Exception if the operation cannot complete
+     */
+    private static void createDatabase(final String database) throws Exception {
         MYSQL.execInContainer("mysql", "-uroot", "-p" + MYSQL.getPassword(), "-e",
                 "create database if not exists `" + database + "`; "
                         + "grant all privileges on `" + database + "`.* to '" + MYSQL.getUsername() + "'@'%'; "
                         + "flush privileges;");
     }
 
-    /** 根据同一容器端口建立各库独立连接池。 */
-    private static HikariDataSource pool(String database) {
+    /**
+     * Create separate libraries based on the same container port connection pool.
+     *
+     * @param database database
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String database) {
         return (HikariDataSource) MysqlDataSourceFactory.create(
                 MYSQL.getJdbcUrl().replace("/bootstrap", "/" + database),
                 MYSQL.getUsername(), MYSQL.getPassword());
     }
 
-    /** 关闭本类创建的三个连接池。 */
+    /**
+     * Closes the three connection pool created by this class.
+     */
     @AfterAll
     static void closeDatabases() {
-        if (control != null) control.close();
-        if (firstData != null) firstData.close();
-        if (secondData != null) secondData.close();
+        if (control != null)
+            control.close();
+        if (firstData != null)
+            firstData.close();
+        if (secondData != null)
+            secondData.close();
     }
 
-    /** 每个用例清空旧时间线并重新建立版本化账本状态。 */
+    /**
+     * Each example emptys the old time line and recreates the version account book status.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeEach
     void reset() throws Exception {
         try (Connection connection = control.getConnection(); Statement statement = connection.createStatement()) {
@@ -127,8 +173,13 @@ class LedgerTransactionManagerIntegrationTest {
         ledger.initialize();
     }
 
-    /** 清除分片意向、版本和本地终态，保留初始化后的安全水位行。 */
-    private void clearShard(HikariDataSource dataSource) throws Exception {
+    /**
+     * Clear shard intent, version and local terminal state, keep the initialised security watermark rows.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
+     */
+    private void clearShard(final HikariDataSource dataSource) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.executeUpdate("delete from mvcc_intent");
             statement.executeUpdate("delete from mvcc_data");
@@ -139,13 +190,22 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 创建同步物化的账本模式，用相同控制权威连接两分片。 */
+    /**
+     * Creates a synchronized materialization account mode with the same control of authority connection 2 shard.
+     *
+     * @return the operation result
+     */
     private TransactionManager manager() {
         return manager(false);
     }
 
-    /** 按需启用批量决议以验证与正常 RC/RR 入口的组合。 */
-    private TransactionManager manager(boolean batchControlCommit) {
+    /**
+     * Enables a combination of batch decision with verify and the normal RC/RR entry on demand.
+     *
+     * @param batchControlCommit batch control commit
+     * @return the operation result
+     */
+    private TransactionManager manager(final boolean batchControlCommit) {
         var metadata = new MysqlTransactionMetadataStore(control);
         var options = new TransactionOptions(LockWaitPolicy.failFast(), TransactionRetryPolicy.noRetry(),
                 CrossShardCommitPolicy.parallel(), true, true, false);
@@ -156,34 +216,38 @@ class LedgerTransactionManagerIntegrationTest {
                 NoOpTransactionMetrics.INSTANCE, ledger, batchControlCommit, 2, true);
     }
 
-    /** 已持久激活账本后，旧 MySQL 管理器必须在构造期拒绝启动。 */
+    /**
+     * The old MySQL manager must refuse to start during the construction period after durable has been activated.
+     */
     @Test
     void legacyManagerMustRejectActivatedLedgerBeforeBegin() {
         var metadata = new MysqlTransactionMetadataStore(control);
         var first = new MysqlStorageAdapter("s1", firstData, metadata);
-        MvccException rejected = assertThrows(MvccException.class, () ->
-                new TransactionManager(new MysqlTimestampOracle(control), metadata,
-                        NoOpSafePointStore.INSTANCE, TransactionOptions.defaults(),
-                        Map.of("s1", first)));
-        assertEquals(ErrorCode.ILLEGAL_STATE, rejected.errorCode());
+        MvccException rejected = assertThrows(MvccException.class, () -> new TransactionManager(new MysqlTimestampOracle(control), metadata,
+                NoOpSafePointStore.INSTANCE, TransactionOptions.defaults(),
+                Map.of("s1", first)));
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE, rejected.errorCode());
         assertTrue(rejected.getMessage().contains("activated publication mode"));
     }
 
-    /** 分段模式已归档旧时间线时，旧管理器也必须在构造期停止。 */
+    /**
+     * The old manager must also stop during the construction period when the segment mode has been archived with the old time line.
+     */
     @Test
     void legacyManagerMustRejectSegmentModeBeforeBegin() {
         new MysqlSegmentPublicationLedger(control).activateFromLedger();
         var metadata = new MysqlTransactionMetadataStore(control);
         var first = new MysqlStorageAdapter("s1", firstData, metadata);
-        MvccException rejected = assertThrows(MvccException.class, () ->
-                new TransactionManager(new MysqlTimestampOracle(control), metadata,
-                        NoOpSafePointStore.INSTANCE, TransactionOptions.defaults(),
-                        Map.of("s1", first)));
-        assertEquals(ErrorCode.ILLEGAL_STATE, rejected.errorCode());
+        MvccException rejected = assertThrows(MvccException.class, () -> new TransactionManager(new MysqlTimestampOracle(control), metadata,
+                NoOpSafePointStore.INSTANCE, TransactionOptions.defaults(),
+                Map.of("s1", first)));
+        Assertions.assertEquals(ErrorCode.ILLEGAL_STATE, rejected.errorCode());
         assertTrue(rejected.getMessage().contains("activated publication mode"));
     }
 
-    /** 事务 ID 独立于快照，外部跨分片提交仅对 RC 新语句可见。 */
+    /**
+     * Transaction ID is independent of snapshot and external cross-shard commit is only visible for new RC statements.
+     */
     @Test
     void readCommittedRefreshesWhileRepeatableReadKeepsItsPublishedSnapshot() {
         try (var manager = manager()) {
@@ -192,11 +256,11 @@ class LedgerTransactionManagerIntegrationTest {
             manager.put(seed, "s1", "account", bytes("old"));
             manager.put(seed, "s2", "ledger", bytes("old"));
             long firstCommitTs = manager.commit(seed).commitTs();
-            assertEquals(firstCommitTs, ledger.currentPublished());
+            Assertions.assertEquals(firstCommitTs, ledger.currentPublished());
 
             Transaction repeatable = manager.begin(IsolationLevel.REPEATABLE_READ);
             Transaction committed = manager.begin(IsolationLevel.READ_COMMITTED);
-            assertEquals(firstCommitTs, repeatable.startTs());
+            Assertions.assertEquals(firstCommitTs, repeatable.startTs());
             assertArrayEquals(bytes("old"), manager.get(repeatable, "s1", "account").orElseThrow());
             assertArrayEquals(bytes("old"), manager.get(committed, "s2", "ledger").orElseThrow());
 
@@ -215,7 +279,11 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 单分片直接提交跳过意向预写，仍须经账本水位向新快照发布。 */
+    /**
+     * Single shard direct commit skips intent prewrite and must still be issued to the new snapshot by account book watermark.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void singleShardWriteUsesTheSameLedgerPublication() throws Exception {
         try (var manager = manager()) {
@@ -223,12 +291,13 @@ class LedgerTransactionManagerIntegrationTest {
             Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(writer, "s1", "single", bytes("value"));
             var result = manager.commit(writer);
-            assertEquals(TransactionCommitMode.SINGLE_SHARD_FAST_PATH, result.mode());
-            assertEquals(result.commitTs(), ledger.currentPublished());
-            try (Connection connection = firstData.getConnection(); Statement statement = connection.createStatement();
-                 var intents = statement.executeQuery("select count(*) from mvcc_intent")) {
+            Assertions.assertEquals(TransactionCommitMode.SINGLE_SHARD_FAST_PATH, result.mode());
+            Assertions.assertEquals(result.commitTs(), ledger.currentPublished());
+            try (
+                    Connection connection = firstData.getConnection(); Statement statement = connection.createStatement();
+                    var intents = statement.executeQuery("select count(*) from mvcc_intent")) {
                 assertTrue(intents.next());
-                assertEquals(0, intents.getInt(1));
+                Assertions.assertEquals(0, intents.getInt(1));
             }
             Transaction reader = manager.begin(IsolationLevel.READ_COMMITTED);
             assertArrayEquals(bytes("value"), manager.get(reader, "s1", "single").orElseThrow());
@@ -238,32 +307,40 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 默认账本构造器保持吞吐较高的单分片意向提交，直接 1PC 只在显式启用时运行。 */
+    /**
+     * The default account builder maintains a single shard intent commit higher than throughput, and runs directly 1PC only when it is visible.
+     */
     @Test
     void defaultLedgerSingleShardCommitMustRemainIntentBased() {
         var metadata = new MysqlTransactionMetadataStore(control);
         var options = new TransactionOptions(LockWaitPolicy.failFast(), TransactionRetryPolicy.noRetry(),
                 CrossShardCommitPolicy.parallel(), true, true, false);
         var first = new MysqlStorageAdapter("s1", firstData, metadata);
-        try (var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
-                NoOpSafePointStore.INSTANCE, options, Map.of("s1", first),
-                NoOpTransactionMetrics.INSTANCE, ledger)) {
+        try (
+                var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
+                        NoOpSafePointStore.INSTANCE, options, Map.of("s1", first),
+                        NoOpTransactionMetrics.INSTANCE, ledger)) {
             Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(writer, "s1", "intent:default", bytes("value"));
             var result = manager.commit(writer);
-            assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, result.mode());
-            assertEquals(result.commitTs(), ledger.currentPublished());
+            Assertions.assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, result.mode());
+            Assertions.assertEquals(result.commitTs(), ledger.currentPublished());
             Transaction reader = manager.begin(IsolationLevel.READ_COMMITTED);
             assertArrayEquals(bytes("value"), manager.get(reader, "s1", "intent:default").orElseThrow());
             manager.commit(reader);
         }
     }
 
-    /** 并发单分片预留共享一笔控制事务后，已确认写仍遵守全局 RC/RR 快照边界。 */
+    /**
+     * Concurrent Single shard has confirmed that the global RC/RR snapshot border is still being complied with once a shared control transaction has been set aside.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void batchedLocalReservationsMustPreserveReadCommittedAndRepeatableRead() throws Exception {
-        try (var manager = manager(true);
-             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (
+                var manager = manager(true);
+                var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             Transaction oldReader = manager.begin(IsolationLevel.REPEATABLE_READ);
             var ready = new CountDownLatch(8);
             var start = new CountDownLatch(1);
@@ -284,7 +361,7 @@ class LedgerTransactionManagerIntegrationTest {
             for (var commit : commits) {
                 newest = Math.max(newest, commit.get(30, TimeUnit.SECONDS));
             }
-            assertEquals(newest, ledger.currentPublished());
+            Assertions.assertEquals(newest, ledger.currentPublished());
             Transaction newReader = manager.begin(IsolationLevel.READ_COMMITTED);
             for (int index = 0; index < 8; index++) {
                 assertTrue(manager.get(oldReader, "s1", "local:batch:" + index).isEmpty());
@@ -296,7 +373,9 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 单分片直接提交冲突须先取得本地 ABORTED 证明，再解除 PENDING 水位阻塞。 */
+    /**
+     * Single shard direct commit conflict requires local ABORTED proof before PENDING watermark blockages are removed.
+     */
     @Test
     void conflictingSingleShardDirectCommitMustAbortReservedSlot() {
         try (var manager = manager()) {
@@ -306,10 +385,10 @@ class LedgerTransactionManagerIntegrationTest {
             long winnerTs = manager.commit(winner).commitTs();
             manager.put(stale, "s1", "direct:conflict", bytes("stale"));
             MvccException conflict = assertThrows(MvccException.class, () -> manager.commit(stale));
-            assertEquals(ErrorCode.WRITE_CONFLICT, conflict.errorCode());
-            assertEquals(PublicationEntryStatus.ABORTED,
+            Assertions.assertEquals(ErrorCode.WRITE_CONFLICT, conflict.errorCode());
+            Assertions.assertEquals(PublicationEntryStatus.ABORTED,
                     ledger.findByTxId(stale.txId()).orElseThrow().status());
-            assertEquals(winnerTs + 1, ledger.currentPublished());
+            Assertions.assertEquals(winnerTs + 1, ledger.currentPublished());
             manager.rollback(stale);
             Transaction reader = manager.begin(IsolationLevel.READ_COMMITTED);
             assertArrayEquals(bytes("winner"), manager.get(reader, "s1", "direct:conflict").orElseThrow());
@@ -317,7 +396,9 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 批量预留下的写冲突须回滚自己的时间槽，并唤醒等待连续发布的事务。 */
+    /**
+     * The batch pre-encumbered write conflict muster rollback its own time slot and awaken the transaction waiting to be released consecutively.
+     */
     @Test
     void batchedDirectConflictMustReleasePendingPublicationSlot() {
         try (var manager = manager(true)) {
@@ -326,11 +407,11 @@ class LedgerTransactionManagerIntegrationTest {
             manager.put(winner, "s1", "local:batch:conflict", bytes("winner"));
             long winnerTs = manager.commit(winner).commitTs();
             manager.put(stale, "s1", "local:batch:conflict", bytes("stale"));
-            assertEquals(ErrorCode.WRITE_CONFLICT,
+            Assertions.assertEquals(ErrorCode.WRITE_CONFLICT,
                     assertThrows(MvccException.class, () -> manager.commit(stale)).errorCode());
-            assertEquals(PublicationEntryStatus.ABORTED,
+            Assertions.assertEquals(PublicationEntryStatus.ABORTED,
                     ledger.findByTxId(stale.txId()).orElseThrow().status());
-            assertEquals(winnerTs + 1, ledger.currentPublished());
+            Assertions.assertEquals(winnerTs + 1, ledger.currentPublished());
             manager.rollback(stale);
             Transaction reader = manager.begin(IsolationLevel.READ_COMMITTED);
             assertArrayEquals(bytes("winner"), manager.get(reader, "s1", "local:batch:conflict").orElseThrow());
@@ -338,32 +419,44 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 本地直接提交已经落盘但响应丢失时，前台以持久终态补齐中心决议。 */
+    /**
+     * Local When the commit has landed but responded to loss, foreground completes the centre decision with durable terminal state.
+     */
     @Test
     void lostDirectCommitResponseMustResolveFromLocalCommittedProof() {
         var metadata = new MysqlTransactionMetadataStore(control);
         var options = new TransactionOptions(LockWaitPolicy.failFast(), TransactionRetryPolicy.noRetry(),
                 CrossShardCommitPolicy.parallel(), true, true, false);
         var first = new MysqlStorageAdapter("s1", firstData, metadata) {
-            /** 在真实本地提交完成后模拟网络响应丢失。 */
+
+            /**
+             * Simulates the loss of a network response after real local commit is completed.
+             *
+             * @param txId transaction identifier
+             * @param startTs transaction start timestamp
+             * @param commitTs durable commit timestamp
+             * @param mutations transaction write set
+             * @throws MvccException if the operation cannot complete
+             */
             @Override
-            public void directCommit(long txId, long startTs, long commitTs, java.util.List<Mutation> mutations) {
+            public void directCommit(final long txId, final long startTs, final long commitTs, final java.util.List<Mutation> mutations) {
                 super.directCommit(txId, startTs, commitTs, mutations);
                 throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                         "simulated lost local commit response", false, txId);
             }
         };
-        try (var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
-                NoOpSafePointStore.INSTANCE, options, Map.of("s1", first),
-                NoOpTransactionMetrics.INSTANCE, ledger, false, 2, true)) {
+        try (
+                var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
+                        NoOpSafePointStore.INSTANCE, options, Map.of("s1", first),
+                        NoOpTransactionMetrics.INSTANCE, ledger, false, 2, true)) {
             Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(writer, "s1", "direct:response-lost", bytes("committed"));
             var result = manager.commit(writer);
-            assertEquals(TransactionCommitMode.SINGLE_SHARD_FAST_PATH, result.mode());
-            assertEquals(TxStatus.COMMITTED, metadata.get(writer.txId()).orElseThrow().status());
-            assertEquals(PublicationEntryStatus.COMMITTED,
+            Assertions.assertEquals(TransactionCommitMode.SINGLE_SHARD_FAST_PATH, result.mode());
+            Assertions.assertEquals(TxStatus.COMMITTED, metadata.get(writer.txId()).orElseThrow().status());
+            Assertions.assertEquals(PublicationEntryStatus.COMMITTED,
                     ledger.findByTxId(writer.txId()).orElseThrow().status());
-            assertEquals(result.commitTs(), ledger.currentPublished());
+            Assertions.assertEquals(result.commitTs(), ledger.currentPublished());
             Transaction reader = manager.begin(IsolationLevel.READ_COMMITTED);
             assertArrayEquals(bytes("committed"),
                     manager.get(reader, "s1", "direct:response-lost").orElseThrow());
@@ -371,11 +464,16 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 并发批量决议返回后，新 RC 快照看到全部写入，旧 RR 快照仍保持原样。 */
+    /**
+     * Concurrent batch decision returns, new RC snapshot sees all written and old RR snapshot remains as it is.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void batchedCrossShardCommitsPreserveGlobalReadCommittedAndRepeatableRead() throws Exception {
-        try (var manager = manager(true);
-             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (
+                var manager = manager(true);
+                var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             Transaction oldReader = manager.begin(IsolationLevel.REPEATABLE_READ);
             var ready = new CountDownLatch(8);
             var start = new CountDownLatch(1);
@@ -397,7 +495,7 @@ class LedgerTransactionManagerIntegrationTest {
             for (var commit : commits) {
                 newest = Math.max(newest, commit.get(30, TimeUnit.SECONDS));
             }
-            assertEquals(newest, ledger.currentPublished());
+            Assertions.assertEquals(newest, ledger.currentPublished());
             Transaction newReader = manager.begin(IsolationLevel.READ_COMMITTED);
             for (int index = 0; index < 8; index++) {
                 assertTrue(manager.get(oldReader, "s1", "batch:left:" + index).isEmpty());
@@ -412,7 +510,11 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 中心决议已发布而参与者尚未物化时，RC 能解析已提交意向且旧 RR 仍固定旧快照。 */
+    /**
+     * Center decision is capable of parsing commit intent and the old RR is still fixed with the old snapshot when participant has been released.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void asyncLedgerCommitMustRemainVisibleWhileParticipantCommitIsBlocked() throws Exception {
         var metadata = new MysqlTransactionMetadataStore(control);
@@ -422,24 +524,25 @@ class LedgerTransactionManagerIntegrationTest {
         var second = new MysqlStorageAdapter("s2", secondData, metadata);
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
-        try (var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
-                NoOpSafePointStore.INSTANCE, options,
-                Map.of("s1", blockParticipantCommit(first, entered, release),
-                        "s2", blockParticipantCommit(second, entered, release)),
-                NoOpTransactionMetrics.INSTANCE, ledger, true, 2)) {
+        try (
+                var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
+                        NoOpSafePointStore.INSTANCE, options,
+                        Map.of("s1", blockParticipantCommit(first, entered, release),
+                                "s2", blockParticipantCommit(second, entered, release)),
+                        NoOpTransactionMetrics.INSTANCE, ledger, true, 2)) {
             try {
                 Transaction repeatable = manager.begin(IsolationLevel.REPEATABLE_READ);
                 Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
                 manager.put(writer, "s1", "async:left", bytes("left"));
                 manager.put(writer, "s2", "async:right", bytes("right"));
                 var result = manager.commit(writer);
-                assertEquals(TransactionCommitMode.ASYNC_PRIMARY_COMMIT, result.mode());
+                Assertions.assertEquals(TransactionCommitMode.ASYNC_PRIMARY_COMMIT, result.mode());
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
                 assertTrue(first.participantRecord(writer.txId()).orElseThrow().status() != TxStatus.COMMITTED
                         || second.participantRecord(writer.txId()).orElseThrow().status() != TxStatus.COMMITTED);
 
                 Transaction committed = manager.begin(IsolationLevel.READ_COMMITTED);
-                assertEquals(result.commitTs(), committed.startTs());
+                Assertions.assertEquals(result.commitTs(), committed.startTs());
                 assertArrayEquals(bytes("left"), manager.get(committed, "s1", "async:left").orElseThrow());
                 assertArrayEquals(bytes("right"), manager.get(committed, "s2", "async:right").orElseThrow());
                 assertTrue(manager.get(repeatable, "s1", "async:left").isEmpty());
@@ -452,9 +555,16 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 用代理暂停后台物化调用，保留真实分片的预写和快照读取行为。 */
-    private StorageAdapter blockParticipantCommit(StorageAdapter delegate, CountDownLatch entered,
-                                                  CountDownLatch release) {
+    /**
+     * Suspend background materialization call with proxy to keep real shard prewrite and snapshot reading behaviors.
+     *
+     * @param delegate delegate
+     * @param entered entered
+     * @param release release
+     * @return the operation result
+     */
+    private StorageAdapter blockParticipantCommit(final StorageAdapter delegate, final CountDownLatch entered,
+                                                  final CountDownLatch release) {
         return (StorageAdapter) Proxy.newProxyInstance(StorageAdapter.class.getClassLoader(),
                 new Class<?>[]{StorageAdapter.class}, (proxy, method, args) -> {
                     if (method.getName().equals("commit")) {
@@ -463,13 +573,17 @@ class LedgerTransactionManagerIntegrationTest {
                     }
                     try {
                         return method.invoke(delegate, args);
-                    } catch (InvocationTargetException ex) {
+                    } catch (final InvocationTargetException ex) {
                         throw ex.getCause();
                     }
                 });
     }
 
-    /** 并发批量 begin 产生独立事务号，已确认写之后的新 RC/RR 快照覆盖该写。 */
+    /**
+     * Concurrent batch begin produces an independent transaction ID, which is overwrited by a new RC/RR snapshot after it has been confirmed.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void batchedLedgerBeginMustPreserveGlobalSnapshotOrder() throws Exception {
         var metadata = new MysqlTransactionMetadataStore(control);
@@ -477,10 +591,11 @@ class LedgerTransactionManagerIntegrationTest {
                 CrossShardCommitPolicy.parallel(), true, true, false);
         var first = new MysqlStorageAdapter("s1", firstData, metadata);
         var second = new MysqlStorageAdapter("s2", secondData, metadata);
-        try (var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
-                NoOpSafePointStore.INSTANCE, options, Map.of("s1", first, "s2", second),
-                NoOpTransactionMetrics.INSTANCE, ledger, true, 2, false, true, 1);
-             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (
+                var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
+                        NoOpSafePointStore.INSTANCE, options, Map.of("s1", first, "s2", second),
+                        NoOpTransactionMetrics.INSTANCE, ledger, true, 2, false, true, 1);
+                var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var ready = new CountDownLatch(8);
             var start = new CountDownLatch(1);
             var begun = new ArrayList<java.util.concurrent.Future<Transaction>>();
@@ -497,7 +612,7 @@ class LedgerTransactionManagerIntegrationTest {
             for (var future : begun) {
                 readers.add(future.get(10, TimeUnit.SECONDS));
             }
-            assertEquals(8, readers.stream().mapToLong(Transaction::txId).distinct().count());
+            Assertions.assertEquals(8, readers.stream().mapToLong(Transaction::txId).distinct().count());
             assertTrue(readers.stream().allMatch(tx -> tx.startTs() == 100));
             readers.forEach(manager::commit);
 
@@ -507,8 +622,8 @@ class LedgerTransactionManagerIntegrationTest {
             long committedTs = manager.commit(writer).commitTs();
             Transaction committed = manager.begin(IsolationLevel.READ_COMMITTED);
             Transaction repeatable = manager.begin(IsolationLevel.REPEATABLE_READ);
-            assertEquals(committedTs, committed.startTs());
-            assertEquals(committedTs, repeatable.startTs());
+            Assertions.assertEquals(committedTs, committed.startTs());
+            Assertions.assertEquals(committedTs, repeatable.startTs());
             assertArrayEquals(bytes("left"), manager.get(committed, "s1", "begin:batch:left").orElseThrow());
             assertArrayEquals(bytes("right"), manager.get(repeatable, "s2", "begin:batch:right").orElseThrow());
             manager.commit(committed);
@@ -516,19 +631,24 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 显式运行时绑定独立后台池后，可提交两分片并周期运行恢复与 GC。 */
+    /**
+     * When a visible run binds an independent background pool, commit and two shard can run recovery and GC in cycles.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void explicitLedgerRuntimeMustUseIndependentBackgroundPools() throws Exception {
         var transactionOptions = new TransactionOptions(LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
         var runtimeOptions = new LedgerRuntimeOptions(10, 10, 20, 50, true, 2, false, false, 1);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two");
-             var runtime = MysqlLedgerTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData, "s2", secondData),
-                     Map.of("s1", backgroundFirst, "s2", backgroundSecond),
-                     transactionOptions, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two");
+                var runtime = MysqlLedgerTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData, "s2", secondData),
+                        Map.of("s1", backgroundFirst, "s2", backgroundSecond),
+                        transactionOptions, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
             TransactionManager manager = runtime.transactionManager();
             Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(writer, "s1", "runtime:left", bytes("left"));
@@ -538,8 +658,8 @@ class LedgerTransactionManagerIntegrationTest {
             assertArrayEquals(bytes("left"), manager.get(reader, "s1", "runtime:left").orElseThrow());
             assertArrayEquals(bytes("right"), manager.get(reader, "s2", "runtime:right").orElseThrow());
             manager.commit(reader);
-            assertEquals(commitTs, ledger.currentPublished());
-            // 模拟控制决议落盘后协调器退出，后台池必须独立补齐本地参与者。
+            Assertions.assertEquals(commitTs, ledger.currentPublished());
+            // Simulate decision control coordinator exits, and the background pool must be independently completed local participant.
             var abandoned = ledger.begin(IsolationLevel.REPEATABLE_READ, 60_000, true);
             var foregroundMetadata = new MysqlTransactionMetadataStore(control);
             foregroundMetadata.registerParticipants(abandoned.txId(), Set.of("s1"));
@@ -553,28 +673,31 @@ class LedgerTransactionManagerIntegrationTest {
                     .orElseThrow().status() != TxStatus.COMMITTED) {
                 Thread.sleep(20);
             }
-            assertEquals(TxStatus.COMMITTED, abandonedShard.participantRecord(abandoned.txId())
+            Assertions.assertEquals(TxStatus.COMMITTED, abandonedShard.participantRecord(abandoned.txId())
                     .orElseThrow().status());
-            assertEquals(recoveredCommitTs, ledger.currentPublished());
+            Assertions.assertEquals(recoveredCommitTs, ledger.currentPublished());
             assertTrue(runtime.maintenanceScheduler().recoveryStats().runCount() > 0);
-            assertEquals(0, runtime.maintenanceScheduler().recoveryStats().failureCount());
+            Assertions.assertEquals(0, runtime.maintenanceScheduler().recoveryStats().failureCount());
         }
     }
 
-    /** 协调者快照免除只读逐事务租约，首写提升后仍保持全局 RR 与 RC 可见性。 */
+    /**
+     * The coordinator snapshot is exempt from read-only by transaction lease and maintains the visibility of global RR and RC after first writing has been upgraded.
+     */
     @Test
     void coordinatorSnapshotsMustPromoteWritesAndPreserveIsolation() {
         var transactionOptions = new TransactionOptions(LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
         var runtimeOptions = new LedgerRuntimeOptions(10, 10, 20, 50,
                 true, 2, false, false, 1, true, 120_000, 1_000);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two");
-             var runtime = MysqlLedgerTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData, "s2", secondData),
-                     Map.of("s1", backgroundFirst, "s2", backgroundSecond),
-                     transactionOptions, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two");
+                var runtime = MysqlLedgerTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData, "s2", secondData),
+                        Map.of("s1", backgroundFirst, "s2", backgroundSecond),
+                        transactionOptions, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
             TransactionManager manager = runtime.transactionManager();
             Transaction repeatable = manager.begin(IsolationLevel.REPEATABLE_READ);
             Transaction committed = manager.begin(IsolationLevel.READ_COMMITTED);
@@ -594,50 +717,60 @@ class LedgerTransactionManagerIntegrationTest {
             assertTrue(manager.get(repeatable, "s1", "coordinator:one").isEmpty());
             assertArrayEquals(bytes("one"), manager.get(committed, "s1", "coordinator:one").orElseThrow());
             assertArrayEquals(bytes("two"), manager.get(committed, "s2", "coordinator:two").orElseThrow());
-            assertEquals(commitTs, ledger.currentPublished());
+            Assertions.assertEquals(commitTs, ledger.currentPublished());
             manager.commit(repeatable);
             manager.commit(committed);
             assertTrue(runtime.maintenanceScheduler().gcStats().failureCount() == 0);
         }
     }
 
-    /** 本地分段 owner 使用最新持久代数决议，并在空闲后封存未分配尾槽。 */
+    /**
+     * The owner uses the latest durable algebra decision and closes undistributed tailings when free.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedOwnerRegistryMustRenewAndSealIdleTail() throws Exception {
         var metadata = new MysqlTransactionMetadataStore(control);
         var segments = new MysqlSegmentPublicationLedger(control);
         segments.activateFromLedger();
         var first = new MysqlStorageAdapter("s1", firstData, metadata);
-        try (HikariDataSource backgroundControl = pool("control");
-             var owner = new PublicationSegmentOwnerRegistry(segments,
-                     new MysqlSegmentPublicationLedger(backgroundControl), 4, 60_000, 10_000, 100)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                var owner = new PublicationSegmentOwnerRegistry(segments,
+                        new MysqlSegmentPublicationLedger(backgroundControl), 4, 60_000, 10_000, 100)) {
             var writer = segments.begin(IsolationLevel.REPEATABLE_READ, 60_000, true);
             metadata.registerParticipants(writer.txId(), Set.of("s1"));
             first.prewrite(writer.txId(), writer.startTs(),
                     java.util.List.of(Mutation.put("segment:registry", bytes("value"))));
             var assignment = owner.allocate(writer.startTs());
-            assertEquals(101, assignment.commitTs());
+            Assertions.assertEquals(101, assignment.commitTs());
             assertTrue(owner.refresh() > 0);
-            assertEquals(2, segments.segmentLease(assignment.segmentStart()).orElseThrow().generation());
-            assertEquals(101, owner.decide(assignment, writer.txId(), writer.deadlineMillis(), Set.of("s1")));
-            assertEquals(101, segments.advancePublished(10));
+            Assertions.assertEquals(2, segments.segmentLease(assignment.segmentStart()).orElseThrow().generation());
+            Assertions.assertEquals(101, owner.decide(assignment, writer.txId(), writer.deadlineMillis(), Set.of("s1")));
+            Assertions.assertEquals(101, segments.advancePublished(10));
             Thread.sleep(150);
             assertTrue(owner.refresh() > 0);
-            assertEquals(104, segments.advancePublished(10));
+            Assertions.assertEquals(104, segments.advancePublished(10));
             assertTrue(segments.segmentLease(assignment.segmentStart()).isEmpty());
-            assertEquals(TxStatus.COMMITTED, metadata.get(writer.txId()).orElseThrow().status());
+            Assertions.assertEquals(TxStatus.COMMITTED, metadata.get(writer.txId()).orElseThrow().status());
         }
     }
 
-    /** 同一持久段上的并发本地 CAS 取槽不能重号或越过段上界。 */
+    /**
+     * Concurrent local CAS slots in the same durable segment cannot be re-numbered or crossed the upper boundary of the section.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedOwnerRegistryConcurrentLocalAllocationMustBeUnique() throws Exception {
         var segments = new MysqlSegmentPublicationLedger(control);
         segments.activateFromLedger();
-        try (HikariDataSource backgroundControl = pool("control");
-             var owner = new PublicationSegmentOwnerRegistry(segments,
-                     new MysqlSegmentPublicationLedger(backgroundControl), 8, 60_000, 10_000, 100);
-             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                var owner = new PublicationSegmentOwnerRegistry(segments,
+                        new MysqlSegmentPublicationLedger(backgroundControl), 8, 60_000, 10_000, 100);
+                var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var ready = new CountDownLatch(8);
             var start = new CountDownLatch(1);
             var assignments = new ArrayList<java.util.concurrent.Future<Long>>();
@@ -654,21 +787,26 @@ class LedgerTransactionManagerIntegrationTest {
             for (var assignment : assignments) {
                 slots.add(assignment.get(10, TimeUnit.SECONDS));
             }
-            assertEquals(8, slots.size());
-            assertEquals(101, slots.stream().mapToLong(Long::longValue).min().orElseThrow());
-            assertEquals(108, slots.stream().mapToLong(Long::longValue).max().orElseThrow());
+            Assertions.assertEquals(8, slots.size());
+            Assertions.assertEquals(101, slots.stream().mapToLong(Long::longValue).min().orElseThrow());
+            Assertions.assertEquals(108, slots.stream().mapToLong(Long::longValue).max().orElseThrow());
         }
     }
 
-    /** 决议响应未知后本地 owner 停止续租该段，让持久到期接管释放阻塞槽。 */
+    /**
+     * Decision In response to unknown local owner stop renewing this paragraph and allow durable to take over the release of the blocker.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedOwnerRegistryMustStopRenewalAfterUnknownDecision() throws Exception {
         var metadata = new MysqlTransactionMetadataStore(control);
         var segments = new MysqlSegmentPublicationLedger(control);
         segments.activateFromLedger();
-        try (HikariDataSource backgroundControl = pool("control");
-             var owner = new PublicationSegmentOwnerRegistry(segments,
-                     new MysqlSegmentPublicationLedger(backgroundControl), 4, 60_000, 10_000, 100)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                var owner = new PublicationSegmentOwnerRegistry(segments,
+                        new MysqlSegmentPublicationLedger(backgroundControl), 4, 60_000, 10_000, 100)) {
             var writer = segments.begin(IsolationLevel.REPEATABLE_READ, 60_000, true);
             metadata.registerParticipants(writer.txId(), Set.of("s1"));
             var assignment = owner.allocate(writer.startTs());
@@ -677,7 +815,7 @@ class LedgerTransactionManagerIntegrationTest {
                         + "check (status <> 'COMMITTED')");
             }
             try {
-                assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         assertThrows(MvccException.class, () -> owner.decide(assignment,
                                 writer.txId(), writer.deadlineMillis(), Set.of("s1"))).errorCode());
             } finally {
@@ -685,51 +823,59 @@ class LedgerTransactionManagerIntegrationTest {
                     statement.execute("alter table mvcc_txn drop check mvcc_test_owner_unknown");
                 }
             }
-            assertEquals(0, owner.refresh());
-            assertEquals(1, segments.segmentLease(assignment.segmentStart()).orElseThrow().generation());
+            Assertions.assertEquals(0, owner.refresh());
+            Assertions.assertEquals(1, segments.segmentLease(assignment.segmentStart()).orElseThrow().generation());
             try (Connection connection = control.getConnection(); PreparedStatement expire = connection.prepareStatement("""
                     update mvcc_publication_segment_v1 set expires_at = 1 where segment_start = ?
                     """)) {
                 expire.setLong(1, assignment.segmentStart());
                 expire.executeUpdate();
             }
-            assertEquals(4, segments.sealExpiredSegment(assignment.segmentStart()));
-            assertEquals(104, segments.advancePublished(10));
+            Assertions.assertEquals(4, segments.sealExpiredSegment(assignment.segmentStart()));
+            Assertions.assertEquals(104, segments.advancePublished(10));
         }
     }
 
-    /** 预留已提交但响应丢失后，后台重放同一请求键并封存未交付槽。 */
+    /**
+     * Presets commit, but following the loss of the response background replay key with the same request and seals the undelivered slot.
+     */
     @Test
     void segmentedOwnerRegistryMustRecoverLostReservationResponse() {
         var segments = new MysqlSegmentPublicationLedger(control);
         segments.activateFromLedger();
         var loseCommitResponse = new AtomicBoolean(true);
         DataSource flakyForeground = loseFirstCommitResponse(control, loseCommitResponse);
-        try (HikariDataSource backgroundControl = pool("control");
-             var owner = new PublicationSegmentOwnerRegistry(
-                     new MysqlSegmentPublicationLedger(flakyForeground),
-                     new MysqlSegmentPublicationLedger(backgroundControl),
-                     4, 60_000, 10_000, 100)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                var owner = new PublicationSegmentOwnerRegistry(
+                        new MysqlSegmentPublicationLedger(flakyForeground),
+                        new MysqlSegmentPublicationLedger(backgroundControl),
+                        4, 60_000, 10_000, 100)) {
             assertThrows(MvccException.class, () -> owner.allocate(100));
             assertFalse(loseCommitResponse.get());
             assertTrue(segments.segmentLease(101).isPresent());
-            assertEquals(100, segments.currentPublished());
+            Assertions.assertEquals(100, segments.currentPublished());
             assertTrue(owner.refresh() > 0);
             assertTrue(segments.segmentLease(101).isEmpty());
-            assertEquals(104, segments.advancePublished(10));
-            assertEquals(105, segments.reserveSegment("owner-b", "reservation-b", 1, 60_000).firstTs());
+            Assertions.assertEquals(104, segments.advancePublished(10));
+            Assertions.assertEquals(105, segments.reserveSegment("owner-b", "reservation-b", 1, 60_000).firstTs());
         }
     }
 
-    /** 整批决议 SQL 失败后 owner 放弃该段，避免未知槽被持续续租钉住水位。 */
+    /**
+     * The whole batch of decision SQLs failed and owner abandoned the paragraph to avoid an unknown slot being nailed to watermark by a continuous lease.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedOwnerRegistryMustFenceUnknownBatchDecision() throws Exception {
         var metadata = new MysqlTransactionMetadataStore(control);
         var segments = new MysqlSegmentPublicationLedger(control);
         segments.activateFromLedger();
-        try (HikariDataSource backgroundControl = pool("control");
-             var owner = new PublicationSegmentOwnerRegistry(segments,
-                     new MysqlSegmentPublicationLedger(backgroundControl), 4, 60_000, 10_000, 100)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                var owner = new PublicationSegmentOwnerRegistry(segments,
+                        new MysqlSegmentPublicationLedger(backgroundControl), 4, 60_000, 10_000, 100)) {
             var first = segments.begin(IsolationLevel.REPEATABLE_READ, 60_000, true);
             var second = segments.begin(IsolationLevel.REPEATABLE_READ, 60_000, true);
             metadata.registerParticipants(first.txId(), Set.of("s1"));
@@ -746,7 +892,7 @@ class LedgerTransactionManagerIntegrationTest {
                         + "add constraint mvcc_test_owner_batch_unknown check (status <> 'COMMITTED')");
             }
             try {
-                assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         assertThrows(MvccException.class, () -> owner.decideBatch(batch)).errorCode());
             } finally {
                 try (Connection connection = control.getConnection(); Statement statement = connection.createStatement()) {
@@ -754,22 +900,26 @@ class LedgerTransactionManagerIntegrationTest {
                             + "drop check mvcc_test_owner_batch_unknown");
                 }
             }
-            assertEquals(TxStatus.ACTIVE, metadata.get(first.txId()).orElseThrow().status());
-            assertEquals(TxStatus.ACTIVE, metadata.get(second.txId()).orElseThrow().status());
-            assertEquals(0, owner.refresh());
-            assertEquals(1, segments.segmentLease(firstSlot.segmentStart()).orElseThrow().generation());
+            Assertions.assertEquals(TxStatus.ACTIVE, metadata.get(first.txId()).orElseThrow().status());
+            Assertions.assertEquals(TxStatus.ACTIVE, metadata.get(second.txId()).orElseThrow().status());
+            Assertions.assertEquals(0, owner.refresh());
+            Assertions.assertEquals(1, segments.segmentLease(firstSlot.segmentStart()).orElseThrow().generation());
             try (Connection connection = control.getConnection(); PreparedStatement expire = connection.prepareStatement("""
                     update mvcc_publication_segment_v1 set expires_at = 1 where segment_start = ?
                     """)) {
                 expire.setLong(1, firstSlot.segmentStart());
                 expire.executeUpdate();
             }
-            assertEquals(4, segments.sealExpiredSegment(firstSlot.segmentStart()));
-            assertEquals(104, segments.advancePublished(10));
+            Assertions.assertEquals(4, segments.sealExpiredSegment(firstSlot.segmentStart()));
+            Assertions.assertEquals(104, segments.advancePublished(10));
         }
     }
 
-    /** 显式分段运行时两分片提交后，新 RC 看见全部写入而旧 RR 固定旧快照。 */
+    /**
+     * After running two shard commit in the visible segment, the new RC sees all written and old RR fixed snapshot.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedRuntimeMustPreserveGlobalRcAndRrAcrossTwoShards() throws Exception {
         var segments = new MysqlSegmentPublicationLedger(control);
@@ -778,13 +928,14 @@ class LedgerTransactionManagerIntegrationTest {
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
         var runtimeOptions = new SegmentRuntimeOptions(8, 5_000, 1_000, 100,
                 10, 256, 10, 20, 10, 50);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two");
-             var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData, "s2", secondData),
-                     Map.of("s1", backgroundFirst, "s2", backgroundSecond),
-                     options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two");
+                var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData, "s2", secondData),
+                        Map.of("s1", backgroundFirst, "s2", backgroundSecond),
+                        options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
             TransactionManager manager = runtime.transactionManager();
             Transaction repeatable = manager.begin(IsolationLevel.REPEATABLE_READ);
             Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
@@ -801,12 +952,16 @@ class LedgerTransactionManagerIntegrationTest {
             manager.commit(repeatable);
             manager.commit(committed);
             assertTrue(runtime.maintenanceScheduler().publicationStats().runCount() > 0);
-            assertEquals(0, runtime.maintenanceScheduler().recoveryStats().failureCount());
-            assertEquals(0, runtime.maintenanceScheduler().publicationStats().failureCount());
+            Assertions.assertEquals(0, runtime.maintenanceScheduler().recoveryStats().failureCount());
+            Assertions.assertEquals(0, runtime.maintenanceScheduler().publicationStats().failureCount());
         }
     }
 
-    /** 中心持久凭据直达两分片时，旧 RR 与新 RC 仍遵守同一发布水位。 */
+    /**
+     * The old RR and the new RC still adhere to the same release watermark when the center durable receipt reaches two shard.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedProofMaterializationMustPreserveGlobalSnapshots() throws Exception {
         var segments = new MysqlSegmentPublicationLedger(control);
@@ -815,20 +970,21 @@ class LedgerTransactionManagerIntegrationTest {
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
         var runtimeOptions = new SegmentRuntimeOptions(8, 5_000, 1_000, 100,
                 10, 256, 10, 20, 10, 50, false, 2, false, false, false, true, true);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two");
-             var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData, "s2", secondData),
-                     Map.of("s1", backgroundFirst, "s2", backgroundSecond),
-                     options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two");
+                var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData, "s2", secondData),
+                        Map.of("s1", backgroundFirst, "s2", backgroundSecond),
+                        options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
             TransactionManager manager = runtime.transactionManager();
             Transaction oldReader = manager.begin(IsolationLevel.REPEATABLE_READ);
             Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(writer, "s1", "segment:proof:left", bytes("left"));
             manager.put(writer, "s2", "segment:proof:right", bytes("right"));
             long commitTs = manager.commit(writer).commitTs();
-            assertEquals(PublicationEntryStatus.COMMITTED,
+            Assertions.assertEquals(PublicationEntryStatus.COMMITTED,
                     segments.findByTxId(writer.txId()).orElseThrow().status());
             assertTrue(segments.currentPublished() >= commitTs);
             Transaction newReader = manager.begin(IsolationLevel.READ_COMMITTED);
@@ -839,21 +995,33 @@ class LedgerTransactionManagerIntegrationTest {
             assertArrayEquals(bytes("right"), manager.get(newReader, "s2", "segment:proof:right").orElseThrow());
             manager.commit(oldReader);
             manager.commit(newReader);
-            assertEquals(0, runtime.maintenanceScheduler().recoveryStats().failureCount());
+            Assertions.assertEquals(0, runtime.maintenanceScheduler().recoveryStats().failureCount());
         }
     }
 
-    /** 分片已按中心凭据提交但响应丢失时，前台返回未知并由恢复重放原决议。 */
+    /**
+     * Shard has been centered by receipt commit, but when the response is lost, foreground returns unknown and recovery replay original decision.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedProofMaterializationLostResponseMustRecover() throws Exception {
         var foreground = new MysqlSegmentPublicationLedger(control);
         foreground.activateFromLedger();
         var metadata = new MysqlTransactionMetadataStore(control);
         var responseLost = new MysqlStorageAdapter("s2", secondData, metadata) {
-            /** 在本地持久提交后模拟响应丢失。 */
+
+            /**
+             * Simulates loss of response after local durable commit.
+             *
+             * @param proof proof
+             * @param mutations transaction write set
+             * @param cleanupIntents cleanup intents
+             * @throws MvccException if the operation cannot complete
+             */
             @Override
-            public void commitDecided(MysqlSegmentPublicationLedger.CommittedProof proof,
-                                      List<Mutation> mutations, boolean cleanupIntents) {
+            public void commitDecided(final MysqlSegmentPublicationLedger.CommittedProof proof,
+                                      final List<Mutation> mutations, final boolean cleanupIntents) {
                 super.commitDecided(proof, mutations, cleanupIntents);
                 throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                         "simulated lost proof materialization response", false, proof.txId());
@@ -861,35 +1029,37 @@ class LedgerTransactionManagerIntegrationTest {
         };
         var options = new TransactionOptions(LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two")) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two")) {
             var background = new MysqlSegmentPublicationLedger(backgroundControl);
             var backgroundMetadata = new MysqlTransactionMetadataStore(backgroundControl);
             var recovery = new SegmentPublicationRecoveryManager(background, backgroundMetadata,
                     Map.of("s1", new MysqlStorageAdapter("s1", backgroundFirst, backgroundMetadata),
                             "s2", new MysqlStorageAdapter("s2", backgroundSecond, backgroundMetadata)));
             var runner = new SegmentPublicationRecoveryRunner(background, recovery, backgroundMetadata);
-            try (var scheduler = new SegmentPublicationMaintenanceScheduler(runner, background,
-                    null, 10, 256, 1, 30_000, 10, 1_000);
-                 var owner = new PublicationSegmentOwnerRegistry(foreground, background,
-                         8, 5_000, 1_000, 100);
-                 var manager = TransactionManager.forSegment(new MysqlTimestampOracle(control),
-                         metadata, options,
-                         Map.of("s1", new MysqlStorageAdapter("s1", firstData, metadata),
-                                 "s2", responseLost),
-                         NoOpTransactionMetrics.INSTANCE, foreground, owner, scheduler,
-                         null, false, false, true)) {
+            try (
+                    var scheduler = new SegmentPublicationMaintenanceScheduler(runner, background,
+                            null, 10, 256, 1, 30_000, 10, 1_000);
+                    var owner = new PublicationSegmentOwnerRegistry(foreground, background,
+                            8, 5_000, 1_000, 100);
+                    var manager = TransactionManager.forSegment(new MysqlTimestampOracle(control),
+                            metadata, options,
+                            Map.of("s1", new MysqlStorageAdapter("s1", firstData, metadata),
+                                    "s2", responseLost),
+                            NoOpTransactionMetrics.INSTANCE, foreground, owner, scheduler,
+                            null, false, false, true)) {
                 scheduler.start();
                 Transaction oldReader = manager.begin(IsolationLevel.REPEATABLE_READ);
                 Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
                 manager.put(writer, "s1", "segment:proof:lost:left", bytes("left"));
                 manager.put(writer, "s2", "segment:proof:lost:right", bytes("right"));
-                assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         assertThrows(MvccException.class, () -> manager.commit(writer)).errorCode());
-                assertEquals(PublicationEntryStatus.COMMITTED,
+                Assertions.assertEquals(PublicationEntryStatus.COMMITTED,
                         foreground.findByTxId(writer.txId()).orElseThrow().status());
-                assertEquals(TxStatus.COMMITTED, responseLost.participantRecord(writer.txId()).orElseThrow().status());
+                Assertions.assertEquals(TxStatus.COMMITTED, responseLost.participantRecord(writer.txId()).orElseThrow().status());
                 assertTrue(recovery.recover(writer.txId()));
                 Transaction newReader = manager.begin(IsolationLevel.READ_COMMITTED);
                 assertTrue(manager.get(oldReader, "s1", "segment:proof:lost:left").isEmpty());
@@ -904,7 +1074,11 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 提交后的发布唤醒须早于长周期兜底，且两分片新旧快照保持一致。 */
+    /**
+     * The post- commit release must wake up before the end of a long cycle and is consistent with two shard s, old and new snapshot.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedPublicationWakeMustConfirmBeforePeriodicFallback() throws Exception {
         var segments = new MysqlSegmentPublicationLedger(control);
@@ -913,13 +1087,14 @@ class LedgerTransactionManagerIntegrationTest {
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
         var runtimeOptions = new SegmentRuntimeOptions(8, 5_000, 1_000, 100,
                 10, 256, 10, 20, 30_000, 50, false, 2, false, true);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two");
-             var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData, "s2", secondData),
-                     Map.of("s1", backgroundFirst, "s2", backgroundSecond),
-                     options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two");
+                var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData, "s2", secondData),
+                        Map.of("s1", backgroundFirst, "s2", backgroundSecond),
+                        options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
             TransactionManager manager = runtime.transactionManager();
             Transaction oldReader = manager.begin(IsolationLevel.REPEATABLE_READ);
             Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
@@ -936,11 +1111,15 @@ class LedgerTransactionManagerIntegrationTest {
             assertArrayEquals(bytes("right"), manager.get(newReader, "s2", "segment:wake:right").orElseThrow());
             manager.commit(oldReader);
             manager.commit(newReader);
-            assertEquals(0, runtime.maintenanceScheduler().publicationStats().failureCount());
+            Assertions.assertEquals(0, runtime.maintenanceScheduler().publicationStats().failureCount());
         }
     }
 
-    /** 发布已前进但一个分片仍在物化时，RC 必须解析已提交意向且提交尚未返回。 */
+    /**
+     * The RC must resolve commit intent and the commit has not yet returned when a shard is released.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedOverlapMustExposeCommittedIntentBeforeDelayedMaterialization() throws Exception {
         var foreground = new MysqlSegmentPublicationLedger(control);
@@ -950,15 +1129,25 @@ class LedgerTransactionManagerIntegrationTest {
         var release = new CountDownLatch(1);
         var failNextCommit = new AtomicBoolean();
         var delayed = new MysqlStorageAdapter("s2", secondData, metadata) {
-            /** 控制第二分片本地版本物化完成时机。 */
+
+            /**
+             * Controls the second shard local version materialization completion time.
+             *
+             * @param txId transaction identifier
+             * @param commitTs durable commit timestamp
+             * @param mutations transaction write set
+             * @param cleanupIntents cleanup intents
+             * @throws IllegalStateException if the operation cannot complete
+             * @throws MvccException if the operation cannot complete
+             */
             @Override
-            public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+            public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
                 entered.countDown();
                 try {
                     if (!release.await(10, TimeUnit.SECONDS)) {
                         throw new IllegalStateException("delayed participant was not released");
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException("delayed participant interrupted", ex);
                 }
@@ -971,25 +1160,27 @@ class LedgerTransactionManagerIntegrationTest {
         };
         var options = new TransactionOptions(LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two");
-             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two");
+                var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var background = new MysqlSegmentPublicationLedger(backgroundControl);
             var backgroundMetadata = new MysqlTransactionMetadataStore(backgroundControl);
             var recovery = new SegmentPublicationRecoveryManager(background, backgroundMetadata,
                     Map.of("s1", new MysqlStorageAdapter("s1", backgroundFirst, backgroundMetadata),
                             "s2", new MysqlStorageAdapter("s2", backgroundSecond, backgroundMetadata)));
             var runner = new SegmentPublicationRecoveryRunner(background, recovery, backgroundMetadata);
-            try (var scheduler = new SegmentPublicationMaintenanceScheduler(runner, background,
-                    null, 10, 256, 1, 30_000, 10, 1_000, true);
-                 var owner = new PublicationSegmentOwnerRegistry(foreground, background,
-                         8, 5_000, 1_000, 100);
-                 var manager = TransactionManager.forSegment(new MysqlTimestampOracle(control),
-                         metadata, options,
-                         Map.of("s1", new MysqlStorageAdapter("s1", firstData, metadata), "s2", delayed),
-                         NoOpTransactionMetrics.INSTANCE, foreground, owner, scheduler,
-                         null, false, true)) {
+            try (
+                    var scheduler = new SegmentPublicationMaintenanceScheduler(runner, background,
+                            null, 10, 256, 1, 30_000, 10, 1_000, true);
+                    var owner = new PublicationSegmentOwnerRegistry(foreground, background,
+                            8, 5_000, 1_000, 100);
+                    var manager = TransactionManager.forSegment(new MysqlTimestampOracle(control),
+                            metadata, options,
+                            Map.of("s1", new MysqlStorageAdapter("s1", firstData, metadata), "s2", delayed),
+                            NoOpTransactionMetrics.INSTANCE, foreground, owner, scheduler,
+                            null, false, true)) {
                 scheduler.start();
                 Transaction oldReader = manager.begin(IsolationLevel.REPEATABLE_READ);
                 Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
@@ -1017,14 +1208,14 @@ class LedgerTransactionManagerIntegrationTest {
                 } finally {
                     release.countDown();
                 }
-                assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, commit.get(10, TimeUnit.SECONDS).mode());
+                Assertions.assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, commit.get(10, TimeUnit.SECONDS).mode());
                 failNextCommit.set(true);
                 Transaction failedWriter = manager.begin(IsolationLevel.REPEATABLE_READ);
                 manager.put(failedWriter, "s1", "segment:overlap:recover:left", bytes("left"));
                 manager.put(failedWriter, "s2", "segment:overlap:recover:right", bytes("right"));
-                assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         assertThrows(MvccException.class, () -> manager.commit(failedWriter)).errorCode());
-                assertEquals(PublicationEntryStatus.COMMITTED,
+                Assertions.assertEquals(PublicationEntryStatus.COMMITTED,
                         foreground.findByTxId(failedWriter.txId()).orElseThrow().status());
                 assertTrue(recovery.recover(failedWriter.txId()));
                 Transaction recoveredReader = manager.begin(IsolationLevel.READ_COMMITTED);
@@ -1033,12 +1224,16 @@ class LedgerTransactionManagerIntegrationTest {
                 assertArrayEquals(bytes("right"),
                         manager.get(recoveredReader, "s2", "segment:overlap:recover:right").orElseThrow());
                 manager.commit(recoveredReader);
-                assertEquals(0, scheduler.publicationStats().failureCount());
+                Assertions.assertEquals(0, scheduler.publicationStats().failureCount());
             }
         }
     }
 
-    /** 分段单分片物理提交须绕过意向预写，且新旧快照仍遵守全局发布水位。 */
+    /**
+     * Division shard Physical commit must be bypassed by intent prewrite and old and new snapshot still complies with global release watermark.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedDirectSingleShardMustPreserveGlobalSnapshotsWithoutIntent() throws Exception {
         var segments = new MysqlSegmentPublicationLedger(control);
@@ -1047,27 +1242,29 @@ class LedgerTransactionManagerIntegrationTest {
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
         var runtimeOptions = new SegmentRuntimeOptions(8, 5_000, 1_000, 100,
                 10, 256, 10, 20, 10, 50, false, 2, true);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData), Map.of("s1", backgroundFirst),
-                     options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData), Map.of("s1", backgroundFirst),
+                        options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
             TransactionManager manager = runtime.transactionManager();
             Transaction oldReader = manager.begin(IsolationLevel.REPEATABLE_READ);
             Transaction writer = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(writer, "s1", "segment:direct", bytes("committed"));
             var result = manager.commit(writer);
-            assertEquals(TransactionCommitMode.SINGLE_SHARD_FAST_PATH, result.mode());
-            assertEquals(PublicationEntryStatus.COMMITTED,
+            Assertions.assertEquals(TransactionCommitMode.SINGLE_SHARD_FAST_PATH, result.mode());
+            Assertions.assertEquals(PublicationEntryStatus.COMMITTED,
                     segments.findByTxId(writer.txId()).orElseThrow().status());
-            assertEquals(result.commitTs(), segments.currentPublished());
-            try (Connection connection = firstData.getConnection();
-                 PreparedStatement statement = connection.prepareStatement(
-                         "select count(*) from mvcc_intent where tx_id = ?")) {
+            Assertions.assertEquals(result.commitTs(), segments.currentPublished());
+            try (
+                    Connection connection = firstData.getConnection();
+                    PreparedStatement statement = connection.prepareStatement(
+                            "select count(*) from mvcc_intent where tx_id = ?")) {
                 statement.setLong(1, writer.txId());
                 try (var rows = statement.executeQuery()) {
                     assertTrue(rows.next());
-                    assertEquals(0, rows.getLong(1));
+                    Assertions.assertEquals(0, rows.getLong(1));
                 }
             }
             Transaction newReader = manager.begin(IsolationLevel.READ_COMMITTED);
@@ -1076,11 +1273,15 @@ class LedgerTransactionManagerIntegrationTest {
                     manager.get(newReader, "s1", "segment:direct").orElseThrow());
             manager.commit(oldReader);
             manager.commit(newReader);
-            assertEquals(0, runtime.maintenanceScheduler().recoveryStats().failureCount());
+            Assertions.assertEquals(0, runtime.maintenanceScheduler().recoveryStats().failureCount());
         }
     }
 
-    /** 旧快照对同一键直接提交失败后须形成已中止槽并解除后续发布阻塞。 */
+    /**
+     * The old snapshot for the same key directly commit shall be formed after failure to form a suspended slot and release subsequent release block.
+     *
+     * @throws InterruptedException if the operation cannot complete
+     */
     @Test
     void segmentedDirectConflictMustReleaseClaimedSlot() throws InterruptedException {
         var segments = new MysqlSegmentPublicationLedger(control);
@@ -1089,20 +1290,21 @@ class LedgerTransactionManagerIntegrationTest {
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
         var runtimeOptions = new SegmentRuntimeOptions(8, 5_000, 1_000, 100,
                 10, 256, 10, 20, 10, 50, false, 2, true);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData), Map.of("s1", backgroundFirst),
-                     options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData), Map.of("s1", backgroundFirst),
+                        options, runtimeOptions, NoOpTransactionMetrics.INSTANCE)) {
             TransactionManager manager = runtime.transactionManager();
             Transaction stale = manager.begin(IsolationLevel.REPEATABLE_READ);
             Transaction winner = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(winner, "s1", "segment:direct:conflict", bytes("winner"));
             long winnerTs = manager.commit(winner).commitTs();
             manager.put(stale, "s1", "segment:direct:conflict", bytes("stale"));
-            assertEquals(ErrorCode.WRITE_CONFLICT,
+            Assertions.assertEquals(ErrorCode.WRITE_CONFLICT,
                     assertThrows(MvccException.class, () -> manager.commit(stale)).errorCode());
-            assertEquals(PublicationEntryStatus.ABORTED,
+            Assertions.assertEquals(PublicationEntryStatus.ABORTED,
                     segments.findByTxId(stale.txId()).orElseThrow().status());
             long publicationDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (segments.currentPublished() < winnerTs + 1
@@ -1118,7 +1320,11 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 同段批量中心决议并发返回后，新 RC 读全批结果，旧 RR 读仍固定旧水位。 */
+    /**
+     * After the same paragraph batch centre decision concurrent returns, the new RC reads the full batch results and the old RR reading is still fixed to the old watermark.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void segmentedBatchRuntimeMustPreserveGlobalRcAndRr() throws Exception {
         var segments = new MysqlSegmentPublicationLedger(control);
@@ -1127,14 +1333,15 @@ class LedgerTransactionManagerIntegrationTest {
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
         var runtimeOptions = new SegmentRuntimeOptions(32, 5_000, 1_000, 100,
                 10, 256, 10, 20, 10, 50, true, 2);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two");
-             var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData, "s2", secondData),
-                     Map.of("s1", backgroundFirst, "s2", backgroundSecond),
-                     options, runtimeOptions, NoOpTransactionMetrics.INSTANCE);
-             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two");
+                var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData, "s2", secondData),
+                        Map.of("s1", backgroundFirst, "s2", backgroundSecond),
+                        options, runtimeOptions, NoOpTransactionMetrics.INSTANCE);
+                var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             TransactionManager manager = runtime.transactionManager();
             Transaction oldReader = manager.begin(IsolationLevel.REPEATABLE_READ);
             var ready = new CountDownLatch(8);
@@ -1169,20 +1376,23 @@ class LedgerTransactionManagerIntegrationTest {
             manager.commit(oldReader);
             manager.commit(committed);
             assertTrue(manager.segmentBatchStats().groups() > 0);
-            assertEquals(0, manager.segmentBatchStats().unknownGroups());
+            Assertions.assertEquals(0, manager.segmentBatchStats().unknownGroups());
         }
     }
 
-    /** 批处理入口关闭后已分配的槽仍同步决议，不能遗留长期 PENDING 缺口。 */
+    /**
+     * The slots that have been distributed following the closure of the batch are still synchronized with decision and cannot leave a long-term PENDING gap.
+     */
     @Test
     void segmentedBatcherClosedQueueMustCommitAssignedSlotDirectly() {
         var metadata = new MysqlTransactionMetadataStore(control);
         var segments = new MysqlSegmentPublicationLedger(control);
         segments.activateFromLedger();
         var shard = new MysqlStorageAdapter("s1", firstData, metadata);
-        try (HikariDataSource backgroundControl = pool("control");
-             var owner = new PublicationSegmentOwnerRegistry(segments,
-                     new MysqlSegmentPublicationLedger(backgroundControl), 4, 60_000, 10_000, 100)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                var owner = new PublicationSegmentOwnerRegistry(segments,
+                        new MysqlSegmentPublicationLedger(backgroundControl), 4, 60_000, 10_000, 100)) {
             var writer = segments.begin(IsolationLevel.REPEATABLE_READ, 60_000, true);
             metadata.registerParticipants(writer.txId(), Set.of("s1"));
             shard.prewrite(writer.txId(), writer.startTs(),
@@ -1190,28 +1400,31 @@ class LedgerTransactionManagerIntegrationTest {
             var assignment = owner.allocate(writer.startTs());
             var batcher = new PublicationSegmentCommitBatcher(owner, 1, 4, 1);
             batcher.close(5_000);
-            assertEquals(101, batcher.commit(assignment, writer.txId(),
+            Assertions.assertEquals(101, batcher.commit(assignment, writer.txId(),
                     writer.deadlineMillis(), Set.of("s1")));
-            assertEquals(1, batcher.stats().synchronousFallbacks());
-            assertEquals(101, segments.advancePublished(10));
-            assertEquals(TxStatus.COMMITTED, metadata.get(writer.txId()).orElseThrow().status());
+            Assertions.assertEquals(1, batcher.stats().synchronousFallbacks());
+            Assertions.assertEquals(101, segments.advancePublished(10));
+            Assertions.assertEquals(TxStatus.COMMITTED, metadata.get(writer.txId()).orElseThrow().status());
         }
     }
 
-    /** 分段模式缓冲写在预写前回滚，不应制造占位槽或中心写决议。 */
+    /**
+     * The segment mode buffer is written before the prewrite rollback, and should not create a slot or central decision.
+     */
     @Test
     void segmentedRuntimeRollbackBeforePrewriteMustStayReadOnly() {
         var segments = new MysqlSegmentPublicationLedger(control);
         segments.activateFromLedger();
         var options = new TransactionOptions(LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
-        try (HikariDataSource backgroundControl = pool("control");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two");
-             var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
-                     Map.of("s1", firstData, "s2", secondData),
-                     Map.of("s1", backgroundFirst, "s2", backgroundSecond),
-                     options, SegmentRuntimeOptions.defaults(), NoOpTransactionMetrics.INSTANCE)) {
+        try (
+                HikariDataSource backgroundControl = pool("control");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two");
+                var runtime = MysqlSegmentTransactionRuntime.open(control, backgroundControl,
+                        Map.of("s1", firstData, "s2", secondData),
+                        Map.of("s1", backgroundFirst, "s2", backgroundSecond),
+                        options, SegmentRuntimeOptions.defaults(), NoOpTransactionMetrics.INSTANCE)) {
             TransactionManager manager = runtime.transactionManager();
             Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(tx, "s1", "segment:cancelled", bytes("temporary"));
@@ -1221,18 +1434,21 @@ class LedgerTransactionManagerIntegrationTest {
             Transaction reader = manager.begin(IsolationLevel.READ_COMMITTED);
             assertTrue(manager.get(reader, "s1", "segment:cancelled").isEmpty());
             manager.commit(reader);
-            assertEquals(100, segments.currentPublished());
+            Assertions.assertEquals(100, segments.currentPublished());
         }
     }
 
-    /** 后台控制池误接到另一数据库时，运行时必须在启动任务前拒绝。 */
+    /**
+     * The background control pool must be refused before the start of the task when another database is missed.
+     */
     @Test
     void ledgerRuntimeMustRejectDifferentBackgroundAuthority() {
         var transactionOptions = new TransactionOptions(LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.parallel(), true, true, false);
-        try (HikariDataSource wrongControl = pool("shard_one");
-             HikariDataSource backgroundFirst = pool("shard_one");
-             HikariDataSource backgroundSecond = pool("shard_two")) {
+        try (
+                HikariDataSource wrongControl = pool("shard_one");
+                HikariDataSource backgroundFirst = pool("shard_one");
+                HikariDataSource backgroundSecond = pool("shard_two")) {
             assertThrows(IllegalArgumentException.class, () -> MysqlLedgerTransactionRuntime.open(
                     control, wrongControl,
                     Map.of("s1", firstData, "s2", secondData),
@@ -1241,7 +1457,9 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 未持久化意向的缓冲写回滚只清理新租约，不制造错误开始时间的参与者行。 */
+    /**
+     * Buffer rollback for durable storage intent only clears new lease and does not create participant rows at the wrong start time.
+     */
     @Test
     void bufferedRollbackBeforePrewriteMustNotCreateParticipantDecision() {
         try (var manager = manager()) {
@@ -1256,36 +1474,50 @@ class LedgerTransactionManagerIntegrationTest {
         }
     }
 
-    /** 提交预留已落盘但响应未知时，回滚须 fencing 参与者并解除水位阻塞。 */
+    /**
+     * Commit presets the drop-off but does not respond to an unknown message, rollback shall be funcing participant and remove watermark blockage.
+     */
     @Test
     void rollbackMustResolveDurablePendingReservation() {
         var metadata = new MysqlTransactionMetadataStore(control);
         var options = new TransactionOptions(LockWaitPolicy.failFast(), TransactionRetryPolicy.noRetry(),
                 CrossShardCommitPolicy.parallel(), true, true, false);
         var first = new MysqlStorageAdapter("s1", firstData, metadata);
-        try (var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
-                NoOpSafePointStore.INSTANCE, options, Map.of("s1", first),
-                NoOpTransactionMetrics.INSTANCE, ledger)) {
+        try (
+                var manager = new TransactionManager(new MysqlTimestampOracle(control), metadata,
+                        NoOpSafePointStore.INSTANCE, options, Map.of("s1", first),
+                        NoOpTransactionMetrics.INSTANCE, ledger)) {
             Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
             manager.put(tx, "s1", "pending", bytes("value"));
             metadata.createWithParticipants(tx.txId(), tx.startTs(), tx.isolationLevel(), java.util.Set.of("s1"));
             tx.metadataPersisted(true);
             long commitTs = ledger.reserveCommit(tx.txId(), tx.deadlineMillis());
             manager.rollback(tx);
-            assertEquals(TxStatus.ABORTED, metadata.get(tx.txId()).orElseThrow().status());
-            assertEquals(PublicationEntryStatus.ABORTED, ledger.findByTxId(tx.txId()).orElseThrow().status());
-            assertEquals(commitTs, ledger.currentPublished());
+            Assertions.assertEquals(TxStatus.ABORTED, metadata.get(tx.txId()).orElseThrow().status());
+            Assertions.assertEquals(PublicationEntryStatus.ABORTED, ledger.findByTxId(tx.txId()).orElseThrow().status());
+            Assertions.assertEquals(commitTs, ledger.currentPublished());
             assertTrue(ledger.snapshotExpiry(tx.txId()).isEmpty());
         }
     }
 
-    /** 把常量转换为测试用二进制值。 */
-    private static byte[] bytes(String value) {
+    /**
+     * Converts the constant to a binary value for testing.
+     *
+     * @param value value to write
+     * @return the operation result
+     */
+    private static byte[] bytes(final String value) {
         return value.getBytes(StandardCharsets.UTF_8);
     }
 
-    /** 只在首次 JDBC commit 真正落盘后丢失响应，模拟预留结果未知。 */
-    private static DataSource loseFirstCommitResponse(DataSource delegate, AtomicBoolean pending) {
+    /**
+     * Only loses the response after the first JDBC call is really dropped, simulates preset unknown outcome.
+     *
+     * @param delegate delegate
+     * @param pending pending
+     * @return the operation result
+     */
+    private static DataSource loseFirstCommitResponse(final DataSource delegate, final AtomicBoolean pending) {
         return (DataSource) Proxy.newProxyInstance(DataSource.class.getClassLoader(),
                 new Class<?>[]{DataSource.class}, (proxy, method, arguments) -> {
                     if (method.getDeclaringClass() == Object.class) {
@@ -1317,11 +1549,11 @@ class LedgerTransactionManagerIntegrationTest {
                                             throw new SQLException("committed but response was lost", "08S01");
                                         }
                                         return outcome;
-                                    } catch (InvocationTargetException ex) {
+                                    } catch (final InvocationTargetException ex) {
                                         throw ex.getCause();
                                     }
                                 });
-                    } catch (InvocationTargetException ex) {
+                    } catch (final InvocationTargetException ex) {
                         throw ex.getCause();
                     }
                 });

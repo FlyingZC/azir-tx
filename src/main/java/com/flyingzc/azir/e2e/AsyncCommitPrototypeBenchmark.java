@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -34,19 +50,23 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 
 /**
- * 异步提交原型基准测试入口。
+ * Step commit prototype benchmark test entrance.
  */
 public final class AsyncCommitPrototypeBenchmark {
+
     /**
-     * 构造 AsyncCommitPrototypeBenchmark 实例。
+     * Construct a AsyncCommitPrototypeBenchmark instance.
      */
     private AsyncCommitPrototypeBenchmark() {
     }
 
     /**
-     * 程序入口方法。
+     * Run the application entry point.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
      */
-    public static void main(String[] args) throws Exception {
+    public static void main(final String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource controlDataSource = MysqlDataSourceFactory.create(config.controlJdbcUrl(), config.username(), config.password());
         DataSource shard1DataSource = MysqlDataSourceFactory.create(config.shard1JdbcUrl(), config.username(), config.password());
@@ -79,8 +99,7 @@ public final class AsyncCommitPrototypeBenchmark {
                     tso,
                     metadataStore,
                     Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2),
-                    config.secondaryFinalizeWorkers()
-            );
+                    config.secondaryFinalizeWorkers());
 
             try {
                 BenchmarkResult result = runBenchmark(coordinator, config);
@@ -96,9 +115,14 @@ public final class AsyncCommitPrototypeBenchmark {
     }
 
     /**
-     * 执行基准测试并返回统计结果。
+     * Run the benchmark and return its statistics.
+     *
+     * @param coordinator coordinator
+     * @param config config
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
-    private static BenchmarkResult runBenchmark(AsyncCommitCoordinator coordinator, Config config) throws Exception {
+    private static BenchmarkResult runBenchmark(final AsyncCommitCoordinator coordinator, final Config config) throws Exception {
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
         LongAdder conflicts = new LongAdder();
@@ -121,7 +145,7 @@ public final class AsyncCommitPrototypeBenchmark {
                             long id = keySequence.incrementAndGet();
                             coordinator.execute(id, config.asyncCommit());
                             committed.increment();
-                        } catch (MvccException ex) {
+                        } catch (final MvccException ex) {
                             if (ex.errorCode() == ErrorCode.LOCK_CONFLICT
                                     || ex.errorCode() == ErrorCode.LOCK_WAIT_TIMEOUT
                                     || ex.errorCode() == ErrorCode.WRITE_CONFLICT) {
@@ -129,11 +153,11 @@ public final class AsyncCommitPrototypeBenchmark {
                             } else {
                                 failures.increment();
                             }
-                        } catch (RuntimeException ex) {
+                        } catch (final RuntimeException ex) {
                             failures.increment();
                         }
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 } finally {
                     finishLatch.countDown();
@@ -160,14 +184,17 @@ public final class AsyncCommitPrototypeBenchmark {
                 failures.sum(),
                 coordinator.primaryCommits(),
                 coordinator.secondaryCommits(),
-                coordinator.maxPendingSecondary()
-        );
+                coordinator.maxPendingSecondary());
     }
 
     /**
-     * 重置基准测试表数据。
+     * Reset the benchmark tables.
+     *
+     * @param dataSource database connection source
+     * @param tables tables
+     * @throws Exception if the operation cannot complete
      */
-    private static void reset(DataSource dataSource, String... tables) throws Exception {
+    private static void reset(final DataSource dataSource, final String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
                 statement.execute("delete from " + table);
@@ -176,36 +203,68 @@ public final class AsyncCommitPrototypeBenchmark {
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void close(DataSource dataSource) throws Exception {
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
     /**
-     * 将字符串转换为字节数组。
+     * Encode the string as a byte array.
+     *
+     * @param value value to write
+     * @return the operation result
      */
-    private static byte[] bytes(String value) {
+    private static byte[] bytes(final String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**
-     * 基准测试配置对象。
+     * Read a string-valued environment variable.
+     *
+     * @param key business key
+     * @param defaultValue default value
+     * @return the operation result
+     */
+    private static String env(final String key, final String defaultValue) {
+        String value = System.getenv(key);
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    /**
+     * Benchmark configuration.
+     *
+     * @param controlJdbcUrl control jdbc url
+     * @param shard1JdbcUrl shard1 jdbc url
+     * @param shard2JdbcUrl shard2 jdbc url
+     * @param username username
+     * @param password password
+     * @param resetTables reset tables
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param asyncCommit async commit
+     * @param secondaryFinalizeWorkers secondary finalize workers
      */
     private record Config(String controlJdbcUrl,
-                          String shard1JdbcUrl,
-                          String shard2JdbcUrl,
-                          String username,
-                          String password,
-                          boolean resetTables,
-                          int concurrency,
-                          int durationSeconds,
-                          boolean asyncCommit,
-                          int secondaryFinalizeWorkers) {
+            String shard1JdbcUrl,
+            String shard2JdbcUrl,
+            String username,
+            String password,
+            boolean resetTables,
+            int concurrency,
+            int durationSeconds,
+            boolean asyncCommit,
+            int secondaryFinalizeWorkers) {
+
         /**
-         * 从环境变量读取配置对象。
+         * Read configuration from environment variables.
+         *
+         * @return the operation result
          */
         private static Config fromEnv() {
             return new Config(
@@ -218,27 +277,40 @@ public final class AsyncCommitPrototypeBenchmark {
                     Integer.parseInt(env("AZIR_TX_BENCH_CONCURRENCY", "50")),
                     Integer.parseInt(env("AZIR_TX_BENCH_DURATION_SECONDS", "10")),
                     Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "false")),
-                    Integer.parseInt(env("AZIR_TX_SECONDARY_FINALIZE_WORKERS", "8"))
-            );
+                    Integer.parseInt(env("AZIR_TX_SECONDARY_FINALIZE_WORKERS", "8")));
         }
     }
 
     /**
-     * 基准测试结果对象。
+     * Benchmark results.
+     *
+     * @param frontendSeconds frontend seconds
+     * @param totalSeconds total seconds
+     * @param attempts attempts
+     * @param committed committed
+     * @param conflicts conflicts
+     * @param failures failures
+     * @param primaryCommits primary commits
+     * @param secondaryCommits secondary commits
+     * @param maxPendingSecondary max pending secondary
      */
     private record BenchmarkResult(double frontendSeconds,
-                                   double totalSeconds,
-                                   long attempts,
-                                   long committed,
-                                   long conflicts,
-                                   long failures,
-                                   long primaryCommits,
-                                   long secondaryCommits,
-                                   int maxPendingSecondary) {
+            double totalSeconds,
+            long attempts,
+            long committed,
+            long conflicts,
+            long failures,
+            long primaryCommits,
+            long secondaryCommits,
+            int maxPendingSecondary) {
+
         /**
-         * 将基准测试结果格式化为一行文本。
+         * Format benchmark results as a single line.
+         *
+         * @param config config
+         * @return the operation result
          */
-        private String toLine(Config config) {
+        private String toLine(final Config config) {
             double frontendCommitTps = committed / frontendSeconds;
             double secondaryFinalizeTps = secondaryCommits / totalSeconds;
             return "ASYNC_COMMIT_BENCH"
@@ -260,30 +332,45 @@ public final class AsyncCommitPrototypeBenchmark {
     }
 
     /**
-     * 异步提交原型协调器。
+     * Step commit prototype coordinator.
      */
     private static final class AsyncCommitCoordinator implements AutoCloseable {
+
         private final TimestampOracle timestampOracle;
+
         private final TransactionMetadataStore metadataStore;
+
         private final Map<String, StorageAdapter> adapters;
+
         private final ExecutorService participantExecutor;
+
         private final ExecutorService secondaryExecutor;
+
         private final LongAdder primaryCommits = new LongAdder();
+
         private final LongAdder secondaryCommits = new LongAdder();
+
         private final AtomicInteger pendingSecondary = new AtomicInteger();
+
         private final AtomicInteger maxPendingSecondary = new AtomicInteger();
 
         /**
-         * 构造 AsyncCommitCoordinator 实例。
+         * Construct a AsyncCommitCoordinator instance.
+         *
+         * @param timestampOracle timestamp oracle
+         * @param metadataStore metadata store
+         * @param adapters adapters
+         * @param secondaryFinalizeWorkers secondary finalize workers
+         * @throws IllegalArgumentException if the operation cannot complete
          */
-        private AsyncCommitCoordinator(TimestampOracle timestampOracle,
-                                       TransactionMetadataStore metadataStore,
-                                       Map<String, StorageAdapter> adapters,
-                                       int secondaryFinalizeWorkers) {
+        private AsyncCommitCoordinator(final TimestampOracle timestampOracle,
+                                       final TransactionMetadataStore metadataStore,
+                                       final Map<String, StorageAdapter> adapters,
+                                       final int secondaryFinalizeWorkers) {
             this.timestampOracle = timestampOracle;
             this.metadataStore = metadataStore;
             this.adapters = adapters;
-            // 原型协调器不经过 TransactionManager，必须自行传递同一中心权威。
+            // The prototype bypasses TransactionManager and must explicitly pass the same decision authority.
             for (StorageAdapter adapter : adapters.values()) {
                 adapter.configureMetadataStore(metadataStore);
                 if (!adapter.supportsCommittedIntentResolution()) {
@@ -295,9 +382,12 @@ public final class AsyncCommitPrototypeBenchmark {
         }
 
         /**
-         * 执行一次原型事务流程。
+         * Execute one prototype transaction.
+         *
+         * @param sequence sequence
+         * @param asyncCommit async commit
          */
-        private void execute(long sequence, boolean asyncCommit) {
+        private void execute(final long sequence, final boolean asyncCommit) {
             PrototypeTransaction tx = begin();
             try {
                 tx.buffer("shard-1", Mutation.put("bench:s1:" + sequence, bytes("v" + sequence)));
@@ -314,14 +404,16 @@ public final class AsyncCommitPrototypeBenchmark {
                     commitSecondaries(tx, commitTs);
                 }
                 tx.status(TxStatus.COMMITTED);
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 rollbackQuietly(tx);
                 throw ex;
             }
         }
 
         /**
-         * 开启一个新事务。
+         * Begin a new transaction.
+         *
+         * @return the operation result
          */
         private PrototypeTransaction begin() {
             long txId = timestampOracle.nextTimestamp();
@@ -331,26 +423,35 @@ public final class AsyncCommitPrototypeBenchmark {
         }
 
         /**
-         * 执行原型事务预写。
+         * Prewrite the prototype transaction.
+         *
+         * @param tx transaction context
+         * @param shardId logical shard identifier
          */
-        private void prewrite(PrototypeTransaction tx, String shardId) {
+        private void prewrite(final PrototypeTransaction tx, final String shardId) {
             tx.markParticipant(shardId);
             metadataStore.registerParticipants(tx.txId(), Set.of(shardId));
             adapters.get(shardId).prewrite(tx.txId(), tx.startTs(), tx.mutations(shardId));
         }
 
         /**
-         * 提交主分片写入。
+         * Commit primary shard writes.
+         *
+         * @param tx transaction context
+         * @param commitTs durable commit timestamp
          */
-        private void commitPrimary(PrototypeTransaction tx, long commitTs) {
+        private void commitPrimary(final PrototypeTransaction tx, final long commitTs) {
             adapters.get(tx.primaryShard()).commit(tx.txId(), commitTs);
             primaryCommits.increment();
         }
 
         /**
-         * 将从分片提交任务放入后台队列。
+         * From shard commit job into background queue.
+         *
+         * @param tx transaction context
+         * @param commitTs durable commit timestamp
          */
-        private void enqueueSecondaryCommit(PrototypeTransaction tx, long commitTs) {
+        private void enqueueSecondaryCommit(final PrototypeTransaction tx, final long commitTs) {
             for (String shardId : tx.secondaryShards()) {
                 incrementPending();
                 secondaryExecutor.submit(() -> {
@@ -365,9 +466,12 @@ public final class AsyncCommitPrototypeBenchmark {
         }
 
         /**
-         * 提交全部从分片写入。
+         * Commit All written from shard.
+         *
+         * @param tx transaction context
+         * @param commitTs durable commit timestamp
          */
-        private void commitSecondaries(PrototypeTransaction tx, long commitTs) {
+        private void commitSecondaries(final PrototypeTransaction tx, final long commitTs) {
             for (String shardId : tx.secondaryShards()) {
                 adapters.get(shardId).commit(tx.txId(), commitTs);
                 secondaryCommits.increment();
@@ -375,15 +479,17 @@ public final class AsyncCommitPrototypeBenchmark {
         }
 
         /**
-         * 安静回滚原型事务。
+         * Roll back the prototype transaction without masking the original failure.
+         *
+         * @param tx transaction context
          */
-        private void rollbackQuietly(PrototypeTransaction tx) {
+        private void rollbackQuietly(final PrototypeTransaction tx) {
             if (tx.status() != TxStatus.ACTIVE) {
                 return;
             }
             try {
                 metadataStore.markAborted(tx.txId());
-            } catch (RuntimeException ignored) {
+            } catch (final RuntimeException ignored) {
                 return;
             }
             try {
@@ -394,7 +500,9 @@ public final class AsyncCommitPrototypeBenchmark {
         }
 
         /**
-         * 等待后台异步提交任务排空。
+         * Waiting for background Step commit task emptied.
+         *
+         * @throws InterruptedException if the operation cannot complete
          */
         private void awaitBackgroundDrain() throws InterruptedException {
             while (pendingSecondary.get() > 0) {
@@ -403,28 +511,34 @@ public final class AsyncCommitPrototypeBenchmark {
         }
 
         /**
-         * 返回主分片提交计数。
+         * Returns the primary shard commit count.
+         *
+         * @return the operation result
          */
         private long primaryCommits() {
             return primaryCommits.sum();
         }
 
         /**
-         * 返回从分片提交计数。
+         * Returns the count from shard commit.
+         *
+         * @return the operation result
          */
         private long secondaryCommits() {
             return secondaryCommits.sum();
         }
 
         /**
-         * 返回最大待处理从分片提交数。
+         * Returns the maximum number to be processed from shard commit.
+         *
+         * @return the operation result
          */
         private int maxPendingSecondary() {
             return maxPendingSecondary.get();
         }
 
         /**
-         * 递增待处理从分片提交计数。
+         * Incremental to process from shard commit.
          */
         private void incrementPending() {
             int value = pendingSecondary.incrementAndGet();
@@ -432,7 +546,9 @@ public final class AsyncCommitPrototypeBenchmark {
         }
 
         /**
-         * 关闭资源或后台执行器。
+         * Close resources and background executors.
+         *
+         * @throws InterruptedException if the operation cannot complete
          */
         @Override
         public void close() throws InterruptedException {
@@ -443,11 +559,16 @@ public final class AsyncCommitPrototypeBenchmark {
         }
 
         /**
-         * 在多个参与分片上执行操作。
+         * Execute the operation across participating shards.
+         *
+         * @param participants participants
+         * @param action action
+         * @param parallel parallel
+         * @throws MvccException if the operation cannot complete
          */
-        private void runAcrossParticipants(Set<String> participants,
-                                           Consumer<String> action,
-                                           boolean parallel) {
+        private void runAcrossParticipants(final Set<String> participants,
+                                           final Consumer<String> action,
+                                           final boolean parallel) {
             if (!parallel || participants.size() <= 1) {
                 for (String participant : participants) {
                     action.accept(participant);
@@ -459,7 +580,7 @@ public final class AsyncCommitPrototypeBenchmark {
                     .map(participant -> CompletableFuture.runAsync(() -> {
                         try {
                             action.accept(participant);
-                        } catch (Throwable ex) {
+                        } catch (final Throwable ex) {
                             failures.add(ex);
                             throw ex;
                         }
@@ -467,7 +588,7 @@ public final class AsyncCommitPrototypeBenchmark {
                     .toList();
             try {
                 CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
-            } catch (CompletionException ignored) {
+            } catch (final CompletionException ignored) {
                 Throwable failure = failures.peek();
                 if (failure instanceof RuntimeException runtimeException) {
                     throw runtimeException;
@@ -477,105 +598,125 @@ public final class AsyncCommitPrototypeBenchmark {
                         "parallel participant action failed",
                         true,
                         null,
-                        failure
-                );
+                        failure);
             }
         }
     }
 
     /**
-     * 原型事务上下文。
+     * Prototype transaction context.
      */
     private static final class PrototypeTransaction {
+
         private final long txId;
+
         private final long startTs;
+
         private final Map<String, List<Mutation>> bufferedMutations = new LinkedHashMap<>();
+
         private TxStatus status = TxStatus.ACTIVE;
 
         /**
-         * 构造 PrototypeTransaction 实例。
+         * Construct a PrototypeTransaction instance.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
          */
-        private PrototypeTransaction(long txId, long startTs) {
+        private PrototypeTransaction(final long txId, final long startTs) {
             this.txId = txId;
             this.startTs = startTs;
         }
 
         /**
-         * 返回事务编号。
+         * Return the transaction identifier.
+         *
+         * @return the operation result
          */
         private long txId() {
             return txId;
         }
 
         /**
-         * 返回事务开始时间戳。
+         * Return the transaction start timestamp.
+         *
+         * @return the operation result
          */
         private long startTs() {
             return startTs;
         }
 
         /**
-         * 缓存一次分片写入变更。
+         * Buffer a shard mutation.
+         *
+         * @param shardId logical shard identifier
+         * @param mutation mutation
          */
-        private void buffer(String shardId, Mutation mutation) {
+        private void buffer(final String shardId, final Mutation mutation) {
             bufferedMutations.computeIfAbsent(shardId, ignored -> new ArrayList<>()).add(mutation);
         }
 
         /**
-         * 返回指定分片的写入变更列表。
+         * Return buffered mutations for the shard.
+         *
+         * @param shardId logical shard identifier
+         * @return the operation result
          */
-        private List<Mutation> mutations(String shardId) {
+        private List<Mutation> mutations(final String shardId) {
             return bufferedMutations.getOrDefault(shardId, List.of());
         }
 
         /**
-         * 标记事务参与分片。
+         * Register a participating shard.
+         *
+         * @param shardId logical shard identifier
          */
-        private void markParticipant(String shardId) {
+        private void markParticipant(final String shardId) {
             bufferedMutations.computeIfAbsent(shardId, ignored -> new ArrayList<>());
         }
 
         /**
-         * 返回事务参与分片集合。
+         * Return the participating shards.
+         *
+         * @return the operation result
          */
         private Set<String> participants() {
             return bufferedMutations.keySet();
         }
 
         /**
-         * 返回原型事务主分片。
+         * Returns prototype transaction primary shard.
+         *
+         * @return the operation result
          */
         private String primaryShard() {
             return "shard-1";
         }
 
         /**
-         * 返回原型事务从分片列表。
+         * Returns the prototype transaction from the shard list.
+         *
+         * @return the operation result
          */
         private List<String> secondaryShards() {
             return participants().stream().filter(shardId -> !shardId.equals(primaryShard())).toList();
         }
 
         /**
-         * 返回事务状态。
+         * Return the transaction state.
+         *
+         * @return the operation result
          */
         private TxStatus status() {
             return status;
         }
 
         /**
-         * 返回事务状态。
+         * Return the transaction state.
+         *
+         * @param status status
          */
-        private void status(TxStatus status) {
+        private void status(final TxStatus status) {
             this.status = status;
         }
-    }
-
-    /**
-     * 读取字符串环境变量配置。
-     */
-    private static String env(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value == null || value.isBlank() ? defaultValue : value;
     }
 }

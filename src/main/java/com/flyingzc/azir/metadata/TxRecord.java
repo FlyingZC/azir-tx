@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metadata;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -9,25 +25,39 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 
 /**
- * 事务元数据记录，保存事务时间戳、隔离级别、参与分片与提交状态。
+ * Transaction metadata Records, keep transaction timestamp, level of isolation, participation shard and commit status.
  */
 public final class TxRecord {
+
     private final long txId;
+
     private final long startTs;
+
     private final IsolationLevel isolationLevel;
+
     private final Set<String> participants;
+
     private final TxStatus status;
+
     private final Long commitTs;
 
     /**
-     * 构造 TxRecord 实例。
+     * Construct a TxRecord instance.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @param status status
+     * @param commitTs durable commit timestamp
+     * @throws MvccException if the operation cannot complete
      */
-    public TxRecord(long txId,
-                    long startTs,
-                    IsolationLevel isolationLevel,
-                    Set<String> participants,
-                    TxStatus status,
-                    Long commitTs) {
+    public TxRecord(final long txId,
+                    final long startTs,
+                    final IsolationLevel isolationLevel,
+                    final Set<String> participants,
+                    final TxStatus status,
+                    final Long commitTs) {
         if (status == null || isolationLevel == null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction status and isolation level must not be null", false, txId);
         }
@@ -44,65 +74,86 @@ public final class TxRecord {
     }
 
     /**
-     * 返回事务编号。
+     * Return the transaction identifier.
+     *
+     * @return the operation result
      */
     public long txId() {
         return txId;
     }
 
     /**
-     * 返回事务开始时间戳。
+     * Return the transaction start timestamp.
+     *
+     * @return the operation result
      */
     public long startTs() {
         return startTs;
     }
 
     /**
-     * 返回事务隔离级别。
+     * Return the transaction isolation level.
+     *
+     * @return the operation result
      */
     public IsolationLevel isolationLevel() {
         return isolationLevel;
     }
 
     /**
-     * 返回事务参与分片集合。
+     * Return the participating shards.
+     *
+     * @return the operation result
      */
     public Set<String> participants() {
         return Set.copyOf(participants);
     }
 
     /**
-     * 返回事务状态。
+     * Return the transaction state.
+     *
+     * @return the operation result
      */
     public TxStatus status() {
         return status;
     }
 
     /**
-     * 返回事务提交时间戳。
+     * Returns transaction commit timestamp.
+     *
+     * @return the operation result
      */
     public Long commitTs() {
         return commitTs;
     }
 
     /**
-     * 返回替换参与分片后的新事务记录。
+     * Returns new transaction records after participating shard.
+     *
+     * @param newParticipants new participants
+     * @return the operation result
      */
-    public TxRecord withParticipants(Set<String> newParticipants) {
+    public TxRecord withParticipants(final Set<String> newParticipants) {
         return new TxRecord(txId, startTs, isolationLevel, newParticipants, status, commitTs);
     }
 
     /**
-     * 返回替换状态后的新事务记录。
+     * Returns new transaction records after replacement status.
+     *
+     * @param newStatus new status
+     * @return the operation result
      */
-    public TxRecord withStatus(TxStatus newStatus) {
+    public TxRecord withStatus(final TxStatus newStatus) {
         return new TxRecord(txId, startTs, isolationLevel, participants, newStatus, commitTs);
     }
 
     /**
-     * 返回已提交状态的新事务记录。
+     * Returns the new transaction record of an commit state.
+     *
+     * @param newCommitTs new commit ts
+     * @return the operation result
      */
-    public TxRecord withCommitted(long newCommitTs) {
+    public TxRecord withCommitted(final long newCommitTs) {
         return new TxRecord(txId, startTs, isolationLevel, participants, TxStatus.COMMITTED, newCommitTs);
     }
 }

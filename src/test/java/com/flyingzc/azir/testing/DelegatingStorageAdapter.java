@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.testing;
 
 import com.flyingzc.azir.metadata.TransactionMetadataStore;
@@ -14,139 +30,250 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 完整转发真实存储协议，故障包装器只覆盖需要注入故障的调用。
+ * Full forwarding of a genuine storage protocol, failure packaging covers only calls that need to be injected into failure.
  */
 abstract class DelegatingStorageAdapter implements StorageAdapter {
+
     protected final StorageAdapter delegate;
 
-    /** 构造绑定真实适配器的测试包装器。 */
-    protected DelegatingStorageAdapter(StorageAdapter delegate) {
+    /**
+     * Construct a test wrapper for binding a genuine adapter.
+     *
+     * @param delegate delegate
+     */
+    protected DelegatingStorageAdapter(final StorageAdapter delegate) {
         this.delegate = delegate;
     }
 
-    /** 转发事务中心绑定，保留真实适配器的禁止复绑约束。 */
+    /**
+     * Forwards the binding of the transaction centre to keep the real adapter's prohibition on binding.
+     *
+     * @param store store
+     */
     @Override
-    public void configureMetadataStore(TransactionMetadataStore store) {
+    public void configureMetadataStore(final TransactionMetadataStore store) {
         delegate.configureMetadataStore(store);
     }
 
-    /** 返回真实适配器的已提交意向解析能力。 */
+    /**
+     * Returns the commit intent resolution capability of a real adapter.
+     *
+     * @return the operation result
+     */
     @Override
     public boolean supportsCommittedIntentResolution() {
         return delegate.supportsCommittedIntentResolution();
     }
 
-    /** 返回真实适配器的原子直接提交能力。 */
+    /**
+     * Returns the atomic direct commit capability of a real adapter.
+     *
+     * @return the operation result
+     */
     @Override
     public boolean supportsAtomicDirectCommit() {
         return delegate.supportsAtomicDirectCommit();
     }
 
-    /** 查询真实参与者记录，不通过包装器伪造本地终态。 */
+    /**
+     * Query for real participant records and do not forge local terminal state through packaging.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
     @Override
-    public Optional<ParticipantRecord> participantRecord(long txId) {
+    public Optional<ParticipantRecord> participantRecord(final long txId) {
         return delegate.participantRecord(txId);
     }
 
-    /** 返回真实分片编号。 */
+    /**
+     * Returns the real shard number.
+     *
+     * @return the operation result
+     */
     @Override
     public String shardId() {
         return delegate.shardId();
     }
 
-    /** 初始化真实存储结构。 */
+    /**
+     * Initializes the real storage structure.
+     */
     @Override
     public void initialize() {
         delegate.initialize();
     }
 
-    /** 返回真实适配器的显式准备要求。 */
+    /**
+     * Returns the visible preparation requirement for a real adapter.
+     *
+     * @return the operation result
+     */
     @Override
     public boolean requiresExplicitPreparePhase() {
         return delegate.requiresExplicitPreparePhase();
     }
 
-    /** 转发快照点读。 */
+    /**
+     * Forward snapshot dots.
+     *
+     * @param context context
+     * @param key business key
+     * @return the operation result
+     */
     @Override
-    public Optional<VersionedValue> get(ReadContext context, String key) {
+    public Optional<VersionedValue> get(final ReadContext context, final String key) {
         return delegate.get(context, key);
     }
 
-    /** 转发完整范围扫描。 */
+    /**
+     * Forward a full range scan.
+     *
+     * @param context context
+     * @param keyRange key range
+     * @return the operation result
+     */
     @Override
-    public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+    public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
         return delegate.scan(context, keyRange);
     }
 
-    /** 转发真实分页实现，保留页边界和扫描资源限制。 */
+    /**
+     * Retransmitting real pages is achieved, retention page boundaries and scanned resource limitations.
+     *
+     * @param context context
+     * @param keyRange key range
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public ScanPage scanPage(ReadContext context, KeyRange keyRange, String afterKeyExclusive, int limit) {
+    public ScanPage scanPage(final ReadContext context, final KeyRange keyRange, final String afterKeyExclusive, final int limit) {
         return delegate.scanPage(context, keyRange, afterKeyExclusive, limit);
     }
 
-    /** 转发意向预写。 */
+    /**
+     * Forward intent prewrite.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param mutations transaction write set
+     */
     @Override
-    public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+    public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
         delegate.prewrite(txId, startTs, mutations);
     }
 
-    /** 转发显式准备。 */
+    /**
+     * Retransmit the visible preparation.
+     *
+     * @param txId transaction identifier
+     */
     @Override
-    public void prepare(long txId) {
+    public void prepare(final long txId) {
         delegate.prepare(txId);
     }
 
-    /** 按事务编号转发提交。 */
+    /**
+     * Press transaction identifier to forward commit.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     */
     @Override
-    public void commit(long txId, long commitTs) {
+    public void commit(final long txId, final long commitTs) {
         delegate.commit(txId, commitTs);
     }
 
-    /** 按已知写集合转发提交。 */
+    /**
+     * Forward commit by known write set.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
+     */
     @Override
-    public void commit(long txId, long commitTs, List<Mutation> mutations) {
+    public void commit(final long txId, final long commitTs, final List<Mutation> mutations) {
         delegate.commit(txId, commitTs, mutations);
     }
 
-    /** 转发提交及意向清理策略。 */
+    /**
+     * Forwards the commit and intent cleanup policy.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
+     * @param cleanupIntents cleanup intents
+     */
     @Override
-    public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+    public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
         delegate.commit(txId, commitTs, mutations, cleanupIntents);
     }
 
-    /** 转发版本与参与者记录的原子直接提交。 */
+    /**
+     * Forward version and participant recorded atomic directly commit.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param commitTs durable commit timestamp
+     * @param mutations transaction write set
+     */
     @Override
-    public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+    public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
         delegate.directCommit(txId, startTs, commitTs, mutations);
     }
 
-    /** 按写集合转发意向清理。 */
+    /**
+     * Press write set to forward intent cleanup.
+     *
+     * @param txId transaction identifier
+     * @param mutations transaction write set
+     */
     @Override
-    public void cleanupIntents(long txId, List<Mutation> mutations) {
+    public void cleanupIntents(final long txId, final List<Mutation> mutations) {
         delegate.cleanupIntents(txId, mutations);
     }
 
-    /** 按事务编号转发意向清理。 */
+    /**
+     * Press transaction identifier to forward intent cleanup.
+     *
+     * @param txId transaction identifier
+     */
     @Override
-    public void cleanupIntents(long txId) {
+    public void cleanupIntents(final long txId) {
         delegate.cleanupIntents(txId);
     }
 
-    /** 转发真实回滚及终态防护。 */
+    /**
+     * Prove the pen-by-punction center decision as the original local COMMITTED.
+     *
+     * @param txId transaction identifier
+     */
     @Override
-    public void abort(long txId) {
+    public void abort(final long txId) {
         delegate.abort(txId);
     }
 
-    /** 转发待恢复事务扫描。 */
+    /**
+     * Forward to recovery transaction scan.
+     *
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public Set<Long> findPendingTransactionIds(int limit) {
+    public Set<Long> findPendingTransactionIds(final int limit) {
         return delegate.findPendingTransactionIds(limit);
     }
 
-    /** 转发安全点垃圾回收。 */
+    /**
+     * Forward safe point garbage collection.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param limit maximum number of items
+     * @return the operation result
+     */
     @Override
-    public int gc(long safePoint, int limit) {
+    public int gc(final long safePoint, final int limit) {
         return delegate.gc(safePoint, limit);
     }
 }

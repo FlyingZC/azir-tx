@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -14,32 +30,42 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 将同一 owner 分段内已预写事务合成一笔无全局状态行锁的控制决议。 */
+/**
+ * Combining prewrite transaction in the same own sub-section with a control decision without a lock on global status.
+ */
 final class PublicationSegmentCommitBatcher {
+
     private final PublicationSegmentOwnerRegistry owner;
+
     private final ArrayBlockingQueue<Request> queue;
+
     private final int maxBatchSize;
+
     private final List<Thread> workers;
+
     private final LongAdder groups = new LongAdder();
+
     private final LongAdder requests = new LongAdder();
+
     private final LongAdder singletons = new LongAdder();
+
     private final LongAdder unknownGroups = new LongAdder();
+
     private final LongAdder synchronousFallbacks = new LongAdder();
+
     private boolean closed;
 
-    /** 保存一笔决议请求及其独立的前台确认。 */
-    private record Request(PublicationSegmentOwnerRegistry.CommitRequest commit,
-                           CompletableFuture<Long> result) {
-    }
-
-    /** 返回实际批次规模及失去结果证明的批次数。 */
-    record Stats(long groups, long requests, long singletons,
-                 long unknownGroups, long synchronousFallbacks) {
-    }
-
-    /** 创建有界队列与固定数量的虚拟批处理线程。 */
-    PublicationSegmentCommitBatcher(PublicationSegmentOwnerRegistry owner, int queueCapacity,
-                                    int maxBatchSize, int workerCount) {
+    /**
+     * Creates the bounded queue with a fixed number of virtual batch threads.
+     *
+     * @param owner owner
+     * @param queueCapacity queue capacity
+     * @param maxBatchSize max batch size
+     * @param workerCount worker count
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    PublicationSegmentCommitBatcher(final PublicationSegmentOwnerRegistry owner, final int queueCapacity,
+                                    final int maxBatchSize, final int workerCount) {
         if (queueCapacity < 1 || maxBatchSize < 2 || maxBatchSize > 64
                 || workerCount < 1 || workerCount > 8) {
             throw new IllegalArgumentException("invalid segmented commit batch limits");
@@ -54,9 +80,17 @@ final class PublicationSegmentCommitBatcher {
         this.workers = List.copyOf(started);
     }
 
-    /** 等待自己的持久中心决议，任何批次未知结果都保留原事务身份供恢复。 */
-    long commit(PublicationSegmentOwnerRegistry.Assignment assignment, long txId,
-                long deadlineMillis, Set<String> participants) {
+    /**
+     * Waiting for its own durable center decision, any unknown result of batch retains the original transaction identity for recovery.
+     *
+     * @param assignment assignment
+     * @param txId transaction identifier
+     * @param deadlineMillis deadline millis
+     * @param participants participants
+     * @return the operation result
+     */
+    long commit(final PublicationSegmentOwnerRegistry.Assignment assignment, final long txId,
+                final long deadlineMillis, final Set<String> participants) {
         var result = new CompletableFuture<Long>();
         var request = new Request(new PublicationSegmentOwnerRegistry.CommitRequest(
                 assignment, txId, deadlineMillis, participants), result);
@@ -70,7 +104,7 @@ final class PublicationSegmentCommitBatcher {
         }
         try {
             return result.join();
-        } catch (CompletionException ex) {
+        } catch (final CompletionException ex) {
             if (ex.getCause() instanceof RuntimeException cause) {
                 throw cause;
             }
@@ -78,8 +112,12 @@ final class PublicationSegmentCommitBatcher {
         }
     }
 
-    /** 已接受请求处理结束后停止批量工作线程。 */
-    void close(long timeoutMillis) {
+    /**
+     * Stop batch lines of work after the requested processing has been accepted.
+     *
+     * @param timeoutMillis timeout millis
+     */
+    void close(final long timeoutMillis) {
         synchronized (queue) {
             closed = true;
         }
@@ -88,18 +126,24 @@ final class PublicationSegmentCommitBatcher {
             for (Thread worker : workers) {
                 worker.join(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
         }
     }
 
-    /** 返回只读批次统计供隔离压测观察聚合程度。 */
+    /**
+     * Returns read-only batch statistics for quarantine pressure measurements to observe aggregates.
+     *
+     * @return the operation result
+     */
     Stats stats() {
         return new Stats(groups.sum(), requests.sum(), singletons.sum(),
                 unknownGroups.sum(), synchronousFallbacks.sum());
     }
 
-    /** 从有界队列短暂收集请求，再按分段身份分别提交。 */
+    /**
+     * Collect requests from the bounded queue briefly, followed by the identity line by the commit.
+     */
     private void run() {
         while (true) {
             try {
@@ -128,14 +172,18 @@ final class PublicationSegmentCommitBatcher {
                             ignored -> new ArrayList<>()).add(request);
                 }
                 bySegment.values().forEach(this::process);
-            } catch (InterruptedException ex) {
+            } catch (final InterruptedException ex) {
                 Thread.interrupted();
             }
         }
     }
 
-    /** 批次 SQL 失败后不猜测提交结果，交给后台按持久槽和元数据恢复。 */
-    private void process(List<Request> batch) {
+    /**
+     * Batch SQL failed without guessing the result of commit and handed it to background by pressing durable slots and metadata recovery.
+     *
+     * @param batch batch
+     */
+    private void process(final List<Request> batch) {
         groups.increment();
         requests.add(batch.size());
         if (batch.size() == 1) {
@@ -145,7 +193,7 @@ final class PublicationSegmentCommitBatcher {
                 var commit = request.commit();
                 request.result().complete(owner.decide(commit.assignment(), commit.txId(),
                         commit.deadlineMillis(), commit.participants()));
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 request.result().completeExceptionally(ex);
             }
             return;
@@ -155,7 +203,7 @@ final class PublicationSegmentCommitBatcher {
             for (Request request : batch) {
                 request.result().complete(request.commit().assignment().commitTs());
             }
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             unknownGroups.increment();
             for (Request request : batch) {
                 request.result().completeExceptionally(new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -163,5 +211,28 @@ final class PublicationSegmentCommitBatcher {
                         request.commit().txId(), ex));
             }
         }
+    }
+
+    /**
+     * Saves an decision request and its independent foreground confirmation.
+     *
+     * @param commit commit
+     * @param result result
+     */
+    private record Request(PublicationSegmentOwnerRegistry.CommitRequest commit,
+            CompletableFuture<Long> result) {
+    }
+
+    /**
+     * Returns the actual batch size and the number of batch s lost in results.
+     *
+     * @param groups groups
+     * @param requests requests
+     * @param singletons singletons
+     * @param unknownGroups unknown groups
+     * @param synchronousFallbacks synchronous fallbacks
+     */
+    record Stats(long groups, long requests, long singletons,
+            long unknownGroups, long synchronousFallbacks) {
     }
 }

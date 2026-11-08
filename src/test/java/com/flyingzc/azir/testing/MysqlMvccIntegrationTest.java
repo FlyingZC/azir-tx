@@ -1,4 +1,25 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.testing;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.api.Transaction;
 import com.flyingzc.azir.api.TransactionCommitMode;
@@ -55,11 +76,12 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-/** 使用真实 MySQL 分片验证事务协议、快照可见性和故障恢复。 */
+/**
+ * Use real MySQL shard verify transaction, snapshot Visibility and failure recovery.
+ */
 @Testcontainers
 class MysqlMvccIntegrationTest {
+
     @Container
     private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4")
             .withUsername("test")
@@ -67,16 +89,26 @@ class MysqlMvccIntegrationTest {
             .withDatabaseName("bootstrap");
 
     private static DataSource shard1DataSource;
+
     private static DataSource shard2DataSource;
+
     private MysqlStorageAdapter shard1;
+
     private MysqlStorageAdapter shard2;
 
     private TimestampOracle tso;
+
     private TransactionMetadataStore metadataStore;
+
     private TransactionManager transactionManager;
+
     private RecoveryManager recoveryManager;
 
-    /** 创建隔离测试数据库并初始化协议表。 */
+    /**
+     * Creates a quarantine test database and initializes the protocol table.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeAll
     static void beforeAll() throws Exception {
         createDatabase("shard_1");
@@ -87,52 +119,60 @@ class MysqlMvccIntegrationTest {
         new MysqlStorageAdapter("shard-2", shard2DataSource).initialize();
     }
 
-    /** 关闭测试使用的数据源。 */
+    /**
+     * Closes the data source used for testing.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @AfterAll
     static void afterAll() throws Exception {
         close(shard1DataSource);
         close(shard2DataSource);
     }
 
-    /** 清理协议状态并为当前用例创建独立适配器。 */
+    /**
+     * Clears the protocol state and creates an independent adaptor for current use.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeEach
     void setUp() throws Exception {
         truncate(shard1DataSource);
         truncate(shard2DataSource);
         tso = new AtomicTimestampOracle(100);
         metadataStore = new InMemoryTransactionMetadataStore();
-        // 每个用例使用新适配器，避免向上一用例已绑定的适配器复绑事务中心。
+        // Use the new adapter in each case to avoid reconnecting to the transaction centre of the previous example.
         shard1 = new MysqlStorageAdapter("shard-1", shard1DataSource);
         shard2 = new MysqlStorageAdapter("shard-2", shard2DataSource);
         shard1.initialize();
         shard2.initialize();
         transactionManager = new TransactionManager(tso, metadataStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
         recoveryManager = new RecoveryManager(metadataStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), shard2
-        ));
+                shard2.shardId(), shard2));
     }
 
-    /** 验证读已提交在不同语句间观察最新提交版本。 */
+    /**
+     * Verify Reads commit Watched the latest commit version between different statements.
+     */
     @Test
     void readCommittedShouldObserveLatestCommittedVersionAcrossStatements() {
         seedCommittedValue("shard-1", "account:1", "v1");
 
         Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("v1", readString(reader, "shard-1", "account:1"));
+        Assertions.assertEquals("v1", readString(reader, "shard-1", "account:1"));
 
         Transaction writer = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         transactionManager.put(writer, "shard-1", "account:1", bytes("v2"));
         transactionManager.commit(writer);
 
-        assertEquals("v2", readString(reader, "shard-1", "account:1"));
+        Assertions.assertEquals("v2", readString(reader, "shard-1", "account:1"));
     }
 
     /**
-     * 验证 Calcite 复杂 SQL 通过真实 MySQL MVCC 适配器完成跨分片 DML、JOIN 和聚合。
+     * Verify Calcite Complex SQL completes cross-shard DML, JOIN and Aggregation by real MySQL MVCC adapter.
      */
     @Test
     void calciteSqlShouldExecuteAgainstMysqlMvccShards() {
@@ -140,8 +180,7 @@ class MysqlMvccIntegrationTest {
                 transactionManager,
                 ShardResolver.hashByKey(List.of(shard1.shardId(), shard2.shardId())),
                 SqlValueCodec.utf8(),
-                IsolationLevel.READ_COMMITTED
-        );
+                IsolationLevel.READ_COMMITTED);
 
         try (SqlSession session = sqlEngine.openSession()) {
             session.execute("insert into account (id, value) values ('a', 'gold'), ('b', 'silver'), ('c', 'gold')");
@@ -157,43 +196,51 @@ class MysqlMvccIntegrationTest {
                     order by total desc
                     """);
 
-            assertEquals(1, result.rows().size());
-            assertEquals("gold", result.singleRow().get("category"));
-            assertEquals("2", result.singleRow().get("total"));
-            assertEquals(1, session.execute("delete from account where value = 'SILVER'").updateCount());
-            assertEquals(2, session.execute("select * from account").rows().size());
+            Assertions.assertEquals(1, result.rows().size());
+            Assertions.assertEquals("gold", result.singleRow().get("category"));
+            Assertions.assertEquals("2", result.singleRow().get("total"));
+            Assertions.assertEquals(1, session.execute("delete from account where value = 'SILVER'").updateCount());
+            Assertions.assertEquals(2, session.execute("select * from account").rows().size());
         }
     }
 
-    /** 验证可重复读保留事务开始快照。 */
+    /**
+     * Verify Rereadable transaction Start snapshot.
+     */
     @Test
     void repeatableReadShouldKeepStartSnapshot() {
         seedCommittedValue("shard-1", "account:1", "v1");
 
         Transaction reader = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
-        assertEquals("v1", readString(reader, "shard-1", "account:1"));
+        Assertions.assertEquals("v1", readString(reader, "shard-1", "account:1"));
 
         Transaction writer = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         transactionManager.put(writer, "shard-1", "account:1", bytes("v2"));
         transactionManager.commit(writer);
 
-        assertEquals("v1", readString(reader, "shard-1", "account:1"));
+        Assertions.assertEquals("v1", readString(reader, "shard-1", "account:1"));
     }
 
-    /** 验证读己之写并隔离其他事务的未决写入。 */
+    /**
+     * Verify read-your-own-writes and separate pending from other transaction writing.
+     */
     @Test
     void shouldReadOwnIntentAndSkipOtherTransactionIntent() {
         seedCommittedValue("shard-1", "account:1", "base");
 
         Transaction tx1 = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
         transactionManager.put(tx1, "shard-1", "account:1", bytes("tx1"));
-        assertEquals("tx1", readString(tx1, "shard-1", "account:1"));
+        Assertions.assertEquals("tx1", readString(tx1, "shard-1", "account:1"));
 
         Transaction tx2 = transactionManager.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("base", readString(tx2, "shard-1", "account:1"));
+        Assertions.assertEquals("base", readString(tx2, "shard-1", "account:1"));
     }
 
-    /** 验证缓冲写提交前的点读和范围读可见性。 */
+    /**
+     * Verify buffer Write point and range visibility before commit.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void bufferedWritesShouldSupportReadYourOwnWriteBeforeCommit() throws Exception {
         TransactionManager bufferedManager = new TransactionManager(
@@ -205,27 +252,28 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.parallel(),
                         true,
                         false,
-                        false
-                ),
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                        false),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
 
         Transaction tx = bufferedManager.begin(IsolationLevel.REPEATABLE_READ);
         bufferedManager.put(tx, "shard-1", "buffered:001", bytes("v1"));
         bufferedManager.put(tx, "shard-1", "buffered:002", bytes("v2"));
 
-        assertEquals("v1", bufferedManager.get(tx, "shard-1", "buffered:001").map(String::new).orElse(null));
-        assertEquals(
+        Assertions.assertEquals("v1", bufferedManager.get(tx, "shard-1", "buffered:001").map(String::new).orElse(null));
+        Assertions.assertEquals(
                 List.of("buffered:001", "buffered:002"),
                 bufferedManager.scan(tx, "shard-1", "buffered:000", "buffered:999")
                         .stream()
                         .map(VersionedValue::key)
-                        .collect(Collectors.toList())
-        );
-        assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
+                        .collect(Collectors.toList()));
+        Assertions.assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
     }
 
-    /** 验证跨分片缓冲写在提交时物化并清理意向。 */
+    /**
+     * Verify cross-shard buffer Write materialization at commit and clear intent.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void bufferedWritesShouldFlushAtCommit() throws Exception {
         TransactionManager bufferedManager = new TransactionManager(
@@ -237,10 +285,8 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.parallel(),
                         true,
                         false,
-                        false
-                ),
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                        false),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
 
         Transaction tx = bufferedManager.begin(IsolationLevel.REPEATABLE_READ);
         bufferedManager.put(tx, "shard-1", "buffered:commit:1", bytes("left"));
@@ -248,13 +294,17 @@ class MysqlMvccIntegrationTest {
 
         bufferedManager.commit(tx);
 
-        assertEquals("left", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "buffered:commit:1"));
-        assertEquals("right", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "buffered:commit:2"));
-        assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
-        assertEquals(0, countRows(shard2DataSource, "mvcc_intent"));
+        Assertions.assertEquals("left", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "buffered:commit:1"));
+        Assertions.assertEquals("right", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "buffered:commit:2"));
+        Assertions.assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
+        Assertions.assertEquals(0, countRows(shard2DataSource, "mvcc_intent"));
     }
 
-    /** 验证单分片原子直接提交生成版本且不落地意向。 */
+    /**
+     * Verify Single shard atomic Direct commit Generate version without landing intent.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void singleShardBufferedCommitShouldBypassIntentWritePath() throws Exception {
         PublicationCheckingStorageAdapter checkedShard = new PublicationCheckingStorageAdapter(shard1, metadataStore);
@@ -267,10 +317,8 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.parallel(),
                         true,
                         false,
-                        false
-                ),
-                Map.of(shard1.shardId(), checkedShard, shard2.shardId(), shard2)
-        );
+                        false),
+                Map.of(shard1.shardId(), checkedShard, shard2.shardId(), shard2));
 
         Transaction tx = bufferedManager.begin(IsolationLevel.REPEATABLE_READ);
         bufferedManager.put(tx, "shard-1", "single:buffered:1", bytes("v1"));
@@ -278,15 +326,17 @@ class MysqlMvccIntegrationTest {
 
         bufferedManager.commit(tx);
 
-        assertEquals(0, checkedShard.prewriteCalls);
-        assertEquals(1, checkedShard.directCommitCalls);
-        assertEquals("v1", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:buffered:1"));
-        assertEquals("v2", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:buffered:2"));
-        assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
-        assertEquals(2, countRows(shard1DataSource, "mvcc_data"));
+        Assertions.assertEquals(0, checkedShard.prewriteCalls);
+        Assertions.assertEquals(1, checkedShard.directCommitCalls);
+        Assertions.assertEquals("v1", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:buffered:1"));
+        Assertions.assertEquals("v2", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:buffered:2"));
+        Assertions.assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
+        Assertions.assertEquals(2, countRows(shard1DataSource, "mvcc_data"));
     }
 
-    /** 验证延迟登记在写提交时保存中心及本地恢复决议。 */
+    /**
+     * Verify Delays in registration to save centre and local recovery decision at commit writing.
+     */
     @Test
     void singleShardBufferedCommitShouldPersistRecoveryMetadataWhenLazyBeginEnabled() {
         PublicationCheckingStorageAdapter checkedShard = new PublicationCheckingStorageAdapter(shard1, metadataStore);
@@ -299,43 +349,44 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.parallel(),
                         true,
                         true,
-                        false
-                ),
-                Map.of(shard1.shardId(), checkedShard, shard2.shardId(), shard2)
-        );
+                        false),
+                Map.of(shard1.shardId(), checkedShard, shard2.shardId(), shard2));
 
         Transaction tx = bufferedManager.begin(IsolationLevel.REPEATABLE_READ);
         assertTrue(metadataStore.get(tx.txId()).isEmpty());
-        assertEquals(tx.deadlineMillis(), metadataStore.snapshotExpiry(tx.txId()).orElseThrow().longValue());
+        Assertions.assertEquals(tx.deadlineMillis(), metadataStore.snapshotExpiry(tx.txId()).orElseThrow().longValue());
         bufferedManager.put(tx, "shard-1", "single:lazy-metadata:1", bytes("v1"));
         assertTrue(metadataStore.get(tx.txId()).isEmpty());
 
         TransactionCommitResult result = bufferedManager.commit(tx);
 
-        assertEquals(0, checkedShard.prewriteCalls);
-        assertEquals(1, checkedShard.directCommitCalls);
+        Assertions.assertEquals(0, checkedShard.prewriteCalls);
+        Assertions.assertEquals(1, checkedShard.directCommitCalls);
         var record = metadataStore.get(tx.txId()).orElseThrow();
         var localRecord = shard1.participantRecord(tx.txId()).orElseThrow();
-        assertEquals(TxStatus.COMMITTED, record.status());
-        assertEquals(Set.of("shard-1"), record.participants());
-        assertEquals(result.commitTs(), record.commitTs().longValue());
-        assertEquals(TxStatus.COMMITTED, localRecord.status());
-        assertEquals(tx.startTs(), localRecord.startTs());
-        assertEquals(record.commitTs(), localRecord.commitTs());
+        Assertions.assertEquals(TxStatus.COMMITTED, record.status());
+        Assertions.assertEquals(Set.of("shard-1"), record.participants());
+        Assertions.assertEquals(result.commitTs(), record.commitTs().longValue());
+        Assertions.assertEquals(TxStatus.COMMITTED, localRecord.status());
+        Assertions.assertEquals(tx.startTs(), localRecord.startTs());
+        Assertions.assertEquals(record.commitTs(), localRecord.commitTs());
         assertTrue(metadataStore.snapshotExpiry(tx.txId()).isEmpty());
-        assertEquals("v1", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:lazy-metadata:1"));
+        Assertions.assertEquals("v1", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "single:lazy-metadata:1"));
     }
 
-    /** 验证延迟登记的只读事务仅持有快照租约，提交后释放租约且不创建事务元数据。 */
+    /**
+     * Verify Delayed registration read-only transaction releases lease only after holding snapshot lease, commit and does not create transaction metadata.
+     */
     @Test
     void lazyReadOnlyTransactionShouldHoldOnlySnapshotLease() {
         TransactionOptions options = new TransactionOptions(LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.serial(), true, true, false);
-        try (TransactionManager manager = new TransactionManager(tso, metadataStore,
-                options, Map.of(shard1.shardId(), shard1))) {
+        try (
+                TransactionManager manager = new TransactionManager(tso, metadataStore,
+                        options, Map.of(shard1.shardId(), shard1))) {
             Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
             assertTrue(metadataStore.get(tx.txId()).isEmpty());
-            assertEquals(tx.deadlineMillis(), metadataStore.snapshotExpiry(tx.txId()).orElseThrow().longValue());
+            Assertions.assertEquals(tx.deadlineMillis(), metadataStore.snapshotExpiry(tx.txId()).orElseThrow().longValue());
             assertTrue(manager.get(tx, "shard-1", "readonly:missing").isEmpty());
             manager.commit(tx);
             assertTrue(metadataStore.get(tx.txId()).isEmpty());
@@ -343,28 +394,33 @@ class MysqlMvccIntegrationTest {
         }
     }
 
-    /** 验证延迟登记的立即预写路径在真实意向写入前已经登记中心参与者。 */
+    /**
+     * Verify The immediate prewrite path to delayed registration is already registered as centre participant before the real intent is written.
+     */
     @Test
     void lazyEagerWriteShouldRegisterMetadataBeforePrewrite() {
         PublicationCheckingStorageAdapter checkedShard = new PublicationCheckingStorageAdapter(shard1, metadataStore);
         TransactionOptions options = new TransactionOptions(LockWaitPolicy.failFast(),
                 TransactionRetryPolicy.noRetry(), CrossShardCommitPolicy.serial(), false, true, false);
-        try (TransactionManager manager = new TransactionManager(tso, metadataStore, options,
-                Map.of(checkedShard.shardId(), checkedShard))) {
+        try (
+                TransactionManager manager = new TransactionManager(tso, metadataStore, options,
+                        Map.of(checkedShard.shardId(), checkedShard))) {
             Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
             assertTrue(metadataStore.get(tx.txId()).isEmpty());
             manager.put(tx, "shard-1", "single:lazy-prewrite", bytes("v1"));
-            assertEquals(1, checkedShard.prewriteCalls);
+            Assertions.assertEquals(1, checkedShard.prewriteCalls);
             TransactionCommitResult result = manager.commit(tx);
-            assertEquals(0, checkedShard.directCommitCalls);
+            Assertions.assertEquals(0, checkedShard.directCommitCalls);
             var localRecord = shard1.participantRecord(tx.txId()).orElseThrow();
-            assertEquals(TxStatus.COMMITTED, localRecord.status());
-            assertEquals(result.commitTs(), localRecord.commitTs().longValue());
-            assertEquals(localRecord.commitTs(), metadataStore.get(tx.txId()).orElseThrow().commitTs());
+            Assertions.assertEquals(TxStatus.COMMITTED, localRecord.status());
+            Assertions.assertEquals(result.commitTs(), localRecord.commitTs().longValue());
+            Assertions.assertEquals(localRecord.commitTs(), metadataStore.get(tx.txId()).orElseThrow().commitTs());
         }
     }
 
-    /** 验证跨分片事务采用两阶段提交模式。 */
+    /**
+     * Verify cross-shard transaction uses two-stage commit mode.
+     */
     @Test
     void crossShardCommitShouldUseTwoPhaseCommit() {
         Transaction tx = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
@@ -373,19 +429,20 @@ class MysqlMvccIntegrationTest {
 
         TransactionCommitResult result = transactionManager.commit(tx);
 
-        assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, result.mode());
-        assertEquals("created", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "order:1"));
-        assertEquals("reserved", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "stock:1"));
+        Assertions.assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, result.mode());
+        Assertions.assertEquals("created", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "order:1"));
+        Assertions.assertEquals("reserved", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "stock:1"));
     }
 
-    /** 验证真实适配器未要求准备时跳过显式准备。 */
+    /**
+     * Verify The real adaptor does not require a high-profile preparation to be prepared.
+     */
     @Test
     void crossShardCommitShouldSkipPrepareForAdaptersThatDoNotRequireIt() {
         StorageAdapter failOnPrepareShard2 = new FailOnPrepareStorageAdapter(shard2);
         TransactionManager manager = new TransactionManager(tso, metadataStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), failOnPrepareShard2
-        ));
+                shard2.shardId(), failOnPrepareShard2));
 
         Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
         manager.put(tx, "shard-1", "order:skip-prepare", bytes("created"));
@@ -393,13 +450,15 @@ class MysqlMvccIntegrationTest {
 
         TransactionCommitResult result = manager.commit(tx);
 
-        assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, result.mode());
-        assertEquals("created", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "order:skip-prepare"));
-        assertEquals("reserved", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "stock:skip-prepare"));
+        Assertions.assertEquals(TransactionCommitMode.TWO_PHASE_COMMIT, result.mode());
+        Assertions.assertEquals("created", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "order:skip-prepare"));
+        Assertions.assertEquals("reserved", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "stock:skip-prepare"));
     }
 
     /**
-     * 验证全局提交决策已落盘后，尚未物化的其他事务 intent 对新读者原子可见。
+     * Verify global commit decision-making is visible for new reader atomic when other transaction inents not yet materialization are available.
+     *
+     * @throws Exception if the operation cannot complete
      */
     @Test
     void committedForeignIntentShouldBeVisibleBeforeMaterialization() throws Exception {
@@ -413,18 +472,19 @@ class MysqlMvccIntegrationTest {
         resolvingShard.prewrite(txId, startTs, List.of(Mutation.put("async-visible:1", bytes("v1"))));
         metadataStore.markCommitted(txId, commitTs);
 
-        assertEquals(0, countRows(shard1DataSource, "mvcc_data"));
-        assertEquals(
+        Assertions.assertEquals(0, countRows(shard1DataSource, "mvcc_data"));
+        Assertions.assertEquals(
                 "v1",
                 resolvingShard.get(new ReadContext(300L, commitTs, IsolationLevel.READ_COMMITTED), "async-visible:1")
                         .map(value -> new String(value.value()))
-                        .orElse(null)
-        );
+                        .orElse(null));
         assertTrue(resolvingShard.get(new ReadContext(301L, commitTs - 1, IsolationLevel.REPEATABLE_READ), "async-visible:1").isEmpty());
     }
 
     /**
-     * 验证安全异步提交在物化完成前返回，并依赖已提交 intent 保持跨分片原子可见。
+     * Verify safe walk commit returns before materialization is finished and relies on commit indent to keep cross-shard atomic visible.
+     *
+     * @throws Exception if the operation cannot complete
      */
     @Test
     void asyncCommitShouldReturnAfterCommittedDecisionAndExposeCommittedIntents() throws Exception {
@@ -441,10 +501,8 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.asyncParallel(2),
                         true,
                         false,
-                        false
-                ),
-                Map.of(blockedShard1.shardId(), blockedShard1, blockedShard2.shardId(), blockedShard2)
-        );
+                        false),
+                Map.of(blockedShard1.shardId(), blockedShard1, blockedShard2.shardId(), blockedShard2));
 
         ExecutorService executor = java.util.concurrent.Executors.newSingleThreadExecutor();
         long[] committedTxId = new long[1];
@@ -459,22 +517,20 @@ class MysqlMvccIntegrationTest {
             TransactionCommitResult result = future.get(1, TimeUnit.SECONDS);
             committedTxId[0] = result.txId();
 
-            assertEquals(TransactionCommitMode.ASYNC_PRIMARY_COMMIT, result.mode());
+            Assertions.assertEquals(TransactionCommitMode.ASYNC_PRIMARY_COMMIT, result.mode());
             assertTrue(metadataStore.snapshotExpiry(result.txId()).isPresent());
-            assertEquals(0, countRows(shard1DataSource, "mvcc_data"));
-            assertEquals(0, countRows(shard2DataSource, "mvcc_data"));
-            assertEquals(
+            Assertions.assertEquals(0, countRows(shard1DataSource, "mvcc_data"));
+            Assertions.assertEquals(0, countRows(shard2DataSource, "mvcc_data"));
+            Assertions.assertEquals(
                     "left",
                     resolvingShard1.get(new ReadContext(500L, result.commitTs(), IsolationLevel.READ_COMMITTED), "async-safe:1")
                             .map(value -> new String(value.value()))
-                            .orElse(null)
-            );
-            assertEquals(
+                            .orElse(null));
+            Assertions.assertEquals(
                     "right",
                     resolvingShard2.get(new ReadContext(501L, result.commitTs(), IsolationLevel.READ_COMMITTED), "async-safe:2")
                             .map(value -> new String(value.value()))
-                            .orElse(null)
-            );
+                            .orElse(null));
         } finally {
             blockedShard1.allowCommit();
             blockedShard2.allowCommit();
@@ -485,14 +541,15 @@ class MysqlMvccIntegrationTest {
         assertTrue(metadataStore.snapshotExpiry(committedTxId[0]).isEmpty());
     }
 
-    /** 验证显式准备能力会触发一次真实准备调用。 */
+    /**
+     * Verify Visible readiness triggers a real ready call.
+     */
     @Test
     void crossShardCommitShouldCallPrepareWhenAdapterRequiresIt() {
         CountingPrepareStorageAdapter prepareAwareShard2 = new CountingPrepareStorageAdapter(shard2);
         TransactionManager manager = new TransactionManager(tso, metadataStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), prepareAwareShard2
-        ));
+                shard2.shardId(), prepareAwareShard2));
 
         Transaction tx = manager.begin(IsolationLevel.REPEATABLE_READ);
         manager.put(tx, "shard-1", "order:require-prepare", bytes("created"));
@@ -500,42 +557,48 @@ class MysqlMvccIntegrationTest {
 
         manager.commit(tx);
 
-        assertEquals(1, prepareAwareShard2.prepareCalls.get());
+        Assertions.assertEquals(1, prepareAwareShard2.prepareCalls.get());
     }
 
-    /** 验证可重复读扫描保留语句间快照。 */
+    /**
+     * Verify Reread scanned reserved statement slot snapshot.
+     */
     @Test
     void repeatableReadScanShouldKeepSnapshotAcrossStatements() {
         seedCommittedValue("shard-1", "item:001", "a");
         seedCommittedValue("shard-1", "item:002", "b");
 
         Transaction reader = transactionManager.begin(IsolationLevel.REPEATABLE_READ);
-        assertEquals(List.of("item:001", "item:002"), scanKeys(reader, "shard-1", "item:000", "item:999"));
+        Assertions.assertEquals(List.of("item:001", "item:002"), scanKeys(reader, "shard-1", "item:000", "item:999"));
 
         Transaction writer = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         transactionManager.put(writer, "shard-1", "item:003", bytes("c"));
         transactionManager.commit(writer);
 
-        assertEquals(List.of("item:001", "item:002"), scanKeys(reader, "shard-1", "item:000", "item:999"));
+        Assertions.assertEquals(List.of("item:001", "item:002"), scanKeys(reader, "shard-1", "item:000", "item:999"));
     }
 
-    /** 验证读已提交扫描包含最新版本和自身写入。 */
+    /**
+     * Verify Reads an commit scan that contains the latest version and its own writing.
+     */
     @Test
     void readCommittedScanShouldSeeLatestCommittedAndOwnIntent() {
         seedCommittedValue("shard-1", "scan:001", "v1");
 
         Transaction tx = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         transactionManager.put(tx, "shard-1", "scan:002", bytes("v2"));
-        assertEquals(List.of("scan:001", "scan:002"), scanKeys(tx, "shard-1", "scan:000", "scan:999"));
+        Assertions.assertEquals(List.of("scan:001", "scan:002"), scanKeys(tx, "shard-1", "scan:000", "scan:999"));
 
         Transaction writer = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         transactionManager.put(writer, "shard-1", "scan:003", bytes("v3"));
         transactionManager.commit(writer);
 
-        assertEquals(List.of("scan:001", "scan:002", "scan:003"), scanKeys(tx, "shard-1", "scan:000", "scan:999"));
+        Assertions.assertEquals(List.of("scan:001", "scan:002", "scan:003"), scanKeys(tx, "shard-1", "scan:000", "scan:999"));
     }
 
-    /** 验证范围读隔离未决意向并遵守删除墓碑。 */
+    /**
+     * Verify Range Read-Segregation pending intent and comply with Delete tombstone.
+     */
     @Test
     void scanShouldSkipOtherTransactionIntentAndRespectDeleteTombstone() {
         seedCommittedValue("shard-1", "range:001", "a");
@@ -550,61 +613,71 @@ class MysqlMvccIntegrationTest {
         transactionManager.commit(deletingWriter);
 
         Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals(List.of("range:001", "range:002"), scanKeys(reader, "shard-1", "range:000", "range:999"));
+        Assertions.assertEquals(List.of("range:001", "range:002"), scanKeys(reader, "shard-1", "range:000", "range:999"));
     }
 
-    /** 验证中心提交后立即可读，恢复完成真实版本和本地终态物化。 */
+    /**
+     * Verify Center commit readable immediately after recovery, real version and local terminal state materialization.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void recoveryShouldFinishCommittedTransactionAfterPartialShardFailure() throws Exception {
         StorageAdapter flakyShard2 = new FailOnceOnCommitStorageAdapter(shard2);
         TransactionManager flakyManager = new TransactionManager(tso, metadataStore, Map.of(
                 shard1.shardId(), shard1,
-                shard2.shardId(), flakyShard2
-        ));
+                shard2.shardId(), flakyShard2));
 
         Transaction tx = flakyManager.begin(IsolationLevel.REPEATABLE_READ);
         flakyManager.put(tx, "shard-1", "user:1", bytes("alice"));
         flakyManager.put(tx, "shard-2", "ledger:1", bytes("debit"));
 
         MvccException error = assertThrows(MvccException.class, () -> flakyManager.commit(tx));
-        assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
+        Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, error.errorCode());
         assertFalse(error.retryable());
-        assertEquals("alice", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "user:1"));
-        assertEquals("debit", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "ledger:1"));
-        assertEquals(1, countRows(shard2DataSource, "mvcc_intent"));
-        assertEquals(0, countRows(shard2DataSource, "mvcc_data"));
+        Assertions.assertEquals("alice", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "user:1"));
+        Assertions.assertEquals("debit", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "ledger:1"));
+        Assertions.assertEquals(1, countRows(shard2DataSource, "mvcc_intent"));
+        Assertions.assertEquals(0, countRows(shard2DataSource, "mvcc_data"));
 
         recoveryManager.recover(tx.txId());
 
-        assertEquals("debit", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "ledger:1"));
-        assertEquals(0, countRows(shard2DataSource, "mvcc_intent"));
-        assertEquals(1, countRows(shard2DataSource, "mvcc_data"));
+        Assertions.assertEquals("debit", readString(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-2", "ledger:1"));
+        Assertions.assertEquals(0, countRows(shard2DataSource, "mvcc_intent"));
+        Assertions.assertEquals(1, countRows(shard2DataSource, "mvcc_data"));
         var localRecord = shard2.participantRecord(tx.txId()).orElseThrow();
-        assertEquals(TxStatus.COMMITTED, localRecord.status());
-        assertEquals(metadataStore.get(tx.txId()).orElseThrow().commitTs(), localRecord.commitTs());
+        Assertions.assertEquals(TxStatus.COMMITTED, localRecord.status());
+        Assertions.assertEquals(metadataStore.get(tx.txId()).orElseThrow().commitTs(), localRecord.commitTs());
     }
 
-    /** 验证重复回滚保持幂等并保留回滚标记。 */
+    /**
+     * Verify Repeat rollback Keep idempotent and keep the rollback tag.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void rollbackShouldBeIdempotentAndPersistRollbackMarker() throws Exception {
         TransactionManager eagerManager = new TransactionManager(
                 tso,
                 metadataStore,
                 TransactionOptionsPresets.failFast(),
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
         Transaction tx = eagerManager.begin(IsolationLevel.REPEATABLE_READ);
         eagerManager.put(tx, "shard-1", "account:9", bytes("pending"));
 
         eagerManager.rollback(tx);
         eagerManager.rollback(tx);
 
-        assertEquals(1, countRows(shard1DataSource, "mvcc_rollback"));
-        assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
+        Assertions.assertEquals(1, countRows(shard1DataSource, "mvcc_rollback"));
+        Assertions.assertEquals(0, countRows(shard1DataSource, "mvcc_intent"));
         assertTrue(transactionManager.get(transactionManager.begin(IsolationLevel.READ_COMMITTED), "shard-1", "account:9").isEmpty());
     }
 
-    /** 验证锁持有者提交后等待事务可以整事务重试。 */
+    /**
+     * Verify lock holder commit and wait for transaction to complete transaction retry.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void executeShouldWaitThenRetryAfterForeignIntentCommits() throws Exception {
         TransactionManager waitAndRetryManager = new TransactionManager(
@@ -616,17 +689,14 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.serial(),
                         false,
                         false,
-                        false
-                ),
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                        false),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
 
         TransactionManager eagerHolderManager = new TransactionManager(
                 tso,
                 metadataStore,
                 TransactionOptionsPresets.failFast(),
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
         Transaction holder = eagerHolderManager.begin(IsolationLevel.REPEATABLE_READ);
         eagerHolderManager.put(holder, "shard-1", "wait:001", bytes("holder"));
 
@@ -655,10 +725,14 @@ class MysqlMvccIntegrationTest {
         }
 
         Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("waiter", readString(reader, "shard-1", "wait:001"));
+        Assertions.assertEquals("waiter", readString(reader, "shard-1", "wait:001"));
     }
 
-    /** 验证写冲突触发整事务重试并保留两个提交版本。 */
+    /**
+     * Verify write conflict triggers whole transaction retry and retains two commit version.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void executeShouldRetryWholeTransactionAfterWriteConflict() throws Exception {
         AtomicInteger attempts = new AtomicInteger();
@@ -671,10 +745,8 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.serial(),
                         false,
                         false,
-                        false
-                ),
-                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2)
-        );
+                        false),
+                Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2));
 
         String result = retryingManager.execute(IsolationLevel.REPEATABLE_READ, tx -> {
             if (attempts.incrementAndGet() == 1) {
@@ -686,14 +758,16 @@ class MysqlMvccIntegrationTest {
             return "second";
         });
 
-        assertEquals("second", result);
-        assertEquals(2, attempts.get());
-        assertEquals(2, countVersionsForKey(shard1DataSource, "retry:001"));
+        Assertions.assertEquals("second", result);
+        Assertions.assertEquals(2, attempts.get());
+        Assertions.assertEquals(2, countVersionsForKey(shard1DataSource, "retry:001"));
         Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("second", readString(reader, "shard-1", "retry:001"));
+        Assertions.assertEquals("second", readString(reader, "shard-1", "retry:001"));
     }
 
-    /** 验证等待策略能够重试形似数据库死锁的存储异常。 */
+    /**
+     * The verify waiting strategy allows retry -like database deadlock storage anomalies.
+     */
     @Test
     void putShouldWaitThroughDeadlockShapedStorageUnavailable() {
         TransactionManager waitManager = new TransactionManager(
@@ -705,23 +779,24 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.serial(),
                         false,
                         false,
-                        false
-                ),
+                        false),
                 Map.of(
                         shard1.shardId(), new FailOnceOnPrewriteStorageAdapter(shard1, deadlockLikeStorageError(1L)),
-                        shard2.shardId(), shard2
-                )
-        );
+                        shard2.shardId(), shard2));
 
         Transaction tx = waitManager.begin(IsolationLevel.REPEATABLE_READ);
         waitManager.put(tx, "shard-1", "deadlock:wait:001", bytes("v1"));
         waitManager.commit(tx);
 
         Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("v1", readString(reader, "shard-1", "deadlock:wait:001"));
+        Assertions.assertEquals("v1", readString(reader, "shard-1", "deadlock:wait:001"));
     }
 
-    /** 验证数据库死锁形态异常触发整事务重试。 */
+    /**
+     * Verify database Death Lock Form Unusual Trigger transaction retry.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void executeShouldRetryWholeTransactionAfterDeadlockShapedStorageUnavailable() throws Exception {
         AtomicInteger attempts = new AtomicInteger();
@@ -734,13 +809,10 @@ class MysqlMvccIntegrationTest {
                         CrossShardCommitPolicy.serial(),
                         false,
                         false,
-                        false
-                ),
+                        false),
                 Map.of(
                         shard1.shardId(), new FailOnceOnPrewriteStorageAdapter(shard1, deadlockLikeStorageError(2L)),
-                        shard2.shardId(), shard2
-                )
-        );
+                        shard2.shardId(), shard2));
 
         retryingManager.execute(IsolationLevel.REPEATABLE_READ, tx -> {
             attempts.incrementAndGet();
@@ -748,43 +820,77 @@ class MysqlMvccIntegrationTest {
             return null;
         });
 
-        assertEquals(2, attempts.get());
+        Assertions.assertEquals(2, attempts.get());
         Transaction reader = transactionManager.begin(IsolationLevel.READ_COMMITTED);
-        assertEquals("v2", readString(reader, "shard-1", "deadlock:retry:001"));
+        Assertions.assertEquals("v2", readString(reader, "shard-1", "deadlock:retry:001"));
     }
 
-    /** 通过事务管理器写入测试初始提交版本。 */
-    private void seedCommittedValue(String shardId, String key, String value) {
+    /**
+     * Write initial commit version test through the transaction manager.
+     *
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param value value to write
+     */
+    private void seedCommittedValue(final String shardId, final String key, final String value) {
         Transaction tx = transactionManager.begin(IsolationLevel.READ_COMMITTED);
         transactionManager.put(tx, shardId, key, bytes(value));
         transactionManager.commit(tx);
     }
 
-    /** 读取当前事务快照中的字符串值。 */
-    private String readString(Transaction tx, String shardId, String key) {
+    /**
+     * Reads the current string value in transaction snapshot.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @return the operation result
+     */
+    private String readString(final Transaction tx, final String shardId, final String key) {
         return transactionManager.get(tx, shardId, key)
                 .map(String::new)
                 .orElse(null);
     }
 
-    /** 扫描当前快照并返回有序键列表。 */
-    private List<String> scanKeys(Transaction tx, String shardId, String startKeyInclusive, String endKeyExclusive) {
+    /**
+     * Scans the current snapshot and returns the ordered key list.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param startKeyInclusive start key inclusive
+     * @param endKeyExclusive end key exclusive
+     * @return the operation result
+     */
+    private List<String> scanKeys(final Transaction tx, final String shardId, final String startKeyInclusive, final String endKeyExclusive) {
         return transactionManager.scan(tx, shardId, startKeyInclusive, endKeyExclusive)
                 .stream()
                 .map(VersionedValue::key)
                 .collect(Collectors.toList());
     }
 
-    /** 按 UTF-8 编码测试字符串。 */
-    private static byte[] bytes(String value) {
+    /**
+     * Tests the string by UTF-8 encoding.
+     *
+     * @param value value to write
+     * @return the operation result
+     */
+    private static byte[] bytes(final String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
-    /** 等待异步结果并保留原始异常。 */
-    private static <T> T getFuture(Future<T> future) throws Exception {
+    /**
+     * Waiting for a step and keeping the original anomaly.
+     *
+     * @param <T> value type
+     * @param future future
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws RuntimeException if the operation cannot complete
+     */
+    private static <T> T getFuture(final Future<T> future) throws Exception {
         try {
             return future.get(5, TimeUnit.SECONDS);
-        } catch (ExecutionException ex) {
+        } catch (final ExecutionException ex) {
             if (ex.getCause() instanceof Exception cause) {
                 throw cause;
             }
@@ -792,8 +898,13 @@ class MysqlMvccIntegrationTest {
         }
     }
 
-    /** 清理用例协议表，调用者随后恢复本地水位单例。 */
-    private static void truncate(DataSource dataSource) throws Exception {
+    /**
+     * Clears the case protocol list, and the caller is then recovery local watermark.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
+     */
+    private static void truncate(final DataSource dataSource) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("delete from mvcc_intent");
             statement.execute("delete from mvcc_data");
@@ -804,20 +915,36 @@ class MysqlMvccIntegrationTest {
         }
     }
 
-    /** 查询指定测试表的总行数。 */
-    private static long countRows(DataSource dataSource, String table) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement();
-             ResultSet resultSet = statement.executeQuery("select count(*) from " + table)) {
+    /**
+     * Query to specify the total number of lines for the test sheet.
+     *
+     * @param dataSource database connection source
+     * @param table table
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     */
+    private static long countRows(final DataSource dataSource, final String table) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement();
+                ResultSet resultSet = statement.executeQuery("select count(*) from " + table)) {
             resultSet.next();
             return resultSet.getLong(1);
         }
     }
 
-    /** 统计指定业务键的物理版本数。 */
-    private static long countVersionsForKey(DataSource dataSource, String key) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             var statement = connection.prepareStatement("select count(*) from mvcc_data where user_key = ?")) {
+    /**
+     * Statistics specify the physical version number of key(s).
+     *
+     * @param dataSource database connection source
+     * @param key business key
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     */
+    private static long countVersionsForKey(final DataSource dataSource, final String key) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                var statement = connection.prepareStatement("select count(*) from mvcc_data where user_key = ?")) {
             statement.setBytes(1, key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             try (var resultSet = statement.executeQuery()) {
                 resultSet.next();
@@ -826,8 +953,13 @@ class MysqlMvccIntegrationTest {
         }
     }
 
-    /** 在测试容器中创建数据库并授予测试账号权限。 */
-    private static void createDatabase(String databaseName) throws Exception {
+    /**
+     * Creates database in the test container and gives test account privileges.
+     *
+     * @param databaseName database name
+     * @throws Exception if the operation cannot complete
+     */
+    private static void createDatabase(final String databaseName) throws Exception {
         MYSQL.execInContainer(
                 "mysql",
                 "-uroot",
@@ -835,110 +967,182 @@ class MysqlMvccIntegrationTest {
                 "-e",
                 "create database if not exists `" + databaseName + "`; " +
                         "grant all privileges on `" + databaseName + "`.* to '" + MYSQL.getUsername() + "'@'%'; " +
-                        "flush privileges;"
-        );
+                        "flush privileges;");
     }
 
-    /** 生成指定测试数据库的连接地址。 */
-    private static String databaseUrl(String databaseName) {
+    /**
+     * Generates the connection address of the specified test database.
+     *
+     * @param databaseName database name
+     * @return the operation result
+     */
+    private static String databaseUrl(final String databaseName) {
         return MYSQL.getJdbcUrl().replace("/bootstrap", "/" + databaseName);
     }
 
-    /** 关闭实现可关闭接口的数据源。 */
-    private static void close(DataSource dataSource) throws Exception {
+    /**
+     * Closes the data source to close interface.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
+     */
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
-    /** 构造带 MySQL 死锁错误码的存储异常。 */
-    private static MvccException deadlockLikeStorageError(Long txId) {
+    /**
+     * Constructs storage anomalies with MySQL dead lock error codes.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    private static MvccException deadlockLikeStorageError(final Long txId) {
         return new MvccException(
                 ErrorCode.STORAGE_UNAVAILABLE,
                 "simulated deadlock from mysql",
                 true,
                 txId,
-                new SQLException("Deadlock found when trying to get lock", "40001", 1213)
-        );
+                new SQLException("Deadlock found when trying to get lock", "40001", 1213));
     }
 
-    /** 在真实存储写入边界检查中心登记及单分片候选提交时间。 */
+    /**
+     * Registers and single shard candidate commit time in the real storage for border check.
+     */
     private static final class PublicationCheckingStorageAdapter extends DelegatingStorageAdapter {
+
         private final TransactionMetadataStore metadataStore;
+
         private int prewriteCalls;
+
         private int directCommitCalls;
 
-        /** 构造中心发布协议检查包装器。 */
-        private PublicationCheckingStorageAdapter(StorageAdapter delegate, TransactionMetadataStore metadataStore) {
+        /**
+         * The construction centre issues protocols to check the packaging.
+         *
+         * @param delegate delegate
+         * @param metadataStore metadata store
+         */
+        private PublicationCheckingStorageAdapter(final StorageAdapter delegate, final TransactionMetadataStore metadataStore) {
             super(delegate);
             this.metadataStore = metadataStore;
         }
 
-        /** 确认参与者已经登记后才执行真实预写。 */
+        /**
+         * Confirms that participant is registered before real prewrite is executed.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
             var record = metadataStore.get(txId).orElseThrow();
-            assertEquals(TxStatus.ACTIVE, record.status());
-            assertEquals(startTs, record.startTs());
+            Assertions.assertEquals(TxStatus.ACTIVE, record.status());
+            Assertions.assertEquals(startTs, record.startTs());
             assertTrue(record.participants().contains(shardId()));
             prewriteCalls++;
             super.prewrite(txId, startTs, mutations);
         }
 
-        /** 确认候选时间已持久化，再转发真实原子提交并核验本地终态。 */
+        /**
+         * Confirms that the candidate time is durable storage, forwarding real atomic commit and verifying local terminal state.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
             var record = metadataStore.get(txId).orElseThrow();
-            assertEquals(TxStatus.PREPARING, record.status());
-            assertEquals(Set.of(shardId()), record.participants());
-            assertEquals(startTs, record.startTs());
-            assertEquals(commitTs, record.commitTs().longValue());
+            Assertions.assertEquals(TxStatus.PREPARING, record.status());
+            Assertions.assertEquals(Set.of(shardId()), record.participants());
+            Assertions.assertEquals(startTs, record.startTs());
+            Assertions.assertEquals(commitTs, record.commitTs().longValue());
             directCommitCalls++;
             super.directCommit(txId, startTs, commitTs, mutations);
             var localRecord = participantRecord(txId).orElseThrow();
-            assertEquals(TxStatus.COMMITTED, localRecord.status());
-            assertEquals(commitTs, localRecord.commitTs().longValue());
+            Assertions.assertEquals(TxStatus.COMMITTED, localRecord.status());
+            Assertions.assertEquals(commitTs, localRecord.commitTs().longValue());
         }
     }
 
-    /** 首次提交调用在真实落盘前失败，后续调用保留真实参与者终态语义。 */
+    /**
+     * The first commit call failed before the real dropout, followed by a call to retain the true participant terminal state syntax.
+     */
     private static final class FailOnceOnCommitStorageAdapter extends DelegatingStorageAdapter {
+
         private final AtomicBoolean shouldFail = new AtomicBoolean(true);
 
-        /** 构造提交故障包装器。 */
-        private FailOnceOnCommitStorageAdapter(StorageAdapter delegate) {
+        /**
+         * Construct commit failure packaging.
+         *
+         * @param delegate delegate
+         */
+        private FailOnceOnCommitStorageAdapter(final StorageAdapter delegate) {
             super(delegate);
         }
 
-        /** 按事务编号注入一次提交故障。 */
+        /**
+         * Press transaction identifier to inject commit failure.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
             failOnce();
             super.commit(txId, commitTs);
         }
 
-        /** 按写集合注入一次提交故障。 */
+        /**
+         * Press write set to inject commit failure.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations) {
             failOnce();
             super.commit(txId, commitTs, mutations);
         }
 
-        /** 保留清理策略并注入一次提交故障。 */
+        /**
+         * Retain the cleanup policy and inject it once.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
+         */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
             failOnce();
             super.commit(txId, commitTs, mutations, cleanupIntents);
         }
 
-        /** 直接提交仍调用真实原子实现，失败时不伪造本地提交记录。 */
+        /**
+         * Direct commit still calls real atomic and does not falsify local commit records when it fails.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
             failOnce();
             super.directCommit(txId, startTs, commitTs, mutations);
         }
 
-        /** 在所有提交重载间共享一次性故障。 */
+        /**
+         * Share one-time failure between all commit loads.
+         *
+         * @throws IllegalStateException if the operation cannot complete
+         */
         private void failOnce() {
             if (shouldFail.compareAndSet(true, false)) {
                 throw new IllegalStateException("simulated commit failure");
@@ -946,20 +1150,35 @@ class MysqlMvccIntegrationTest {
         }
     }
 
-    /** 首次预写失败，其余调用转发给真实适配器。 */
+    /**
+     * The first prewrite failed, the rest of the call was forwarded to the real adapter.
+     */
     private static final class FailOnceOnPrewriteStorageAdapter extends DelegatingStorageAdapter {
+
         private final AtomicBoolean shouldFail = new AtomicBoolean(true);
+
         private final MvccException failure;
 
-        /** 构造预写故障包装器。 */
-        private FailOnceOnPrewriteStorageAdapter(StorageAdapter delegate, MvccException failure) {
+        /**
+         * Construct prewrite failure packaging.
+         *
+         * @param delegate delegate
+         * @param failure failure
+         */
+        private FailOnceOnPrewriteStorageAdapter(final StorageAdapter delegate, final MvccException failure) {
             super(delegate);
             this.failure = failure;
         }
 
-        /** 注入一次预写故障后转发真实预写。 */
+        /**
+         * Injecting prewrite failure and forwarding real prewrite.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
             if (shouldFail.compareAndSet(true, false)) {
                 throw failure;
             }
@@ -967,67 +1186,117 @@ class MysqlMvccIntegrationTest {
         }
     }
 
-    /** 检查不需要显式准备的真实适配器不会收到准备调用。 */
+    /**
+     * Check that the real adaptor, which does not require a visible preparation, will not receive a ready call.
+     */
     private static final class FailOnPrepareStorageAdapter extends DelegatingStorageAdapter {
-        /** 构造显式准备检查包装器。 */
-        private FailOnPrepareStorageAdapter(StorageAdapter delegate) {
+
+        /**
+         * Construct a visible preparation to check the packaging.
+         *
+         * @param delegate delegate
+         */
+        private FailOnPrepareStorageAdapter(final StorageAdapter delegate) {
             super(delegate);
         }
 
-        /** 拒绝不应发生的显式准备调用。 */
+        /**
+         * Refusal to call undesired and visible.
+         *
+         * @param txId transaction identifier
+         * @throws AssertionError if the operation cannot complete
+         */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
             throw new AssertionError("prepare should not be called");
         }
     }
 
-    /** 阻塞真实提交物化，使测试能检查中心决议发布后的可见性。 */
+    /**
+     * Blocks real commit materialization to allow testing to check the visibility of the decision release.
+     */
     private static final class BlockingCommitStorageAdapter extends DelegatingStorageAdapter {
+
         private final CountDownLatch allowCommit = new CountDownLatch(1);
 
-        /** 构造阻塞提交包装器。 */
-        private BlockingCommitStorageAdapter(StorageAdapter delegate) {
+        /**
+         * Construct a block commit packaging unit.
+         *
+         * @param delegate delegate
+         */
+        private BlockingCommitStorageAdapter(final StorageAdapter delegate) {
             super(delegate);
         }
 
-        /** 允许所有等待中的提交继续。 */
+        /**
+         * Allow all waiting commit to continue.
+         */
         private void allowCommit() {
             allowCommit.countDown();
         }
 
-        /** 阻塞按事务编号提交。 */
+        /**
+         * Block transaction identifier commit.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
             awaitCommit();
             super.commit(txId, commitTs);
         }
 
-        /** 阻塞按写集合提交。 */
+        /**
+         * Block write set commit.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations) {
             awaitCommit();
             super.commit(txId, commitTs, mutations);
         }
 
-        /** 阻塞提交并保留真实清理策略。 */
+        /**
+         * Block commit and keep the real cleanup strategy.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         * @param cleanupIntents cleanup intents
+         */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
             awaitCommit();
             super.commit(txId, commitTs, mutations, cleanupIntents);
         }
 
-        /** 阻塞直接提交并保留本地版本和参与者记录的原子性。 */
+        /**
+         * Blocks direct commit and maintains the atomic properties of local version and participant records.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param commitTs durable commit timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
             awaitCommit();
             super.directCommit(txId, startTs, commitTs, mutations);
         }
 
-        /** 等待测试释放提交，保留线程中断语义。 */
+        /**
+         * Waiting for test to release commit, retention of semantics interrupted by thread.
+         *
+         * @throws MvccException if the operation cannot complete
+         */
         private void awaitCommit() {
             try {
                 allowCommit.await();
-            } catch (InterruptedException ex) {
+            } catch (final InterruptedException ex) {
                 Thread.currentThread().interrupt();
                 throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                         "interrupted in blocking commit adapter", true, null, ex);
@@ -1035,24 +1304,39 @@ class MysqlMvccIntegrationTest {
         }
     }
 
-    /** 要求显式准备并统计真实准备调用。 */
+    /**
+     * It's called for visible preparation and statistics of real readiness to call.
+     */
     private static final class CountingPrepareStorageAdapter extends DelegatingStorageAdapter {
+
         private final AtomicInteger prepareCalls = new AtomicInteger();
 
-        /** 构造准备调用计数包装器。 */
-        private CountingPrepareStorageAdapter(StorageAdapter delegate) {
+        /**
+         * Constructing to call a number wrapper.
+         *
+         * @param delegate delegate
+         */
+        private CountingPrepareStorageAdapter(final StorageAdapter delegate) {
             super(delegate);
         }
 
-        /** 为该测试显式启用准备阶段。 */
+        /**
+         * Provides for the explicit start-up phase of this test.
+         *
+         * @return the operation result
+         */
         @Override
         public boolean requiresExplicitPreparePhase() {
             return true;
         }
 
-        /** 统计准备调用并转发给真实适配器。 */
+        /**
+         * Statistical preparation to call and forward to real adapter.
+         *
+         * @param txId transaction identifier
+         */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
             prepareCalls.incrementAndGet();
             super.prepare(txId);
         }

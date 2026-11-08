@@ -1,7 +1,30 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
-/** 事务 SQL 会话的公开工厂接口，后端在应用启动时显式选定。 */
+/**
+ * Open factory interface for transaction SQL session, visible selection of the backend at application startup.
+ */
 public interface SqlEngine {
-    /** 每个调用方取得独立会话，提交合同由具体后端实现声明。 */
+
+    /**
+     * Each caller obtains an independent session, commit contract with a specific back-end implementation declaration.
+     *
+     * @return the operation result
+     */
     SqlSession openSession();
 }

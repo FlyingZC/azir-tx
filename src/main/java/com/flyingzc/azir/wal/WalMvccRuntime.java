@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -21,156 +37,299 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-/** 单写者 WAL/MVCC MVP：提交由本地可靠日志决定，数据库仅异步保存版本。 */
+/**
+ * Uses complete write sets in the authoritative WAL to publish atomic transaction decisions and materialize MySQL versions.
+ */
 public final class WalMvccRuntime implements AutoCloseable {
-    /** 用于分离分片和用户键的内部键身份。 */
-    record Key(String shard, String key) { }
-
-    /** 故障验收位置，不参与正常事务语义。 */
-    enum Stage { BEFORE_APPEND, AFTER_FORCE, BEFORE_PUBLISH, DURING_INSTALL, DURING_RECOVERY, AFTER_PUBLISH, BEFORE_MATERIALIZER_JOIN,
-        BEFORE_CHECKPOINT_FILES, AFTER_RECEIPTS_FORCE, AFTER_SNAPSHOT_FORCE, BEFORE_CURRENT_MOVE,
-        AFTER_CURRENT_MOVE, AFTER_CURRENT_FORCE, BEFORE_OLD_GENERATION_DELETE, AFTER_OLD_GENERATION_DELETE,
-        AFTER_BACKUP_FILE_COPY, BEFORE_BACKUP_COMPLETE, AFTER_BACKUP_COMPLETE, AFTER_RESTORE_FILE_COPY,
-        AFTER_RESTORE_BATCH, BEFORE_RESTORE_PUBLISH, AFTER_RESTORE_MOVE, AFTER_RESTORE_READY }
-
-    /** 确定性注入提交失败或进程强杀的测试接口。 */
-    @FunctionalInterface interface FaultHook {
-        /** 在指定边界执行注入动作。 */
-        void hit(Stage stage);
-    }
-
-    /** 提供提交、内存和后台积压的独立统计。 */
-    public record Stats(long publishedSequence, long safePoint, long retainedBytes, long bufferedBytes,
-                        long walBytes, long groupForces, int activeTransactions, int queuedCommits,
-                        Map<String, Long> materializedSequences, String materializationFailure,
-                        long checkpointSequence, int pendingReceipts, int receiptArchives,
-                        long retiredReceiptThrough, String maintenanceFailure, long retiredMemoryVersions,
-                        long hotCacheBytes, int hotCacheKeys, long cacheHits, long cacheMisses,
-                        long cacheEvictions, long conflictStoreLookups, long materializationLag, boolean backupRunning,
-                        long receiptArchiveBytes, long oldestActiveMillis) { }
 
     private final Object gate = new Object();
+
     private final Object flushGate = new Object();
+
     private final Object decisionGate = new Object();
+
     private final java.util.concurrent.locks.ReentrantLock closeGuard = new java.util.concurrent.locks.ReentrantLock();
+
     private final Object owner = new Object();
+
     private final Set<String> shards;
+
     private final Map<String, WalMaterializedStore> stores;
+
     private final Map<String, WalCheckpoint> checkpoints = new HashMap<>();
+
     private final WalOptions options;
+
     private final WalRetentionOptions retention;
+
     private final WalReplicaIdentity replica;
+
     private final WalCommitAuthority authority;
+
     private volatile boolean proposalBlocked;
+
     private long pendingReplicaEpoch;
+
     private final java.util.function.LongSupplier wallClock;
+
     private volatile long lastCheckpointNanos = System.nanoTime();
+
     private long nextCheckpointAttemptNanos = System.nanoTime();
+
     private volatile String maintenanceFailure;
+
     private final java.util.LinkedHashSet<Key> memoryGcKeys = new java.util.LinkedHashSet<>();
+
     private long retiredMemoryVersions;
+
     private final WalLog log;
+
     private final FaultHook hook;
+
     private final java.util.function.LongSupplier monotonicClock;
+
     private final Map<Key, NavigableMap<Long, WalMutation>> versions = new HashMap<>();
+
     private final Map<Key, Long> latest = new HashMap<>();
+
     private final LinkedHashMap<Key, Long> hotCache = new LinkedHashMap<>(16, .75f, true);
+
     private final Set<Key> decisionKeys = new java.util.HashSet<>();
+
     private long hotCacheBytes;
+
     private long cacheHits;
+
     private long cacheMisses;
+
     private long cacheEvictions;
+
     private long conflictStoreLookups;
+
     private final Map<UUID, WalTransaction> active = new HashMap<>();
+
     private final ArrayBlockingQueue<WalTransaction> queue;
+
     private final Thread writer;
+
     private final Thread materializer;
+
     private volatile boolean accepting = true;
+
     private volatile boolean flushRunning = true;
+
     private volatile Throwable fatal;
+
     private volatile String materializationFailure;
+
     private volatile boolean backupRunning;
+
     private volatile boolean replicaExportRunning;
+
     private volatile boolean readOnly;
+
     private volatile boolean closed;
+
     private int gcStoreCursor;
+
     private long published;
+
     private long safePoint;
+
     private long retainedBytes;
+
     private long bufferedBytes;
+
     private long pendingIndexBytes;
 
-    /** 创建仅使用 WAL 和内存的独立运行时，便于先验证事务内核。 */
-    public static WalMvccRuntime open(Path directory, Set<String> shards, WalOptions options) {
-        return openForTest(directory, shards, Map.of(), options, stage -> { });
+    /**
+     * Creates an independent run with only WAL and memory to facilitate the first verify transaction kernel.
+     *
+     * @param directory directory
+     * @param shards shards
+     * @param options options
+     * @return the operation result
+     */
+    public static WalMvccRuntime open(final Path directory, final Set<String> shards, final WalOptions options) {
+        return openForTest(directory, shards, Map.of(), options, stage -> {
+        });
     }
 
-    /** 创建带异步物化存储的独立运行时，数据源生命周期由调用方管理。 */
-    public static WalMvccRuntime open(Path directory, Map<String, WalMaterializedStore> stores, WalOptions options) {
-        return openForTest(directory, stores.keySet(), stores, options, stage -> { });
+    /**
+     * When creating an independent run with a walk materialization storage, the life cycle of the data source is managed by the caller.
+     *
+     * @param directory directory
+     * @param stores stores
+     * @param options options
+     * @return the operation result
+     */
+    public static WalMvccRuntime open(final Path directory, final Map<String, WalMaterializedStore> stores, final WalOptions options) {
+        return openForTest(directory, stores.keySet(), stores, options, stage -> {
+        });
     }
 
-    /** 创建带显式回收策略的纯本地模式，凭据过期必须由调用方主动选择。 */
-    public static WalMvccRuntime open(Path directory, Set<String> shards, WalOptions options, WalRetentionOptions retention) {
-        return openForTest(directory, shards, Map.of(), options, stage -> { }, WalLog.NORMAL_IO, System::nanoTime, retention, System::currentTimeMillis);
+    /**
+     * Creates a pure local mode with a visible collection policy, the receipt expiry must be chosen by the caller.
+     *
+     * @param directory directory
+     * @param shards shards
+     * @param options options
+     * @param retention retention
+     * @return the operation result
+     */
+    public static WalMvccRuntime open(final Path directory, final Set<String> shards, final WalOptions options, final WalRetentionOptions retention) {
+        return openForTest(directory, shards, Map.of(), options, stage -> {
+        }, WalLog.NORMAL_IO, System::nanoTime, retention, System::currentTimeMillis);
     }
 
-    /** 创建带显式回收策略的物化模式，保持原有 Azir 装配不变。 */
-    public static WalMvccRuntime open(Path directory, Map<String, WalMaterializedStore> stores, WalOptions options, WalRetentionOptions retention) {
-        return openForTest(directory, stores.keySet(), stores, options, stage -> { }, WalLog.NORMAL_IO, System::nanoTime, retention, System::currentTimeMillis);
+    /**
+     * Creates an materialization mode with a visible collection policy, keeping the original Azir configuration unchanged.
+     *
+     * @param directory directory
+     * @param stores stores
+     * @param options options
+     * @param retention retention
+     * @return the operation result
+     */
+    public static WalMvccRuntime open(final Path directory, final Map<String, WalMaterializedStore> stores, final WalOptions options, final WalRetentionOptions retention) {
+        return openForTest(directory, stores.keySet(), stores, options, stage -> {
+        }, WalLog.NORMAL_IO, System::nanoTime, retention, System::currentTimeMillis);
     }
 
-    /** 显式创建复制内核，只有可信共识端口可安装已提交批次，不能自动退化为本地提交。 */
-    public static WalMvccRuntime openReplica(Path directory, Set<String> shards, Map<String, WalMaterializedStore> stores,
-                                              WalOptions options, WalRetentionOptions retention, WalReplicaIdentity identity, WalCommitAuthority authority) {
-        Objects.requireNonNull(identity); Objects.requireNonNull(authority);
+    /**
+     * A visible copy of the kernel is created, only a trusted consensus port can be installed with commit batch and cannot automatically degrade to local commit.
+     *
+     * @param directory directory
+     * @param shards shards
+     * @param stores stores
+     * @param options options
+     * @param retention retention
+     * @param identity identity
+     * @param authority authority
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public static WalMvccRuntime openReplica(final Path directory, final Set<String> shards, final Map<String, WalMaterializedStore> stores,
+                                             final WalOptions options, final WalRetentionOptions retention, final WalReplicaIdentity identity, final WalCommitAuthority authority) {
+        Objects.requireNonNull(identity);
+        Objects.requireNonNull(authority);
         if (retention.receiptRetentionMillis() != 0 || stores.values().stream().anyMatch(store -> !store.supportsReplicaOwnership())) {
             throw new IllegalArgumentException("replica replay requires retained receipts and owned backends");
         }
-        try { return new WalMvccRuntime(directory, shards, stores, options, stage -> { }, WalLog.NORMAL_IO, System::nanoTime, retention, System::currentTimeMillis, identity, authority); }
-        catch (IOException failure) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "open replica failed", null, failure); }
+        try {
+            return new WalMvccRuntime(directory, shards, stores, options, stage -> {
+            }, WalLog.NORMAL_IO, System::nanoTime, retention, System::currentTimeMillis, identity, authority);
+        } catch (final IOException failure) {
+            throw error(ErrorCode.STORAGE_UNAVAILABLE, "open replica failed", null, failure);
+        }
     }
 
-    /** 装配确定性故障注入入口，保持正常公开 API 不暴露协议内部状态。 */
-    static WalMvccRuntime openForTest(Path directory, Set<String> shards,
-                                      Map<String, WalMaterializedStore> stores, WalOptions options, FaultHook hook) {
+    /**
+     * The failure injection portal will be installed to maintain normal public API not to expose the internal state of the protocol.
+     *
+     * @param directory directory
+     * @param shards shards
+     * @param stores stores
+     * @param options options
+     * @param hook hook
+     * @return the operation result
+     */
+    static WalMvccRuntime openForTest(final Path directory, final Set<String> shards,
+                                      final Map<String, WalMaterializedStore> stores, final WalOptions options, final FaultHook hook) {
         return openForTest(directory, shards, stores, options, hook, WalLog.NORMAL_IO, System::nanoTime);
     }
 
-    /** 为存储失败与租约验收注入 I/O 边界和单调时钟，公开入口保持系统时钟。 */
-    static WalMvccRuntime openForTest(Path directory, Set<String> shards,
-                                      Map<String, WalMaterializedStore> stores, WalOptions options, FaultHook hook,
-                                      WalLog.IoHook ioHook, java.util.function.LongSupplier monotonicClock) {
+    /**
+     * Maintains the system clock for storage failure and lease acceptance injection of I/O boundaries and monotonic clock, open access.
+     *
+     * @param directory directory
+     * @param shards shards
+     * @param stores stores
+     * @param options options
+     * @param hook hook
+     * @param ioHook io hook
+     * @param monotonicClock monotonic clock
+     * @return the operation result
+     */
+    static WalMvccRuntime openForTest(final Path directory, final Set<String> shards,
+                                      final Map<String, WalMaterializedStore> stores, final WalOptions options, final FaultHook hook,
+                                      final WalLog.IoHook ioHook, final java.util.function.LongSupplier monotonicClock) {
         return openForTest(directory, shards, stores, options, hook, ioHook, monotonicClock, WalRetentionOptions.preserveAll(), System::currentTimeMillis);
     }
 
-    /** 将保留窗口时钟与租约时钟分开注入，系统时间变化不能改变事务租约。 */
-    static WalMvccRuntime openForTest(Path directory, Set<String> shards, Map<String, WalMaterializedStore> stores,
-                                     WalOptions options, FaultHook hook, WalLog.IoHook ioHook,
-                                     java.util.function.LongSupplier monotonicClock, WalRetentionOptions retention,
-                                     java.util.function.LongSupplier wallClock) {
-        try { return new WalMvccRuntime(directory, shards, stores, options, hook, ioHook, monotonicClock, retention, wallClock); }
-        catch (IOException ex) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "open WAL runtime failed", null, ex); }
+    /**
+     * Injecting the saved window clock separately from the lease clock, system time changes cannot change transaction lease.
+     *
+     * @param directory directory
+     * @param shards shards
+     * @param stores stores
+     * @param options options
+     * @param hook hook
+     * @param ioHook io hook
+     * @param monotonicClock monotonic clock
+     * @param retention retention
+     * @param wallClock wall clock
+     * @return the operation result
+     */
+    static WalMvccRuntime openForTest(final Path directory, final Set<String> shards, final Map<String, WalMaterializedStore> stores,
+                                      final WalOptions options, final FaultHook hook, final WalLog.IoHook ioHook,
+                                      final java.util.function.LongSupplier monotonicClock, final WalRetentionOptions retention,
+                                      final java.util.function.LongSupplier wallClock) {
+        try {
+            return new WalMvccRuntime(directory, shards, stores, options, hook, ioHook, monotonicClock, retention, wallClock);
+        } catch (final IOException ex) {
+            throw error(ErrorCode.STORAGE_UNAVAILABLE, "open WAL runtime failed", null, ex);
+        }
     }
 
-    /** 先恢复日志、核对后端前缀，再开放事务和后台线程。 */
-    private WalMvccRuntime(Path directory, Set<String> shards, Map<String, WalMaterializedStore> stores,
-                           WalOptions options, FaultHook hook, WalLog.IoHook ioHook,
-                           java.util.function.LongSupplier monotonicClock, WalRetentionOptions retention,
-                           java.util.function.LongSupplier wallClock) throws IOException {
+    /**
+     * Recovery log, check backend prefix, then open transaction and background threads.
+     *
+     * @param directory directory
+     * @param shards shards
+     * @param stores stores
+     * @param options options
+     * @param hook hook
+     * @param ioHook io hook
+     * @param monotonicClock monotonic clock
+     * @param retention retention
+     * @param wallClock wall clock
+     * @throws IOException if the operation cannot complete
+     */
+    private WalMvccRuntime(final Path directory, final Set<String> shards, final Map<String, WalMaterializedStore> stores,
+                           final WalOptions options, final FaultHook hook, final WalLog.IoHook ioHook,
+                           final java.util.function.LongSupplier monotonicClock, final WalRetentionOptions retention,
+                           final java.util.function.LongSupplier wallClock) throws IOException {
         this(directory, shards, stores, options, hook, ioHook, monotonicClock, retention, wallClock, null, null);
     }
 
-    /** 先核对模式和副本后端身份，再开放本地恢复状态，共识层启动前没有有效领导任期。 */
-    private WalMvccRuntime(Path directory, Set<String> shards, Map<String, WalMaterializedStore> stores,
-                           WalOptions options, FaultHook hook, WalLog.IoHook ioHook,
-                           java.util.function.LongSupplier monotonicClock, WalRetentionOptions retention,
-                           java.util.function.LongSupplier wallClock, WalReplicaIdentity replica, WalCommitAuthority authority) throws IOException {
+    /**
+     * Check mode and replica backend identity, then open local recovery status, without effective leadership until the Consensus Layer is launched.
+     *
+     * @param directory directory
+     * @param shards shards
+     * @param stores stores
+     * @param options options
+     * @param hook hook
+     * @param ioHook io hook
+     * @param monotonicClock monotonic clock
+     * @param retention retention
+     * @param wallClock wall clock
+     * @param replica replica
+     * @param authority authority
+     * @throws IOException if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private WalMvccRuntime(final Path directory, final Set<String> shards, final Map<String, WalMaterializedStore> stores,
+                           final WalOptions options, final FaultHook hook, final WalLog.IoHook ioHook,
+                           final java.util.function.LongSupplier monotonicClock, final WalRetentionOptions retention,
+                           final java.util.function.LongSupplier wallClock, final WalReplicaIdentity replica, final WalCommitAuthority authority) throws IOException {
         this.shards = Set.copyOf(shards);
         this.stores = Map.copyOf(stores);
         this.options = Objects.requireNonNull(options);
         this.retention = Objects.requireNonNull(retention);
-        this.replica = replica; this.authority = authority;
+        this.replica = replica;
+        this.authority = authority;
         this.wallClock = Objects.requireNonNull(wallClock);
         this.hook = Objects.requireNonNull(hook);
         this.monotonicClock = Objects.requireNonNull(monotonicClock);
@@ -183,17 +342,26 @@ public final class WalMvccRuntime implements AutoCloseable {
         log = new WalLog(directory, this.shards, options.maxWalBytes(), ioHook, retention, replica);
         try {
             WalCheckpointState image = log.snapshot();
-            if (image != null && !image.storedShards().equals(this.stores.keySet())) { throw new IOException("checkpoint storage routes changed"); }
+            if (image != null && !image.storedShards().equals(this.stores.keySet())) {
+                throw new IOException("checkpoint storage routes changed");
+            }
             for (var entry : this.stores.entrySet()) {
-                if (replica == null) { entry.getValue().initialize(log.engineId(), entry.getKey()); }
-                else { entry.getValue().initializeReplica(replica, entry.getKey()); }
+                if (replica == null) {
+                    entry.getValue().initialize(log.engineId(), entry.getKey());
+                } else {
+                    entry.getValue().initializeReplica(replica, entry.getKey());
+                }
                 WalCheckpoint checkpoint = entry.getValue().checkpoint();
                 validateCheckpoint(checkpoint);
                 checkpoints.put(entry.getKey(), checkpoint);
             }
             if (image != null) {
-                published = image.sequence(); safePoint = image.safePoint();
-                for (var version : image.versions()) { restoreVersion(version); hook.hit(Stage.DURING_RECOVERY); }
+                published = image.sequence();
+                safePoint = image.safePoint();
+                for (var version : image.versions()) {
+                    restoreVersion(version);
+                    hook.hit(Stage.DURING_RECOVERY);
+                }
             }
             log.releaseRecoveryImage();
             for (long sequence = log.baseSequence() + 1; sequence <= log.lastSequence();) {
@@ -207,7 +375,7 @@ public final class WalMvccRuntime implements AutoCloseable {
             if (retainedBytes > options.maxMemoryBytes()) {
                 throw new IOException("recovered unmaterialized data exceeds memory budget");
             }
-        } catch (Throwable failure) {
+        } catch (final Throwable failure) {
             log.close();
             throw failure;
         }
@@ -215,13 +383,20 @@ public final class WalMvccRuntime implements AutoCloseable {
         materializer = Thread.ofVirtual().name("azir-wal-materializer").start(this::flushLoop);
     }
 
-    /** 在当前发布水位注册事务，旧进程句柄不能在新运行时继续使用。 */
-    public WalTransaction begin(IsolationLevel isolation) {
+    /**
+     * The old process handle cannot continue to be used when new operations are being started with the current watermark registration transaction.
+     *
+     * @param isolation global transaction isolation level
+     * @return the operation result
+     */
+    public WalTransaction begin(final IsolationLevel isolation) {
         long epoch = readBarrier();
         synchronized (gate) {
             requireOpen();
             requireEpoch(epoch);
-            if (backupRunning) { throw error(ErrorCode.RESOURCE_EXHAUSTED, "backup maintenance pauses new transactions", null, null); }
+            if (backupRunning) {
+                throw error(ErrorCode.RESOURCE_EXHAUSTED, "backup maintenance pauses new transactions", null, null);
+            }
             expireIdle();
             if (active.size() >= options.maxActiveTransactions()) {
                 throw error(ErrorCode.RESOURCE_EXHAUSTED, "active transaction limit", null, null);
@@ -235,8 +410,13 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 为整条语句取得共享的 RC 或 RR 快照。 */
-    public WalReadSnapshot beginReadStatement(WalTransaction tx) {
+    /**
+     * Get shared RC or RR snapshot for the entire statement.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     */
+    public WalReadSnapshot beginReadStatement(final WalTransaction tx) {
         long epoch = readBarrier();
         synchronized (gate) {
             requireActive(tx);
@@ -245,24 +425,51 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 写入本地缓冲，所有外部字节数组均被复制。 */
-    public void put(WalTransaction tx, String shard, String key, byte[] value) {
+    /**
+     * Write local buffer, all external byte arrays are copied.
+     *
+     * @param tx transaction context
+     * @param shard logical shard identifier
+     * @param key business key
+     * @param value value to write
+     */
+    public void put(final WalTransaction tx, final String shard, final String key, final byte[] value) {
         buffer(tx, new WalMutation(shard, key, Objects.requireNonNull(value, "value")));
     }
 
-    /** 以本地墓碑表达删除，不立即改变任何已提交版本。 */
-    public void delete(WalTransaction tx, String shard, String key) { buffer(tx, new WalMutation(shard, key, null)); }
+    /**
+     * Delete in local tombstone, without changing any already commit version immediately.
+     *
+     * @param tx transaction context
+     * @param shard logical shard identifier
+     * @param key business key
+     */
+    public void delete(final WalTransaction tx, final String shard, final String key) {
+        buffer(tx, new WalMutation(shard, key, null));
+    }
 
-    /** 在修改写集前检查单事务和全局内存预算。 */
-    private void buffer(WalTransaction tx, WalMutation mutation) {
+    /**
+     * Check transaction and global memory budget before changing write set.
+     *
+     * @param tx transaction context
+     * @param mutation mutation
+     */
+    private void buffer(final WalTransaction tx, final WalMutation mutation) {
         synchronized (gate) {
             requireActive(tx);
-            if (backupRunning) { throw error(ErrorCode.RESOURCE_EXHAUSTED, "backup maintenance pauses writes", tx, null); }
-            if (readOnly) { throw error(ErrorCode.RESOURCE_EXHAUSTED, "runtime is read-only", tx, null); }
+            if (backupRunning) {
+                throw error(ErrorCode.RESOURCE_EXHAUSTED, "backup maintenance pauses writes", tx, null);
+            }
+            if (readOnly) {
+                throw error(ErrorCode.RESOURCE_EXHAUSTED, "runtime is read-only", tx, null);
+            }
             requireShard(mutation.shard());
             if (stores.containsKey(mutation.shard())) {
-                try { stores.get(mutation.shard()).validateMutation(mutation); }
-                catch (WalMvccException rejected) { throw error(rejected.errorCode(), rejected.getMessage(), tx, rejected); }
+                try {
+                    stores.get(mutation.shard()).validateMutation(mutation);
+                } catch (final WalMvccException rejected) {
+                    throw error(rejected.errorCode(), rejected.getMessage(), tx, rejected);
+                }
             }
             Key key = new Key(mutation.shard(), mutation.key());
             WalMutation old = tx.writes.get(key);
@@ -279,57 +486,108 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 用新语句快照读取一个键。 */
-    public Optional<byte[]> get(WalTransaction tx, String shard, String key) {
+    /**
+     * Read a key with a new statement snapshot.
+     *
+     * @param tx transaction context
+     * @param shard logical shard identifier
+     * @param key business key
+     * @return the operation result
+     */
+    public Optional<byte[]> get(final WalTransaction tx, final String shard, final String key) {
         return get(tx, shard, key, beginReadStatement(tx));
     }
 
-    /** 在固定语句快照上合并本地、内存与物化版本；锁覆盖读与淘汰交错。 */
-    public Optional<byte[]> get(WalTransaction tx, String shard, String key, WalReadSnapshot snapshot) {
+    /**
+     * Merge local, memory with materialization version on a fixed statement snapshot; lock overleaf reading and phase-out staggered.
+     *
+     * @param tx transaction context
+     * @param shard logical shard identifier
+     * @param key business key
+     * @param snapshot snapshot
+     * @return the operation result
+     */
+    public Optional<byte[]> get(final WalTransaction tx, final String shard, final String key, final WalReadSnapshot snapshot) {
         synchronized (gate) {
             validateSnapshot(tx, snapshot);
             requireShard(shard);
             new WalMutation(shard, key, null);
             Key identity = new Key(shard, key);
             WalMutation own = tx.writes.get(identity);
-            if (own != null) { return own.deleted() ? Optional.empty() : Optional.of(own.value()); }
+            if (own != null) {
+                return own.deleted() ? Optional.empty() : Optional.of(own.value());
+            }
             WalValue visible = null;
             NavigableMap<Long, WalMutation> chain = versions.get(identity);
             var memory = chain == null ? null : chain.floorEntry(snapshot.sequence);
-            if (memory != null) { visible = new WalValue(memory.getKey(), memory.getValue().value()); }
-            // 已物化热点可淘汰，未物化增量不能丢；旧快照缺失的历史从后端读取。
-            if (visible != null) { cacheHits++; hotCache.get(identity); }
+            if (memory != null) {
+                visible = new WalValue(memory.getKey(), memory.getValue().value());
+            }
+            // Materialization hotspots can be phased out without materialization increment; old snapshot missing history is read from backend.
+            if (visible != null) {
+                cacheHits++;
+                hotCache.get(identity);
+            }
             if (visible == null && stores.containsKey(shard)) {
                 cacheMisses++;
                 visible = stores.get(shard).get(key, snapshot.sequence).orElse(null);
-                // 只提升当前发布切面的最新已物化版本，不能把旧 RR 版本当成冲突栅栏。
-                if (visible != null && snapshot.sequence == published) { cacheMaterialized(identity, visible); }
+                // Only the latest materialization version of the current release is raised, and the old RR version cannot be considered a conflict fence.
+                if (visible != null && snapshot.sequence == published) {
+                    cacheMaterialized(identity, visible);
+                }
             }
             validateSnapshot(tx, snapshot);
             return visible == null || visible.deleted() ? Optional.empty() : Optional.of(visible.value());
         }
     }
 
-    /** 用新语句快照执行半开区间扫描。 */
-    public NavigableMap<String, byte[]> scan(WalTransaction tx, String shard, String from, String to) {
+    /**
+     * Use a new statement snapshot to perform semi-open scanning.
+     *
+     * @param tx transaction context
+     * @param shard logical shard identifier
+     * @param from from
+     * @param to to
+     * @return the operation result
+     */
+    public NavigableMap<String, byte[]> scan(final WalTransaction tx, final String shard, final String from, final String to) {
         return scan(tx, shard, from, to, beginReadStatement(tx));
     }
 
-    /** 合并相同快照的候选行后处理墓碑，结果受行数与字节预算限制。 */
-    public NavigableMap<String, byte[]> scan(WalTransaction tx, String shard, String from, String to,
-                                             WalReadSnapshot snapshot) {
+    /**
+     * Merges the same snapshot candidate tombstone with a number and byte budget limit.
+     *
+     * @param tx transaction context
+     * @param shard logical shard identifier
+     * @param from from
+     * @param to to
+     * @param snapshot snapshot
+     * @return the operation result
+     */
+    public NavigableMap<String, byte[]> scan(final WalTransaction tx, final String shard, final String from, final String to,
+                                             final WalReadSnapshot snapshot) {
         synchronized (gate) {
             validateSnapshot(tx, snapshot);
             requireShard(shard);
-            if (from != null) { new WalMutation(shard, from, null); }
-            if (to != null) { new WalMutation(shard, to, null); }
+            if (from != null) {
+                new WalMutation(shard, from, null);
+            }
+            if (to != null) {
+                new WalMutation(shard, to, null);
+            }
             var rows = new TreeMap<String, WalValue>(Utf8KeyOrder::compare);
-            if (stores.containsKey(shard)) { rows.putAll(stores.get(shard).scan(from, to, snapshot.sequence)); }
+            if (stores.containsKey(shard)) {
+                rows.putAll(stores.get(shard).scan(from, to, snapshot.sequence));
+            }
             for (var entry : versions.entrySet()) {
                 Key key = entry.getKey();
-                if (!key.shard.equals(shard) || !inRange(key.key, from, to)) { continue; }
+                if (!key.shard.equals(shard) || !inRange(key.key, from, to)) {
+                    continue;
+                }
                 var version = entry.getValue().floorEntry(snapshot.sequence);
-                if (version != null) { putCandidate(rows, key.key, new WalValue(version.getKey(), version.getValue().value())); }
+                if (version != null) {
+                    putCandidate(rows, key.key, new WalValue(version.getKey(), version.getValue().value()));
+                }
             }
             for (var entry : tx.writes.entrySet()) {
                 if (entry.getKey().shard.equals(shard) && inRange(entry.getKey().key, from, to)) {
@@ -339,7 +597,9 @@ public final class WalMvccRuntime implements AutoCloseable {
             var result = new TreeMap<String, byte[]>(Utf8KeyOrder::compare);
             long bytes = 0;
             for (var entry : rows.entrySet()) {
-                if (entry.getValue().deleted()) { continue; }
+                if (entry.getValue().deleted()) {
+                    continue;
+                }
                 byte[] value = entry.getValue().value();
                 bytes += 128L + value.length + entry.getKey().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
                 if (result.size() >= 10_000 || bytes > 8L * 1024 * 1024) {
@@ -352,32 +612,63 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 在固定语句快照上分页；MVP 采用有预算的候选归并，尚不实现流式下推。 */
-    public WalScanPage scanPage(WalTransaction tx, String shard, String from, String to,
-                                String afterKey, int limit, WalReadSnapshot snapshot) {
-        if (limit < 1 || limit > 4096) { throw new IllegalArgumentException("invalid page limit"); }
+    /**
+     * The page break on the fixed statement snapshot; MVP uses a combination of candidates with budget and does not yet achieve current downward push.
+     *
+     * @param tx transaction context
+     * @param shard logical shard identifier
+     * @param from from
+     * @param to to
+     * @param afterKey after key
+     * @param limit maximum number of items
+     * @param snapshot snapshot
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public WalScanPage scanPage(final WalTransaction tx, final String shard, final String from, final String to,
+                                final String afterKey, final int limit, final WalReadSnapshot snapshot) {
+        if (limit < 1 || limit > 4096) {
+            throw new IllegalArgumentException("invalid page limit");
+        }
         String lower = from;
-        if (afterKey != null && (lower == null || Utf8KeyOrder.compare(afterKey, lower) > 0)) { lower = afterKey; }
+        if (afterKey != null && (lower == null || Utf8KeyOrder.compare(afterKey, lower) > 0)) {
+            lower = afterKey;
+        }
         var all = scan(tx, shard, lower, to, snapshot);
         var page = new TreeMap<String, byte[]>(Utf8KeyOrder::compare);
         for (var entry : all.entrySet()) {
-            if (afterKey != null && Utf8KeyOrder.compare(entry.getKey(), afterKey) <= 0) { continue; }
-            if (page.size() == limit) { return new WalScanPage(page, page.lastKey()); }
+            if (afterKey != null && Utf8KeyOrder.compare(entry.getKey(), afterKey) <= 0) {
+                continue;
+            }
+            if (page.size() == limit) {
+                return new WalScanPage(page, page.lastKey());
+            }
             page.put(entry.getKey(), entry.getValue());
         }
         return new WalScanPage(page, null);
     }
 
-    /** 在候选归并过程中限制键数量，不能等分配完整候选集后才拒绝。 */
-    private static void putCandidate(NavigableMap<String, WalValue> rows, String key, WalValue value) {
+    /**
+     * Limiting the number of keys during the candidate grouping cannot wait until you have distributed a full set of candidates before rejecting them.
+     *
+     * @param rows rows
+     * @param key business key
+     * @param value value to write
+     */
+    private static void putCandidate(final NavigableMap<String, WalValue> rows, final String key, final WalValue value) {
         if (!rows.containsKey(key) && rows.size() >= 10_000) {
             throw error(ErrorCode.RESOURCE_EXHAUSTED, "scan candidate budget exhausted", null, null);
         }
         rows.put(key, value);
     }
 
-    /** 冻结写集并等待持久提交；超时和中断不取消已经排队的决议。 */
-    public WalReceipt commit(WalTransaction tx) {
+    /**
+     * Freeze write set and wait for durable commit; timeout and break does not cancel already queued decision.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     */
+    public WalReceipt commit(final WalTransaction tx) {
         synchronized (gate) {
             requireOpen();
             requireOwner(tx);
@@ -386,8 +677,12 @@ public final class WalMvccRuntime implements AutoCloseable {
             }
             if (tx.state == WalTransaction.State.ACTIVE) {
                 requireActive(tx);
-                if (backupRunning && !tx.writes.isEmpty()) { throw error(ErrorCode.RESOURCE_EXHAUSTED, "backup maintenance pauses commits", tx, null); }
-                if (readOnly && !tx.writes.isEmpty()) { throw error(ErrorCode.RESOURCE_EXHAUSTED, "runtime is read-only", tx, null); }
+                if (backupRunning && !tx.writes.isEmpty()) {
+                    throw error(ErrorCode.RESOURCE_EXHAUSTED, "backup maintenance pauses commits", tx, null);
+                }
+                if (readOnly && !tx.writes.isEmpty()) {
+                    throw error(ErrorCode.RESOURCE_EXHAUSTED, "runtime is read-only", tx, null);
+                }
                 if (tx.writes.isEmpty()) {
                     tx.state = WalTransaction.State.COMMITTED;
                     active.remove(tx.id);
@@ -402,25 +697,35 @@ public final class WalMvccRuntime implements AutoCloseable {
             }
         }
         try {
-            if (tx.completion.isDone()) { return tx.completion.get(); }
+            if (tx.completion.isDone()) {
+                return tx.completion.get();
+            }
             return tx.completion.get(Math.max(1, tx.deadlineNanos - monotonicClock.getAsLong()), TimeUnit.NANOSECONDS);
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw error(ErrorCode.TRANSACTION_STATUS_UNKNOWN, "commit wait interrupted; query transaction id", tx, ex);
-        } catch (TimeoutException ex) {
+        } catch (final TimeoutException ex) {
             throw error(ErrorCode.TRANSACTION_STATUS_UNKNOWN, "commit wait expired; query transaction id", tx, ex);
-        } catch (ExecutionException ex) {
-            if (ex.getCause() instanceof RuntimeException runtime) { throw runtime; }
+        } catch (final ExecutionException ex) {
+            if (ex.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
             throw error(ErrorCode.TRANSACTION_STATUS_UNKNOWN, "commit failed; query transaction id", tx, ex.getCause());
         }
     }
 
-    /** 仅回滚尚未进入决议的事务，已提交和排队事务不能清空后伪装为中止。 */
-    public void rollback(WalTransaction tx) {
+    /**
+     * Rollback is the only transaction that has not entered decision, and commit and queue transaction cannot be emptied and disguised as aborting.
+     *
+     * @param tx transaction context
+     */
+    public void rollback(final WalTransaction tx) {
         synchronized (gate) {
             requireOpen();
             requireOwner(tx);
-            if (tx.state == WalTransaction.State.COMMITTED || tx.state == WalTransaction.State.ABORTED) { return; }
+            if (tx.state == WalTransaction.State.COMMITTED || tx.state == WalTransaction.State.ABORTED) {
+                return;
+            }
             if (tx.state != WalTransaction.State.ACTIVE) {
                 throw error(ErrorCode.TRANSACTION_STATUS_UNKNOWN, "decision already started", tx, null);
             }
@@ -428,17 +733,30 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 只确认已发布的持久提交；未发布决议需等待或恢复，缺失不等于已回滚。 */
-    public Optional<WalReceipt> findCommitted(UUID transactionId) {
+    /**
+     * Only confirm durable commit issued; decision not published is waiting or recovery missing is not equal to rollback.
+     *
+     * @param transactionId transaction id
+     * @return the operation result
+     */
+    public Optional<WalReceipt> findCommitted(final UUID transactionId) {
         readBarrier();
         synchronized (gate) {
-            try { return log.receipt(Objects.requireNonNull(transactionId)).filter(receipt -> receipt.commitSequence() <= published); }
-            catch (IOException failure) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "commit receipt lookup failed", null, failure); }
+            try {
+                return log.receipt(Objects.requireNonNull(transactionId)).filter(receipt -> receipt.commitSequence() <= published);
+            } catch (final IOException failure) {
+                throw error(ErrorCode.STORAGE_UNAVAILABLE, "commit receipt lookup failed", null, failure);
+            }
         }
     }
 
-    /** 明确区分缺少确认和查询历史已部分回收，任何一种都不能当作中止。 */
-    public WalCommitLookup lookupCommit(UUID transactionId) {
+    /**
+     * A clear distinction between lack of confirmation and search history is part collection, none of which can be considered a suspension.
+     *
+     * @param transactionId transaction id
+     * @return the operation result
+     */
+    public WalCommitLookup lookupCommit(final UUID transactionId) {
         var receipt = findCommitted(transactionId);
         synchronized (gate) {
             long retired = log.retiredThrough();
@@ -448,36 +766,61 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 单写者收集有限批次，正常关闭时完成已排队请求。 */
+    /**
+     * Single writer collects limited batch and completes the queue request at normal close.
+     */
     private void writeLoop() {
         try {
             while (fatal == null && (accepting || !queue.isEmpty())) {
                 WalTransaction first = queue.poll(20, TimeUnit.MILLISECONDS);
-                if (first == null) { continue; }
+                if (first == null) {
+                    continue;
+                }
                 var batch = new ArrayList<WalTransaction>();
                 batch.add(first);
                 long until = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.batchDelayMillis());
                 while (batch.size() < options.commitBatchSize()) {
                     WalTransaction next = queue.poll(Math.max(0, until - System.nanoTime()), TimeUnit.NANOSECONDS);
-                    if (next == null) { break; }
+                    if (next == null) {
+                        break;
+                    }
                     batch.add(next);
                 }
                 commitBatch(batch);
             }
-        } catch (Throwable failure) { failStop(failure); }
+        } catch (final Throwable failure) {
+            failStop(failure);
+        }
     }
 
-    /** 串行校验批内冲突，先持久化，再安装所有版本并一次发布水位。 */
-    private void commitBatch(List<WalTransaction> batch) throws IOException {
-        if (authority != null) { commitReplicatedBatch(batch); return; }
+    /**
+     * Serial validate conflict, first durable storage, then install all version s and release watermark.
+     *
+     * @param batch batch
+     * @throws IOException if the operation cannot complete
+     */
+    private void commitBatch(final List<WalTransaction> batch) throws IOException {
+        if (authority != null) {
+            commitReplicatedBatch(batch);
+            return;
+        }
         synchronized (decisionGate) {
-            if (fatal != null) { return; }
+            if (fatal != null) {
+                return;
+            }
             commitBatchLocked(batch);
         }
     }
 
-    /** 单写者在当前状态上准备完整记录，复制模式尚未取得共识前不写本地提交日志。 */
-    private Prepared prepareBatchLocked(List<WalTransaction> batch, long epoch) throws IOException {
+    /**
+     * Single writer prepares a complete record at the current status and does not write local commit log until consensus has been reached on the reproduction mode.
+     *
+     * @param batch batch
+     * @param epoch epoch
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
+    private Prepared prepareBatchLocked(final List<WalTransaction> batch, final long epoch) throws IOException {
         var accepted = new ArrayList<WalTransaction>();
         var records = new ArrayList<WalCommit>();
         var reservations = new HashMap<Key, Long>();
@@ -485,9 +828,13 @@ public final class WalMvccRuntime implements AutoCloseable {
         long extraIndexBytes = 0;
         synchronized (gate) {
             for (WalTransaction tx : batch) {
-                if (tx.state != WalTransaction.State.QUEUED || active.get(tx.id) != tx) { continue; }
+                if (tx.state != WalTransaction.State.QUEUED || active.get(tx.id) != tx) {
+                    continue;
+                }
                 if (authority != null && (epoch <= 0 || tx.epoch != epoch || authority.epoch() != epoch || proposalBlocked)) {
-                    abortLocal(tx); tx.completion.completeExceptionally(error(ErrorCode.STORAGE_UNAVAILABLE, "replica leadership unavailable", tx, null)); continue;
+                    abortLocal(tx);
+                    tx.completion.completeExceptionally(error(ErrorCode.STORAGE_UNAVAILABLE, "replica leadership unavailable", tx, null));
+                    continue;
                 }
                 boolean expired = monotonicClock.getAsLong() - tx.deadlineNanos >= 0;
                 trimHotCache(tx.writes.values().stream().mapToLong(WalMvccRuntime::indexBytes).sum());
@@ -497,10 +844,13 @@ public final class WalMvccRuntime implements AutoCloseable {
                     try {
                         for (Key key : tx.writes.keySet()) {
                             long fence = reservations.containsKey(key) ? reservations.get(key) : latestSequence(key);
-                            if (fence > tx.start) { conflict = true; break; }
+                            if (fence > tx.start) {
+                                conflict = true;
+                                break;
+                            }
                         }
-                    } catch (RuntimeException failure) {
-                        // 未追加日志，无法核实冷键时明确拒绝本事务，不能默认无冲突。
+                    } catch (final RuntimeException failure) {
+                        // This transaction cannot be explicitly rejected when the cold key cannot be verified without adding a log, and no conflict is defaulted.
                         lookupFailure = error(ErrorCode.STORAGE_UNAVAILABLE, "cannot verify cold-key write conflict", tx, failure);
                     }
                 }
@@ -510,11 +860,12 @@ public final class WalMvccRuntime implements AutoCloseable {
                 WalMvccException rejection = expired
                         ? error(ErrorCode.TRANSACTION_TIMEOUT, "transaction expired before decision", tx, null)
                         : lookupFailure != null ? lookupFailure
-                        : conflict ? error(ErrorCode.WRITE_CONFLICT, "write changed after transaction start", tx, null)
-                        : !stores.isEmpty() && materializationLag() + records.size() >= options.maxMaterializationLag()
-                        ? error(ErrorCode.RESOURCE_EXHAUSTED, "materialization backlog budget exhausted", tx, null)
-                        : retainedBytes + bufferedBytes + extraIndexBytes + newIndexBytes > options.maxMemoryBytes()
-                        ? error(ErrorCode.RESOURCE_EXHAUSTED, "version index budget exhausted", tx, null) : null;
+                                : conflict ? error(ErrorCode.WRITE_CONFLICT, "write changed after transaction start", tx, null)
+                                        : !stores.isEmpty() && materializationLag() + records.size() >= options.maxMaterializationLag()
+                                                ? error(ErrorCode.RESOURCE_EXHAUSTED, "materialization backlog budget exhausted", tx, null)
+                                                : retainedBytes + bufferedBytes + extraIndexBytes + newIndexBytes > options.maxMemoryBytes()
+                                                        ? error(ErrorCode.RESOURCE_EXHAUSTED, "version index budget exhausted", tx, null)
+                                                        : null;
                 if (rejection != null) {
                     abortLocal(tx);
                     tx.completion.completeExceptionally(rejection);
@@ -538,24 +889,34 @@ public final class WalMvccRuntime implements AutoCloseable {
                 decisionKeys.addAll(tx.writes.keySet());
             }
             pendingIndexBytes = extraIndexBytes;
-            if (authority != null && !records.isEmpty()) { pendingReplicaEpoch = epoch; }
+            if (authority != null && !records.isEmpty()) {
+                pendingReplicaEpoch = epoch;
+            }
         }
         return new Prepared(List.copyOf(accepted), List.copyOf(records), epoch);
     }
 
-    /** 一次被冻结的候选批次，不能跨任期重新分配提交序号。 */
-    private record Prepared(List<WalTransaction> transactions, List<WalCommit> records, long epoch) { }
-
-    /** 本地模式继续持锁完成刷盘与发布，保持原有提交合同。 */
-    private void commitBatchLocked(List<WalTransaction> batch) throws IOException {
-        var prepared = prepareBatchLocked(batch, 0); var accepted = prepared.transactions(); var records = prepared.records();
-        if (records.isEmpty()) { return; }
+    /**
+     * The local mode continues to be locked to complete the brushing and release, maintaining the original commit contract.
+     *
+     * @param batch batch
+     * @throws IOException if the operation cannot complete
+     */
+    private void commitBatchLocked(final List<WalTransaction> batch) throws IOException {
+        var prepared = prepareBatchLocked(batch, 0);
+        var accepted = prepared.transactions();
+        var records = prepared.records();
+        if (records.isEmpty()) {
+            return;
+        }
         hook.hit(Stage.BEFORE_APPEND);
-        try { log.append(records); }
-        catch (WalMvccException resource) {
+        try {
+            log.append(records);
+        } catch (final WalMvccException resource) {
             synchronized (gate) {
                 pendingIndexBytes = 0;
-                decisionKeys.clear(); evictMaterialized();
+                decisionKeys.clear();
+                evictMaterialized();
                 for (WalTransaction tx : accepted) {
                     abortLocal(tx);
                     tx.completion.completeExceptionally(error(resource.errorCode(), resource.getMessage(), tx, resource));
@@ -567,44 +928,64 @@ public final class WalMvccRuntime implements AutoCloseable {
         hook.hit(Stage.BEFORE_PUBLISH);
         synchronized (gate) {
             pendingIndexBytes = 0;
-            for (WalCommit record : records) { install(record, false); }
+            for (WalCommit record : records) {
+                install(record, false);
+            }
             published = records.getLast().sequence();
             for (WalTransaction tx : accepted) {
                 releaseWrites(tx);
                 active.remove(tx.id);
                 tx.state = WalTransaction.State.COMMITTED;
             }
-            decisionKeys.clear(); evictMaterialized();
+            decisionKeys.clear();
+            evictMaterialized();
         }
-        try { hook.hit(Stage.AFTER_PUBLISH); }
-        catch (Throwable failure) {
+        try {
+            hook.hit(Stage.AFTER_PUBLISH);
+        } catch (final Throwable failure) {
             for (WalTransaction tx : accepted) {
                 tx.completion.completeExceptionally(error(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                         "commit persisted but response failed", tx, failure));
             }
             throw failure;
         }
-        for (WalTransaction tx : accepted) { tx.completion.complete(log.receipt(tx.id).orElseThrow()); }
+        for (WalTransaction tx : accepted) {
+            tx.completion.complete(log.receipt(tx.id).orElseThrow());
+        }
     }
 
-    /** 准备与共识等待分离，状态机可在另一个线程持决议锁安装，不能形成回调死锁。 */
-    private void commitReplicatedBatch(List<WalTransaction> batch) throws IOException {
+    /**
+     * Prepares to separate from consensus waiting, and the status machine can be installed with an decision lock at another linear range and cannot form a back-to-death lock.
+     *
+     * @param batch batch
+     * @throws IOException if the operation cannot complete
+     */
+    private void commitReplicatedBatch(final List<WalTransaction> batch) throws IOException {
         Prepared prepared;
         synchronized (decisionGate) {
-            if (fatal != null) { return; }
-            long epoch = authority.epoch(); prepared = prepareBatchLocked(batch, epoch);
+            if (fatal != null) {
+                return;
+            }
+            long epoch = authority.epoch();
+            prepared = prepareBatchLocked(batch, epoch);
         }
-        if (prepared.records().isEmpty()) { return; }
+        if (prepared.records().isEmpty()) {
+            return;
+        }
         try {
             authority.submit(prepared.epoch(), prepared.records()).toCompletableFuture().get(options.transactionTimeoutMillis(), TimeUnit.MILLISECONDS);
             synchronized (gate) {
                 for (var tx : prepared.transactions()) {
-                    if (tx.state != WalTransaction.State.COMMITTED) { throw new IOException("authority returned before local committed application"); }
+                    if (tx.state != WalTransaction.State.COMMITTED) {
+                        throw new IOException("authority returned before local committed application");
+                    }
                 }
             }
-        } catch (Exception failure) {
+        } catch (final Exception failure) {
             synchronized (gate) {
-                if (pendingReplicaEpoch == prepared.epoch() && authority.epoch() == prepared.epoch()) { proposalBlocked = true; }
+                if (pendingReplicaEpoch == prepared.epoch() && authority.epoch() == prepared.epoch()) {
+                    proposalBlocked = true;
+                }
                 for (var tx : prepared.transactions()) {
                     tx.completion.completeExceptionally(error(ErrorCode.TRANSACTION_STATUS_UNKNOWN, "replicated commit unresolved; query UUID after recovery", tx, failure));
                 }
@@ -612,107 +993,207 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 只有装配时的可信共识端口可安装已提交记录，所有副本使用同一 UUID 和业务序号。 */
-    public void applyCommitted(WalCommitAuthority source, List<WalCommit> records) {
-        if (authority == null || source != authority) { throw new IllegalArgumentException("committed application requires replica authority"); }
-        records = List.copyOf(records); if (records.isEmpty() || records.size() > 1024) { throw new IllegalArgumentException("invalid committed batch"); }
+    /**
+     * Only a trusted consensus port can be installed with commit records, all replica using the same UUID and business serial number.
+     *
+     * @param source database connection source
+     * @param records records
+     * @throws IOException if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public void applyCommitted(final WalCommitAuthority source, List<WalCommit> records) {
+        if (authority == null || source != authority) {
+            throw new IllegalArgumentException("committed application requires replica authority");
+        }
+        records = List.copyOf(records);
+        if (records.isEmpty() || records.size() > 1024) {
+            throw new IllegalArgumentException("invalid committed batch");
+        }
         synchronized (decisionGate) {
             try {
-                var fresh = new ArrayList<WalCommit>(); var completed = new ArrayList<WalTransaction>();
+                var fresh = new ArrayList<WalCommit>();
+                var completed = new ArrayList<WalTransaction>();
                 synchronized (gate) {
                     requireHealthy();
                     long servingEpoch = authority.epoch();
-                    for (long oldEpoch : active.values().stream().mapToLong(tx -> tx.epoch).filter(epoch -> epoch != servingEpoch).distinct().toArray()) { fenceEpochLocked(oldEpoch); }
-                    if (pendingReplicaEpoch != 0 && authority.epoch() != pendingReplicaEpoch) { fenceEpochLocked(pendingReplicaEpoch); }
-                    long expected = published + 1; long bytes = 0; var newKeys = new java.util.HashSet<Key>(); long localBytes = 0;
+                    for (long oldEpoch : active.values().stream().mapToLong(tx -> tx.epoch).filter(epoch -> epoch != servingEpoch).distinct().toArray()) {
+                        fenceEpochLocked(oldEpoch);
+                    }
+                    if (pendingReplicaEpoch != 0 && authority.epoch() != pendingReplicaEpoch) {
+                        fenceEpochLocked(pendingReplicaEpoch);
+                    }
+                    long expected = published + 1;
+                    long bytes = 0;
+                    var newKeys = new java.util.HashSet<Key>();
+                    long localBytes = 0;
                     for (var record : records) {
                         if (record.sequence() <= published) {
                             var old = log.receipt(record.transactionId()).orElseThrow(() -> new IOException("replica replay has no retained decision"));
-                            if (old.commitSequence() != record.sequence() || !old.digest().equals(record.digest())) { throw new IOException("replica replay decision mismatch"); }
+                            if (old.commitSequence() != record.sequence() || !old.digest().equals(record.digest())) {
+                                throw new IOException("replica replay decision mismatch");
+                            }
                             continue;
                         }
-                        if (record.sequence() != expected++) { throw new IOException("replica committed sequence gap"); }
+                        if (record.sequence() != expected++) {
+                            throw new IOException("replica committed sequence gap");
+                        }
                         var local = active.get(record.transactionId());
                         if (local != null) {
                             var proposal = new WalCommit(local.id, record.sequence(), local.start, List.copyOf(local.writes.values()));
-                            if (local.state != WalTransaction.State.QUEUED || !proposal.digest().equals(record.digest())) { throw new IOException("committed proposal changed"); }
-                            completed.add(local); localBytes += local.writeBytes;
+                            if (local.state != WalTransaction.State.QUEUED || !proposal.digest().equals(record.digest())) {
+                                throw new IOException("committed proposal changed");
+                            }
+                            completed.add(local);
+                            localBytes += local.writeBytes;
                         }
                         for (var mutation : record.mutations()) {
-                            requireShard(mutation.shard()); var key = new Key(mutation.shard(), mutation.key()); bytes += mutation.retainedBytes();
-                            if (!latest.containsKey(key) && newKeys.add(key)) { bytes += indexBytes(mutation); }
+                            requireShard(mutation.shard());
+                            var key = new Key(mutation.shard(), mutation.key());
+                            bytes += mutation.retainedBytes();
+                            if (!latest.containsKey(key) && newKeys.add(key)) {
+                                bytes += indexBytes(mutation);
+                            }
                         }
                         fresh.add(record);
                     }
                     trimHotCache(bytes);
-                    if (retainedBytes + bufferedBytes - localBytes + bytes > options.maxMemoryBytes()) { throw new IOException("committed replica exceeds memory budget"); }
+                    if (retainedBytes + bufferedBytes - localBytes + bytes > options.maxMemoryBytes()) {
+                        throw new IOException("committed replica exceeds memory budget");
+                    }
                 }
-                if (fresh.isEmpty()) { return; }
+                if (fresh.isEmpty()) {
+                    return;
+                }
                 log.append(fresh);
                 synchronized (gate) {
-                    for (var record : fresh) { install(record, false); }
+                    for (var record : fresh) {
+                        install(record, false);
+                    }
                     published = fresh.getLast().sequence();
-                    for (var tx : completed) { releaseWrites(tx); active.remove(tx.id); tx.state = WalTransaction.State.COMMITTED; }
-                    if (!completed.isEmpty()) { pendingReplicaEpoch = 0; pendingIndexBytes = 0; decisionKeys.clear(); proposalBlocked = false; }
+                    for (var tx : completed) {
+                        releaseWrites(tx);
+                        active.remove(tx.id);
+                        tx.state = WalTransaction.State.COMMITTED;
+                    }
+                    if (!completed.isEmpty()) {
+                        pendingReplicaEpoch = 0;
+                        pendingIndexBytes = 0;
+                        decisionKeys.clear();
+                        proposalBlocked = false;
+                    }
                     evictMaterialized();
                 }
-                for (var tx : completed) { tx.completion.complete(log.receipt(tx.id).orElseThrow()); }
-            } catch (Throwable failure) {
-                failStop(failure); throw error(ErrorCode.STORAGE_UNAVAILABLE, "replica committed application failed", null, failure);
+                for (var tx : completed) {
+                    tx.completion.complete(log.receipt(tx.id).orElseThrow());
+                }
+            } catch (final Throwable failure) {
+                failStop(failure);
+                throw error(ErrorCode.STORAGE_UNAVAILABLE, "replica committed application failed", null, failure);
             }
         }
     }
 
-    /** 角色变化只清理旧任期本地句柄；已进入复制的结果仍是未知，不伪装为回滚。 */
-    public void fenceEpoch(long obsoleteEpoch) {
-        if (authority == null || obsoleteEpoch < 1) { throw new IllegalArgumentException("invalid replica fencing epoch"); }
-        synchronized (gate) { fenceEpochLocked(obsoleteEpoch); }
+    /**
+     * Role change only clears the local handle of an old term; the result that has been copied is still unknown and not disguised as rollback.
+     *
+     * @param obsoleteEpoch obsolete epoch
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public void fenceEpoch(final long obsoleteEpoch) {
+        if (authority == null || obsoleteEpoch < 1) {
+            throw new IllegalArgumentException("invalid replica fencing epoch");
+        }
+        synchronized (gate) {
+            fenceEpochLocked(obsoleteEpoch);
+        }
     }
 
-    /** 持锁退休旧句柄和预算，晚到的角色通知不能清除新任期事务。 */
-    private void fenceEpochLocked(long epoch) {
+    /**
+     * Locked retirement old handle and budget, late character notification cannot clear transaction.
+     *
+     * @param epoch epoch
+     */
+    private void fenceEpochLocked(final long epoch) {
         for (var tx : List.copyOf(active.values())) {
-            if (tx.epoch > epoch) { continue; }
-            boolean queued = tx.state == WalTransaction.State.QUEUED; releaseWrites(tx); active.remove(tx.id);
+            if (tx.epoch > epoch) {
+                continue;
+            }
+            boolean queued = tx.state == WalTransaction.State.QUEUED;
+            releaseWrites(tx);
+            active.remove(tx.id);
             tx.state = queued ? WalTransaction.State.UNKNOWN : WalTransaction.State.ABORTED;
             tx.completion.completeExceptionally(error(queued ? ErrorCode.TRANSACTION_STATUS_UNKNOWN : ErrorCode.TRANSACTION_ABORTED, "replica leadership changed", tx, null));
         }
         queue.removeIf(tx -> tx.epoch <= epoch);
-        if (pendingReplicaEpoch <= epoch) { pendingReplicaEpoch = 0; pendingIndexBytes = 0; decisionKeys.clear(); proposalBlocked = false; }
+        if (pendingReplicaEpoch <= epoch) {
+            pendingReplicaEpoch = 0;
+            pendingIndexBytes = 0;
+            decisionKeys.clear();
+            proposalBlocked = false;
+        }
     }
 
-    /** 多数派读屏障在运行时锁外执行，失败不能降级为本地缓存读取。 */
+    /**
+     * Majority read barrier executed outside the lock while running, failed to downgrade to local cache reading.
+     *
+     * @return the operation result
+     */
     private long readBarrier() {
-        if (authority == null) { return 0; }
-        try { long epoch = authority.readBarrier(options.transactionTimeoutMillis()); requireEpoch(epoch); return epoch; }
-        catch (Exception failure) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "replica read barrier unavailable", null, failure); }
+        if (authority == null) {
+            return 0;
+        }
+        try {
+            long epoch = authority.readBarrier(options.transactionTimeoutMillis());
+            requireEpoch(epoch);
+            return epoch;
+        } catch (final Exception failure) {
+            throw error(ErrorCode.STORAGE_UNAVAILABLE, "replica read barrier unavailable", null, failure);
+        }
     }
 
-    /** 任期检查不做网络 I/O，保持句柄和提交准备阶段的本地互斥关系。 */
-    private void requireEpoch(long epoch) {
+    /**
+     * The term check does not do network I/O and maintains the local mutually exclusive relationship between the handle and the commit preparation phase.
+     *
+     * @param epoch epoch
+     */
+    private void requireEpoch(final long epoch) {
         if (authority != null && (epoch <= 0 || authority.epoch() != epoch || proposalBlocked)) {
             throw error(ErrorCode.STORAGE_UNAVAILABLE, "replica epoch is not serving", null, null);
         }
     }
 
-    /** 安装未物化历史和写冲突栅栏，恢复时不再把已物化的全库数据加载进内存。 */
-    private void install(WalCommit commit, boolean recovery) throws IOException {
+    /**
+     * Materialization history and write conflict fence, recovery is installed without loading materialization full library data into memory.
+     *
+     * @param commit commit
+     * @param recovery recovery
+     * @throws IOException if the operation cannot complete
+     */
+    private void install(final WalCommit commit, final boolean recovery) throws IOException {
         for (WalMutation mutation : commit.mutations()) {
-            if (!shards.contains(mutation.shard())) { throw new IOException("unknown shard in WAL"); }
+            if (!shards.contains(mutation.shard())) {
+                throw new IOException("unknown shard in WAL");
+            }
             long flushed = checkpoints.getOrDefault(mutation.shard(), new WalCheckpoint(0, "")).sequence();
             if (recovery && stores.containsKey(mutation.shard()) && commit.sequence() <= flushed) {
-                hook.hit(Stage.DURING_RECOVERY); continue;
+                hook.hit(Stage.DURING_RECOVERY);
+                continue;
             }
             Key key = new Key(mutation.shard(), mutation.key());
             forgetHot(key);
-            if (!latest.containsKey(key)) { retainedBytes += indexBytes(mutation); memoryGcKeys.add(key); }
+            if (!latest.containsKey(key)) {
+                retainedBytes += indexBytes(mutation);
+                memoryGcKeys.add(key);
+            }
             latest.put(key, commit.sequence());
             var chain = versions.computeIfAbsent(key, ignored -> new TreeMap<>());
             chain.put(commit.sequence(), mutation);
             retainedBytes += mutation.retainedBytes();
-            // 已刷库的历史可以淘汰，但保留最新头版本作为读缓存，避免每笔点读都回到 MySQL。
+            // The history of the brush can be phased out, but keep the latest head version as a read cache to avoid every reading returning to MySQL.
             var retired = chain.headMap(Math.min(flushed, commit.sequence() - 1), true);
-            for (WalMutation old : retired.values()) { retainedBytes -= old.retainedBytes(); }
+            for (WalMutation old : retired.values()) {
+                retainedBytes -= old.retainedBytes();
+            }
             retired.clear();
             hook.hit(recovery ? Stage.DURING_RECOVERY : Stage.DURING_INSTALL);
             if (recovery && retainedBytes > options.maxMemoryBytes()) {
@@ -721,7 +1202,9 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 周期物化有限日志批次，失败保留日志与内存版本并重试。 */
+    /**
+     * Cycle materialization limited log batch, failed to keep the log with memory version and retry.
+     */
     private void flushLoop() {
         while (flushRunning && fatal == null) {
             try {
@@ -729,68 +1212,150 @@ public final class WalMvccRuntime implements AutoCloseable {
                 long now = System.nanoTime();
                 if (now - nextCheckpointAttemptNanos >= 0 && (now - lastCheckpointNanos >= TimeUnit.MILLISECONDS.toNanos(retention.checkpointIntervalMillis())
                         || log.bytes() >= retention.checkpointWalBytes())) {
-                    // 后端落后或归档预算不足时限速重试，不能把资源背压变成忙循环。
+                    // Backend backward or archive budget less than time-limited retry cannot turn the resource back pressure into a busy cycle.
                     nextCheckpointAttemptNanos = now + TimeUnit.SECONDS.toNanos(1);
-                    try { checkpoint(); maintenanceFailure = null; }
-                    catch (RuntimeException failure) { maintenanceFailure = failure.toString(); }
+                    try {
+                        checkpoint();
+                        maintenanceFailure = null;
+                    } catch (final RuntimeException failure) {
+                        maintenanceFailure = failure.toString();
+                    }
                 }
                 pauseMaterializer();
-            } catch (InterruptedException stop) { Thread.currentThread().interrupt(); return; }
-            catch (IOException failure) { failStop(failure); return; }
-            catch (RuntimeException failure) { materializationFailure = failure.toString();
-                try { pauseMaterializer(); }
-                catch (InterruptedException stop) { Thread.currentThread().interrupt(); return; }
+            } catch (final InterruptedException stop) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (final IOException failure) {
+                failStop(failure);
+                return;
+            } catch (final RuntimeException failure) {
+                materializationFailure = failure.toString();
+                try {
+                    pauseMaterializer();
+                } catch (final InterruptedException stop) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
             }
         }
     }
 
-    /** 明确报告检查点是否创建，后端落后时不能通过强推水位删除日志。 */
-    public record CheckpointResult(boolean created, long sequence, long walBytesBefore, long walBytesAfter) { }
-
-    /** 暂停写入决议，先追平所有后端，再把本地恢复状态与同一边界的冷数据一起备份。 */
-    public WalBackup.Info backup(Path destination, WalBackupOptions limits) {
-        if (replica != null) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "replica backup requires coordinated Raft snapshot", null, null); }
-        closeGuard.lock();
-        try { return backupLocked(destination, limits); }
-        finally { closeGuard.unlock(); }
-    }
-
-    /** 可信共识装配在实际应用队列中导出完整副本，Raft 位置由装配另行绑定。 */
-    public WalBackup.Info backupReplica(WalCommitAuthority source, Path destination, WalBackupOptions limits) {
-        if (replica == null || source != authority) { throw new IllegalArgumentException("replica snapshot requires bound consensus authority"); }
-        closeGuard.lock();
-        try { return backupLocked(destination, limits); }
-        finally { closeGuard.unlock(); }
-    }
-
-    /** 共识装配在应用边界调用准备，后端视图固定后允许发布和物化继续推进。 */
-    public WalReplicaBackup prepareReplicaBackup(WalCommitAuthority source, Path destination, WalBackupOptions limits) {
-        if (replica == null || source != authority) { throw new IllegalArgumentException("replica snapshot requires bound consensus authority"); }
+    /**
+     * Pause writing to decision, first pacify all backends and then backup the local recovery status with cold data on the same border.
+     *
+     * @param destination destination
+     * @param limits limits
+     * @return the operation result
+     */
+    public WalBackup.Info backup(final Path destination, final WalBackupOptions limits) {
+        if (replica != null) {
+            throw error(ErrorCode.STORAGE_UNAVAILABLE, "replica backup requires coordinated Raft snapshot", null, null);
+        }
         closeGuard.lock();
         try {
-            synchronized (decisionGate) { synchronized (flushGate) {
-                synchronized (gate) {
-                    requireOpen(); if (backupRunning || replicaExportRunning || stores.values().stream().anyMatch(store -> !store.supportsPinnedSnapshot())) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "pinned replica backup unavailable", null, null); }
-                    replicaExportRunning = true;
-                }
-                try {
-                    var budget = new WalBackup.Budget(limits); WalBackup.checkDestination(destination, log.directory());
-                    while (true) { budget.check(); flush(); synchronized (gate) { requireOpen(); if (checkpoints.values().stream().allMatch(checkpoint -> checkpoint.sequence() == published)) { break; } } }
-                    if (published > 0 && !checkpoint().created()) { throw new IOException("replica backup checkpoint did not reach prefix"); }
-                    var prepared = WalBackup.prepareReplica(destination, log, shards, stores, budget, hook::hit);
-                    return new WalReplicaBackup(prepared, this::releaseReplicaExport);
-                } catch (Throwable failure) {
-                    releaseReplicaExport(); if (failure instanceof Error error) { throw error; } throw error(ErrorCode.STORAGE_UNAVAILABLE, "prepare pinned replica backup failed", null, failure);
-                }
-            } }
-        } finally { closeGuard.unlock(); }
+            return backupLocked(destination, limits);
+        } finally {
+            closeGuard.unlock();
+        }
     }
 
-    /** 完成或放弃导出以后才归还维护资格，并唤醒正在安全关闭的运行时。 */
-    private void releaseReplicaExport() { synchronized (gate) { replicaExportRunning = false; gate.notifyAll(); } }
+    /**
+     * Credible consensus assembly exports the complete replica in a practical application queue, and the position of Raft is bound separately by the assembly.
+     *
+     * @param source database connection source
+     * @param destination destination
+     * @param limits limits
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public WalBackup.Info backupReplica(final WalCommitAuthority source, final Path destination, final WalBackupOptions limits) {
+        if (replica == null || source != authority) {
+            throw new IllegalArgumentException("replica snapshot requires bound consensus authority");
+        }
+        closeGuard.lock();
+        try {
+            return backupLocked(destination, limits);
+        } finally {
+            closeGuard.unlock();
+        }
+    }
 
-    /** 与关闭串行维护，但不在运行时读锁中执行整个备份，已有快照仍可读取。 */
-    private WalBackup.Info backupLocked(Path destination, WalBackupOptions limits) {
+    /**
+     * Consensus assembly is prepared for call at the applied boundary, with backend view fixed to allow release and materialization to continue.
+     *
+     * @param source database connection source
+     * @param destination destination
+     * @param limits limits
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public WalReplicaBackup prepareReplicaBackup(final WalCommitAuthority source, final Path destination, final WalBackupOptions limits) {
+        if (replica == null || source != authority) {
+            throw new IllegalArgumentException("replica snapshot requires bound consensus authority");
+        }
+        closeGuard.lock();
+        try {
+            synchronized (decisionGate) {
+                synchronized (flushGate) {
+                    synchronized (gate) {
+                        requireOpen();
+                        if (backupRunning || replicaExportRunning || stores.values().stream().anyMatch(store -> !store.supportsPinnedSnapshot())) {
+                            throw error(ErrorCode.STORAGE_UNAVAILABLE, "pinned replica backup unavailable", null, null);
+                        }
+                        replicaExportRunning = true;
+                    }
+                    try {
+                        var budget = new WalBackup.Budget(limits);
+                        WalBackup.checkDestination(destination, log.directory());
+                        while (true) {
+                            budget.check();
+                            flush();
+                            synchronized (gate) {
+                                requireOpen();
+                                if (checkpoints.values().stream().allMatch(checkpoint -> checkpoint.sequence() == published)) {
+                                    break;
+                                }
+                            }
+                        }
+                        if (published > 0 && !checkpoint().created()) {
+                            throw new IOException("replica backup checkpoint did not reach prefix");
+                        }
+                        var prepared = WalBackup.prepareReplica(destination, log, shards, stores, budget, hook::hit);
+                        return new WalReplicaBackup(prepared, this::releaseReplicaExport);
+                    } catch (final Throwable failure) {
+                        releaseReplicaExport();
+                        if (failure instanceof Error error) {
+                            throw error;
+                        }
+                        throw error(ErrorCode.STORAGE_UNAVAILABLE, "prepare pinned replica backup failed", null, failure);
+                    }
+                }
+            }
+        } finally {
+            closeGuard.unlock();
+        }
+    }
+
+    /**
+     * Repatriation after completion or abandonment of export and a wake-up call for operations that are being safely closed.
+     */
+    private void releaseReplicaExport() {
+        synchronized (gate) {
+            replicaExportRunning = false;
+            gate.notifyAll();
+        }
+    }
+
+    /**
+     * Snapshot is still readable when you close the line to maintain, but do not perform the whole backup in a running-time reading lock.
+     *
+     * @param destination destination
+     * @param limits limits
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
+    private WalBackup.Info backupLocked(final Path destination, final WalBackupOptions limits) {
         var budget = new WalBackup.Budget(limits);
         synchronized (decisionGate) {
             synchronized (flushGate) {
@@ -802,89 +1367,154 @@ public final class WalMvccRuntime implements AutoCloseable {
                     backupRunning = true;
                 }
                 try {
-                    budget.check(); WalBackup.checkDestination(destination, log.directory());
+                    budget.check();
+                    WalBackup.checkDestination(destination, log.directory());
                     while (true) {
-                        budget.check(); flush();
+                        budget.check();
+                        flush();
                         synchronized (gate) {
-                            requireOpen(); if (checkpoints.values().stream().allMatch(checkpoint -> checkpoint.sequence() == published)) { break; }
+                            requireOpen();
+                            if (checkpoints.values().stream().allMatch(checkpoint -> checkpoint.sequence() == published)) {
+                                break;
+                            }
                         }
                     }
-                    if (published > 0 && !checkpoint().created()) { throw new IOException("backup checkpoint did not reach published prefix"); }
+                    if (published > 0 && !checkpoint().created()) {
+                        throw new IOException("backup checkpoint did not reach published prefix");
+                    }
                     return WalBackup.create(destination, log, shards, stores, budget, hook::hit);
-                } catch (IOException failure) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "consistent backup failed", null, failure); }
-                finally { synchronized (gate) { backupRunning = false; gate.notifyAll(); } }
+                } catch (final IOException failure) {
+                    throw error(ErrorCode.STORAGE_UNAVAILABLE, "consistent backup failed", null, failure);
+                } finally {
+                    synchronized (gate) {
+                        backupRunning = false;
+                        gate.notifyAll();
+                    }
+                }
             }
         }
     }
 
-    /** 暂停提交决议并做最后一轮有界物化，完整状态持久化后才原子切换并删除旧日志。 */
+    /**
+     * Pause commit decision and do the last round of bounded materialization, complete durable storage before atomic turns and deletes the old log.
+     *
+     * @return the operation result
+     */
     public CheckpointResult checkpoint() {
         synchronized (decisionGate) {
             synchronized (flushGate) {
-                synchronized (gate) { requireOpen(); }
-                flush();
-                long cut; long safe; long before; List<WalCheckpointState.Version> saved = new ArrayList<>();
                 synchronized (gate) {
-                    requireOpen(); cut = published; safe = safePoint;
-                    try { before = log.bytes(); } catch (IOException failure) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "inspect checkpoint WAL", null, failure); }
+                    requireOpen();
+                }
+                flush();
+                long cut;
+                long safe;
+                long before;
+                List<WalCheckpointState.Version> saved = new ArrayList<>();
+                synchronized (gate) {
+                    requireOpen();
+                    cut = published;
+                    safe = safePoint;
+                    try {
+                        before = log.bytes();
+                    } catch (final IOException failure) {
+                        throw error(ErrorCode.STORAGE_UNAVAILABLE, "inspect checkpoint WAL", null, failure);
+                    }
                     if (cut == 0 || checkpoints.values().stream().anyMatch(cp -> cp.sequence() != cut)) {
                         return new CheckpointResult(false, cut, before, before);
                     }
                     versions.forEach((key, chain) -> {
-                        // 后端已追平 cut，由身份和摘要绑定的后端承担冷数据恢复，热点缓存不是权威状态。
-                        if (!stores.containsKey(key.shard)) { chain.forEach((sequence, mutation) -> saved.add(new WalCheckpointState.Version(sequence, mutation))); }
+                        // Backends are pursued cut, cold data recovery is assumed by the identity and summary bound backends. Hotspot caches are not authority states.
+                        if (!stores.containsKey(key.shard)) {
+                            chain.forEach((sequence, mutation) -> saved.add(new WalCheckpointState.Version(sequence, mutation)));
+                        }
                     });
                 }
                 try {
-                    // 镜像创建期间不持读锁，提交决议仍被暂停；已有读者和本地写集继续受原规则保护。
+                    // The commit decision is still suspended without reading locks during mirror creation; reader and local write set continue to be protected by the original rules.
                     log.checkpoint(shards, stores.keySet(), safe, saved, Math.max(0, wallClock.getAsLong()), hook::hit);
-                    lastCheckpointNanos = System.nanoTime(); maintenanceFailure = null;
+                    lastCheckpointNanos = System.nanoTime();
+                    maintenanceFailure = null;
                     return new CheckpointResult(true, cut, before, log.bytes());
-                } catch (WalMvccException resource) {
-                    if (resource.errorCode() == ErrorCode.RESOURCE_EXHAUSTED) { throw resource; }
-                    failStop(resource); throw resource;
-                } catch (Throwable failure) {
-                    failStop(failure); throw error(ErrorCode.STORAGE_UNAVAILABLE, "checkpoint outcome requires recovery", null, failure);
+                } catch (final WalMvccException resource) {
+                    if (resource.errorCode() == ErrorCode.RESOURCE_EXHAUSTED) {
+                        throw resource;
+                    }
+                    failStop(resource);
+                    throw resource;
+                } catch (final Throwable failure) {
+                    failStop(failure);
+                    throw error(ErrorCode.STORAGE_UNAVAILABLE, "checkpoint outcome requires recovery", null, failure);
                 }
             }
         }
     }
 
-    /** 将已验证镜像版本装回内存，重复键版本不能覆盖不同序号。 */
-    private void restoreVersion(WalCheckpointState.Version version) throws IOException {
-        var mutation = version.mutation(); Key key = new Key(mutation.shard(), mutation.key());
-        // 兼容旧镜像的全量头缓存：后端已覆盖恢复基线，不再恢复这些可丢弃缓存。
-        if (stores.containsKey(key.shard)) { return; }
-        if (!latest.containsKey(key)) { retainedBytes += indexBytes(mutation); memoryGcKeys.add(key); }
+    /**
+     * Reloads verify mirror version memory, repeat key version cannot overwrite different serial numbers.
+     *
+     * @param version version
+     * @throws IOException if the operation cannot complete
+     */
+    private void restoreVersion(final WalCheckpointState.Version version) throws IOException {
+        var mutation = version.mutation();
+        Key key = new Key(mutation.shard(), mutation.key());
+        // Full mass cache compatible with old mirrors: the backend is over recovery baseline and no longer recovery these discardable caches.
+        if (stores.containsKey(key.shard)) {
+            return;
+        }
+        if (!latest.containsKey(key)) {
+            retainedBytes += indexBytes(mutation);
+            memoryGcKeys.add(key);
+        }
         latest.merge(key, version.sequence(), Math::max);
         if (versions.computeIfAbsent(key, ignored -> new TreeMap<>()).put(version.sequence(), mutation) != null) {
             throw new IOException("duplicate checkpoint version");
         }
         retainedBytes += mutation.retainedBytes();
-        if (retainedBytes > options.maxMemoryBytes()) { throw new IOException("checkpoint exceeds memory budget"); }
-    }
-
-    /** 用可唤醒等待停止空闲线程，不通过 interrupt 破坏在途 JDBC 或文件 I/O。 */
-    private void pauseMaterializer() throws InterruptedException {
-        synchronized (gate) {
-            if (flushRunning && fatal == null) { gate.wait(options.flushIntervalMillis()); }
+        if (retainedBytes > options.maxMemoryBytes()) {
+            throw new IOException("checkpoint exceeds memory budget");
         }
     }
 
-    /** 主动执行一轮有限物化，便于调用方控制积压或进行确定性验收。 */
+    /**
+     * Use to wake up waiting to stop idle threads and do not damage inbound JDBC or I/O by interrupt.
+     *
+     * @throws InterruptedException if the operation cannot complete
+     */
+    private void pauseMaterializer() throws InterruptedException {
+        synchronized (gate) {
+            if (flushRunning && fatal == null) {
+                gate.wait(options.flushIntervalMillis());
+            }
+        }
+    }
+
+    /**
+     * Proactive implementation of a limited materialization round, which allows callers to contain backlogs or conduct definitive acceptances.
+     *
+     * @throws IOException if the operation cannot complete
+     */
     public void flush() {
         synchronized (flushGate) {
             long upper;
-            synchronized (gate) { requireHealthy(); upper = published; }
+            synchronized (gate) {
+                requireHealthy();
+                upper = published;
+            }
             RuntimeException firstFailure = null;
             for (var entry : stores.entrySet()) {
                 try {
                     synchronized (gate) {
-                        if (checkpoints.get(entry.getKey()).sequence() >= upper) { continue; }
+                        if (checkpoints.get(entry.getKey()).sequence() >= upper) {
+                            continue;
+                        }
                     }
                     WalCheckpoint before = entry.getValue().checkpoint();
                     validateCheckpoint(before);
-                    if (before.sequence() > upper) { throw new IOException("backend ahead of published prefix"); }
+                    if (before.sequence() > upper) {
+                        throw new IOException("backend ahead of published prefix");
+                    }
                     int count = (int) Math.min(options.flushBatchSize(), upper - before.sequence());
                     if (count > 0) {
                         WalCheckpoint after = entry.getValue().apply(log.read(before.sequence() + 1, count));
@@ -894,19 +1524,26 @@ public final class WalMvccRuntime implements AutoCloseable {
                         }
                         before = after;
                     }
-                    synchronized (gate) { checkpoints.put(entry.getKey(), before); evictMaterialized(); }
-                } catch (Exception failure) {
+                    synchronized (gate) {
+                        checkpoints.put(entry.getKey(), before);
+                        evictMaterialized();
+                    }
+                } catch (final Exception failure) {
                     if (firstFailure == null) {
                         firstFailure = error(ErrorCode.STORAGE_UNAVAILABLE, "materialization failed", null, failure);
                     }
                 }
             }
             materializationFailure = firstFailure == null ? null : firstFailure.toString();
-            if (firstFailure != null) { throw firstFailure; }
+            if (firstFailure != null) {
+                throw firstFailure;
+            }
         }
     }
 
-    /** 退休已物化历史，将完全落盘的键纳入有界热点缓存，旧快照按需回源。 */
+    /**
+     * Retirement has been materialization history, and the full dropboard key is added to the bounded Hotspot Cache, old snapshot returned as required.
+     */
     private void evictMaterialized() {
         var keys = versions.entrySet().iterator();
         while (keys.hasNext()) {
@@ -915,7 +1552,9 @@ public final class WalMvccRuntime implements AutoCloseable {
             var chain = entry.getValue().entrySet().iterator();
             while (chain.hasNext()) {
                 var version = chain.next();
-                if (version.getKey() > frontier || version.getKey().equals(latest.get(entry.getKey()))) { break; }
+                if (version.getKey() > frontier || version.getKey().equals(latest.get(entry.getKey()))) {
+                    break;
+                }
                 retainedBytes -= version.getValue().retainedBytes();
                 chain.remove();
             }
@@ -923,108 +1562,213 @@ public final class WalMvccRuntime implements AutoCloseable {
             if (stores.containsKey(entry.getKey().shard) && head <= frontier && !decisionKeys.contains(entry.getKey())
                     && !hotCache.containsKey(entry.getKey())) {
                 long bytes = indexBytes(entry.getValue().lastEntry().getValue()) + entry.getValue().lastEntry().getValue().retainedBytes();
-                hotCache.put(entry.getKey(), bytes); hotCacheBytes += bytes;
+                hotCache.put(entry.getKey(), bytes);
+                hotCacheBytes += bytes;
             }
         }
         trimHotCache(0);
     }
 
-    /** 缓存缺失时从持久索引补查栅栏，未物化键始终有内存栅栏覆盖。 */
-    private long latestSequence(Key key) {
-        Long memory = latest.get(key); if (memory != null) { return memory; }
-        var store = stores.get(key.shard); if (store == null) { return 0; }
+    /**
+     * Check fence from durable index when cache is missing, no materialization key always has memory fence overwrited.
+     *
+     * @param key business key
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private long latestSequence(final Key key) {
+        Long memory = latest.get(key);
+        if (memory != null) {
+            return memory;
+        }
+        var store = stores.get(key.shard);
+        if (store == null) {
+            return 0;
+        }
         conflictStoreLookups++;
         long sequence = store.latestSequence(key.key);
-        if (sequence < 0 || sequence > published) { throw new IllegalStateException("backend conflict fence outside published prefix"); }
+        if (sequence < 0 || sequence > published) {
+            throw new IllegalStateException("backend conflict fence outside published prefix");
+        }
         return sequence;
     }
 
-    /** 将当前切面的冷读结果提升为可淘汰热点，不能占用在途决议的预留内存。 */
-    private void cacheMaterialized(Key key, WalValue value) {
+    /**
+     * Raises the current cut-off cold reading to phase-out hotspots, which cannot take up a reservation memory in transit decision.
+     *
+     * @param key business key
+     * @param value value to write
+     */
+    private void cacheMaterialized(final Key key, final WalValue value) {
         if (versions.containsKey(key) || decisionKeys.contains(key)
-                || value.commitSequence() > checkpoints.get(key.shard).sequence()) { return; }
+                || value.commitSequence() > checkpoints.get(key.shard).sequence()) {
+            return;
+        }
         var mutation = new WalMutation(key.shard, key.key, value.value());
         long bytes = indexBytes(mutation) + mutation.retainedBytes();
-        if (bytes > options.maxHotCacheBytes()) { return; }
+        if (bytes > options.maxHotCacheBytes()) {
+            return;
+        }
         trimHotCache(bytes);
-        if (retainedBytes + bufferedBytes + pendingIndexBytes + bytes > options.maxMemoryBytes()) { return; }
-        var chain = new TreeMap<Long, WalMutation>(); chain.put(value.commitSequence(), mutation);
-        versions.put(key, chain); latest.put(key, value.commitSequence()); memoryGcKeys.add(key);
-        retainedBytes += bytes; hotCache.put(key, bytes); hotCacheBytes += bytes; trimHotCache(0);
+        if (retainedBytes + bufferedBytes + pendingIndexBytes + bytes > options.maxMemoryBytes()) {
+            return;
+        }
+        var chain = new TreeMap<Long, WalMutation>();
+        chain.put(value.commitSequence(), mutation);
+        versions.put(key, chain);
+        latest.put(key, value.commitSequence());
+        memoryGcKeys.add(key);
+        retainedBytes += bytes;
+        hotCache.put(key, bytes);
+        hotCacheBytes += bytes;
+        trimHotCache(0);
     }
 
-    /** 移除缓存分类但保留版本，供冷热点转换及版本安装使用。 */
-    private void forgetHot(Key key) {
-        Long bytes = hotCache.remove(key); if (bytes != null) { hotCacheBytes -= bytes; }
-    }
-
-    /** 只淘汰完全物化的热点键；在途提交使用的键不得消失，否则索引预留会失真。 */
-    private void trimHotCache(long neededBytes) {
-        var entries = hotCache.entrySet().iterator();
-        while (entries.hasNext() && (hotCacheBytes > options.maxHotCacheBytes()
-                || retainedBytes + bufferedBytes + pendingIndexBytes + neededBytes > options.maxMemoryBytes())) {
-            var entry = entries.next(); Key key = entry.getKey();
-            if (decisionKeys.contains(key)) { continue; }
-            hotCacheBytes -= entry.getValue(); retainedBytes -= entry.getValue(); entries.remove();
-            versions.remove(key); latest.remove(key); memoryGcKeys.remove(key); cacheEvictions++;
+    /**
+     * Removes the cache class but retains version for cold hotspot conversion and version installation.
+     *
+     * @param key business key
+     */
+    private void forgetHot(final Key key) {
+        Long bytes = hotCache.remove(key);
+        if (bytes != null) {
+            hotCacheBytes -= bytes;
         }
     }
 
-    /** 最慢物化分片决定待处理提交数，纯本地模式没有后端积压预算。 */
+    /**
+     * Only complete materialization hot buttons will be phased out; the key used in transit commit must not disappear, otherwise index presets may be distorted.
+     *
+     * @param neededBytes needed bytes
+     */
+    private void trimHotCache(final long neededBytes) {
+        var entries = hotCache.entrySet().iterator();
+        while (entries.hasNext() && (hotCacheBytes > options.maxHotCacheBytes()
+                || retainedBytes + bufferedBytes + pendingIndexBytes + neededBytes > options.maxMemoryBytes())) {
+            var entry = entries.next();
+            Key key = entry.getKey();
+            if (decisionKeys.contains(key)) {
+                continue;
+            }
+            hotCacheBytes -= entry.getValue();
+            retainedBytes -= entry.getValue();
+            entries.remove();
+            versions.remove(key);
+            latest.remove(key);
+            memoryGcKeys.remove(key);
+            cacheEvictions++;
+        }
+    }
+
+    /**
+     * The slowest materialization shard determines the number of commit s to be processed, and there is no back-end backlog budget for pure local mode.
+     *
+     * @return the operation result
+     */
     private long materializationLag() {
         return published - checkpoints.values().stream().mapToLong(WalCheckpoint::sequence).min().orElse(published);
     }
 
-    /** 受活跃事务保护地推进安全点，后端每键保留一个历史锚点。 */
-    public int collectGarbage(int keyLimit) {
-        if (keyLimit < 1 || keyLimit > 4096) { throw new IllegalArgumentException("invalid GC batch"); }
+    /**
+     * Active transaction -protected advance safe point, with a historical anchor per key at the back end.
+     *
+     * @param keyLimit key limit
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public int collectGarbage(final int keyLimit) {
+        if (keyLimit < 1 || keyLimit > 4096) {
+            throw new IllegalArgumentException("invalid GC batch");
+        }
         synchronized (gate) {
             requireOpen();
             expireIdle();
             long oldest = active.values().stream().mapToLong(tx -> tx.start).min().orElse(published);
             safePoint = Math.max(safePoint, oldest);
             int removed = 0;
-            for (WalMaterializedStore store : stores.values()) { removed += store.gc(safePoint, keyLimit); }
+            for (WalMaterializedStore store : stores.values()) {
+                removed += store.gc(safePoint, keyLimit);
+            }
             vacuumMemory(keyLimit);
             return removed;
         }
     }
 
-    /** 托管回收按分片轮转，限制每片工作量并避免慢分片长期饿死另一片。 */
-    public WalMaterializedStore.GcProgress collectGarbageBounded(int keyLimit, int rowLimit, long budgetMillis) {
+    /**
+     * Trust collection Press shard rotation, limiting each piece of work and avoiding slow shard chronic starvation of another piece.
+     *
+     * @param keyLimit key limit
+     * @param rowLimit row limit
+     * @param budgetMillis budget millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    public WalMaterializedStore.GcProgress collectGarbageBounded(final int keyLimit, final int rowLimit, final long budgetMillis) {
         if (keyLimit < 1 || keyLimit > 4096 || rowLimit < 1 || rowLimit > 4096 || budgetMillis < 1 || budgetMillis > 5000) {
             throw new IllegalArgumentException("invalid runtime maintenance limits");
         }
         synchronized (gate) {
-            requireOpen(); expireIdle();
-            long oldest = active.values().stream().mapToLong(tx -> tx.start).min().orElse(published); safePoint = Math.max(safePoint, oldest);
-            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMillis); int keys = 0; int rows = 0; boolean wrapped = false;
+            requireOpen();
+            expireIdle();
+            long oldest = active.values().stream().mapToLong(tx -> tx.start).min().orElse(published);
+            safePoint = Math.max(safePoint, oldest);
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMillis);
+            int keys = 0;
+            int rows = 0;
+            boolean wrapped = false;
             var routes = stores.keySet().stream().sorted().toList();
             for (int visited = 0; visited < routes.size() && keys < keyLimit && rows < rowLimit; visited++) {
-                long remaining = deadline - System.nanoTime(); if (remaining <= 0) { break; }
-                String route = routes.get(gcStoreCursor % routes.size()); gcStoreCursor = (gcStoreCursor + 1) % routes.size();
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    break;
+                }
+                String route = routes.get(gcStoreCursor % routes.size());
+                gcStoreCursor = (gcStoreCursor + 1) % routes.size();
                 var result = stores.get(route).gcBounded(safePoint, keyLimit - keys, rowLimit - rows,
                         Math.max(1, TimeUnit.NANOSECONDS.toMillis(remaining)));
-                if (result.inspectedKeys() > keyLimit - keys || result.removedRows() > rowLimit - rows) { throw new IllegalStateException("backend exceeded maintenance budget"); }
-                keys += result.inspectedKeys(); rows += result.removedRows(); wrapped |= result.wrapped();
+                if (result.inspectedKeys() > keyLimit - keys || result.removedRows() > rowLimit - rows) {
+                    throw new IllegalStateException("backend exceeded maintenance budget");
+                }
+                keys += result.inspectedKeys();
+                rows += result.removedRows();
+                wrapped |= result.wrapped();
             }
-            vacuumMemory(keyLimit, rowLimit); return new WalMaterializedStore.GcProgress(keys, rows, wrapped);
+            vacuumMemory(keyLimit, rowLimit);
+            return new WalMaterializedStore.GcProgress(keys, rows, wrapped);
         }
     }
 
-    /** 轮转扫描有限内存键，保留安全点锚点；墓碑必须已物化才能淘汰其冲突索引。 */
-    private void vacuumMemory(int keyLimit) {
+    /**
+     * Rotation scanning limited memory keys to keep safe point anchors; tombstone must have materialization to phase out its conflict index.
+     *
+     * @param keyLimit key limit
+     */
+    private void vacuumMemory(final int keyLimit) {
         vacuumMemory(keyLimit, 4096);
     }
 
-    /** 内存版本也按删除条数限额处理；删除墓碑前必须先移除所有较旧值。 */
-    private void vacuumMemory(int keyLimit, int versionLimit) {
+    /**
+     * Memory version is also treated by the number limit of the deleted article; all older values must be removed before tombstone is deleted.
+     *
+     * @param keyLimit key limit
+     * @param versionLimit version limit
+     */
+    private void vacuumMemory(final int keyLimit, final int versionLimit) {
         int count = Math.min(keyLimit, memoryGcKeys.size());
         int removed = 0;
         for (int i = 0; i < count; i++) {
-            var iterator = memoryGcKeys.iterator(); Key key = iterator.next(); iterator.remove();
-            if (decisionKeys.contains(key)) { memoryGcKeys.add(key); continue; }
-            var chain = versions.get(key); if (chain == null) { continue; }
+            var iterator = memoryGcKeys.iterator();
+            Key key = iterator.next();
+            iterator.remove();
+            if (decisionKeys.contains(key)) {
+                memoryGcKeys.add(key);
+                continue;
+            }
+            var chain = versions.get(key);
+            if (chain == null) {
+                continue;
+            }
             var anchor = chain.floorKey(safePoint);
             var head = chain.lastEntry();
             boolean retiring = head.getValue().deleted() && head.getKey() <= safePoint
@@ -1032,18 +1776,31 @@ public final class WalMvccRuntime implements AutoCloseable {
             if (anchor != null) {
                 var obsolete = chain.headMap(anchor, retiring).values().iterator();
                 while (obsolete.hasNext() && removed < versionLimit) {
-                    retainedBytes -= obsolete.next().retainedBytes(); obsolete.remove(); retiredMemoryVersions++; removed++;
+                    retainedBytes -= obsolete.next().retainedBytes();
+                    obsolete.remove();
+                    retiredMemoryVersions++;
+                    removed++;
                 }
             }
             if (chain.isEmpty()) {
-                retainedBytes -= indexBytes(head.getValue()); versions.remove(key); latest.remove(key);
+                retainedBytes -= indexBytes(head.getValue());
+                versions.remove(key);
+                latest.remove(key);
                 forgetHot(key);
-            } else { memoryGcKeys.add(key); }
-            if (removed >= versionLimit) { break; }
+            } else {
+                memoryGcKeys.add(key);
+            }
+            if (removed >= versionLimit) {
+                break;
+            }
         }
     }
 
-    /** 返回独立模式的可观测状态。 */
+    /**
+     * Returns the observable state of a stand-alone model.
+     *
+     * @return the operation result
+     */
     public Stats stats() {
         synchronized (gate) {
             var frontiers = new LinkedHashMap<String, Long>();
@@ -1055,57 +1812,92 @@ public final class WalMvccRuntime implements AutoCloseable {
                         cacheHits, cacheMisses, cacheEvictions, conflictStoreLookups, materializationLag(), backupRunning || replicaExportRunning,
                         log.archiveBytes(), active.values().stream().mapToLong(tx -> Math.max(0, TimeUnit.NANOSECONDS.toMillis(
                                 monotonicClock.getAsLong() - (tx.deadlineNanos - TimeUnit.MILLISECONDS.toNanos(options.transactionTimeoutMillis()))))).max().orElse(0));
-            } catch (IOException ex) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "inspect WAL failed", null, ex); }
+            } catch (final IOException ex) {
+                throw error(ErrorCode.STORAGE_UNAVAILABLE, "inspect WAL failed", null, ex);
+            }
         }
     }
 
-    /** 无阻塞的存活状态，监控不能为了查询健康再等待一个慢数据库调用。 */
-    public record Lifecycle(boolean accepting, boolean closed, boolean backup, boolean readOnly, boolean proposalBlocked, String fatal,
-                            String materializationFailure, String checkpointFailure) { }
-
-    /** 只读取 volatile 状态，不获取可能持有 JDBC I/O 的运行时锁。 */
+    /**
+     * Read-only takes volatile status and does not get run-time locks that may hold JDBC I/ O.
+     *
+     * @return the operation result
+     */
     public Lifecycle lifecycle() {
         Throwable failure = fatal;
-        return new Lifecycle(accepting, closed, backupRunning || replicaExportRunning, readOnly, proposalBlocked, failure == null ? null : failure.getClass().getSimpleName(), materializationFailure, maintenanceFailure);
+        return new Lifecycle(accepting, closed, backupRunning || replicaExportRunning, readOnly, proposalBlocked, failure == null ? null : failure.getClass().getSimpleName(), materializationFailure,
+                maintenanceFailure);
     }
 
-    /** 进程内维护开关，只阻止新写入；已排队决议继续完成，不替代跨节点 fencing。 */
-    public void setReadOnly(boolean value) { requireOpen(); readOnly = value; }
+    /**
+     * Maintains a switch within the process and only prevents new writing; decision has been queued to continue and does not replace cross-nodes.
+     *
+     * @param value value to write
+     */
+    public void setReadOnly(final boolean value) {
+        requireOpen();
+        readOnly = value;
+    }
 
-    /** 托管关闭先停止接收新事务，已排队决议继续按原提交合同排空。 */
-    void stopAccepting() { accepting = false; }
+    /**
+     * The hosting closure stopped receiving the new transaction and decision was queued to remain empty under the original commit contract.
+     */
+    void stopAccepting() {
+        accepting = false;
+    }
 
-    /** 核对物化进度确实属于当前完整日志，而非另一份或落后的 WAL。 */
-    private void validateCheckpoint(WalCheckpoint checkpoint) throws IOException {
+    /**
+     * The reconciliation of materialization progress does belong to the current full log, not another or backward WAL.
+     *
+     * @param checkpoint checkpoint
+     * @throws IOException if the operation cannot complete
+     */
+    private void validateCheckpoint(final WalCheckpoint checkpoint) throws IOException {
         if (checkpoint.sequence() < log.baseSequence() || checkpoint.sequence() > log.lastSequence()
                 || checkpoint.sequence() > 0 && !log.receipt(checkpoint.sequence()).digest().equals(checkpoint.digest())) {
             throw new IOException("backend checkpoint does not match WAL");
         }
     }
 
-    /** 清理超期但尚未开始决议的事务；排队事务由提交线程确定最终结果。 */
+    /**
+     * Clear the transaction that has expired but not yet started decision; queue transaction with the final result determined by the commit thread.
+     */
     private void expireIdle() {
         for (WalTransaction tx : List.copyOf(active.values())) {
-            if (tx.state == WalTransaction.State.ACTIVE && monotonicClock.getAsLong() - tx.deadlineNanos >= 0) { abortLocal(tx); }
+            if (tx.state == WalTransaction.State.ACTIVE && monotonicClock.getAsLong() - tx.deadlineNanos >= 0) {
+                abortLocal(tx);
+            }
         }
     }
 
-    /** 丢弃尚未提交的本地写集并固定中止终态。 */
-    private void abortLocal(WalTransaction tx) {
+    /**
+     * Discard local write set which is not yet commit and suspend terminal state.
+     *
+     * @param tx transaction context
+     */
+    private void abortLocal(final WalTransaction tx) {
         releaseWrites(tx);
         active.remove(tx.id);
         tx.state = WalTransaction.State.ABORTED;
     }
 
-    /** 统一释放事务写集的资源记账。 */
-    private void releaseWrites(WalTransaction tx) {
+    /**
+     * Harmonized accounting for resources released from transaction write set.
+     *
+     * @param tx transaction context
+     */
+    private void releaseWrites(final WalTransaction tx) {
         bufferedBytes -= tx.writeBytes;
         tx.writeBytes = 0;
         tx.writes.clear();
     }
 
-    /** 任意日志或发布失败都停止接收请求，未确认事务保持结果未知。 */
-    private void failStop(Throwable failure) {
+    /**
+     * Any log or publication failure stopped receiving requests and transaction was not confirmed to keep unknown outcome.
+     *
+     * @param failure failure
+     */
+    private void failStop(final Throwable failure) {
         synchronized (gate) {
             fatal = failure;
             accepting = false;
@@ -1124,8 +1916,12 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 验证归属、状态与期限，存储操作后再次调用可防止过期结果返回。 */
-    private void requireActive(WalTransaction tx) {
+    /**
+     * Verify ownership, state and duration, storage operation followed by a call to prevent the return of expired results.
+     *
+     * @param tx transaction context
+     */
+    private void requireActive(final WalTransaction tx) {
         requireOpen();
         requireOwner(tx);
         requireEpoch(tx.epoch);
@@ -1138,84 +1934,277 @@ public final class WalMvccRuntime implements AutoCloseable {
         }
     }
 
-    /** 拒绝跨运行时或跨重启复用事务句柄。 */
-    private void requireOwner(WalTransaction tx) {
-        if (tx == null || tx.owner != owner) { throw error(ErrorCode.ILLEGAL_STATE, "foreign transaction handle", tx, null); }
+    /**
+     * Refuses to repeat transaction handles while running or restarting.
+     *
+     * @param tx transaction context
+     */
+    private void requireOwner(final WalTransaction tx) {
+        if (tx == null || tx.owner != owner) {
+            throw error(ErrorCode.ILLEGAL_STATE, "foreign transaction handle", tx, null);
+        }
     }
 
-    /** 拒绝不属于当前事务的语句快照及已退休快照。 */
-    private void validateSnapshot(WalTransaction tx, WalReadSnapshot snapshot) {
+    /**
+     * Prove the pen-by-punction center decision as the original local COMMITTED.
+     *
+     * @param tx transaction context
+     * @param snapshot snapshot
+     */
+    private void validateSnapshot(final WalTransaction tx, final WalReadSnapshot snapshot) {
         requireActive(tx);
         if (snapshot == null || snapshot.transaction != tx) {
             throw error(ErrorCode.ILLEGAL_STATE, "foreign statement snapshot", tx, null);
         }
-        if (snapshot.sequence < safePoint) { throw error(ErrorCode.SNAPSHOT_TOO_OLD, "snapshot retired", tx, null); }
+        if (snapshot.sequence < safePoint) {
+            throw error(ErrorCode.SNAPSHOT_TOO_OLD, "snapshot retired", tx, null);
+        }
     }
 
-    /** 拒绝未知分片。 */
-    private void requireShard(String shard) {
-        if (!shards.contains(shard)) { throw new IllegalArgumentException("unknown shard: " + shard); }
+    /**
+     * Rejects unknown shard.
+     *
+     * @param shard logical shard identifier
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private void requireShard(final String shard) {
+        if (!shards.contains(shard)) {
+            throw new IllegalArgumentException("unknown shard: " + shard);
+        }
     }
 
-    /** 拒绝停止接收请求的运行时。 */
+    /**
+     * When you refuse to stop the request running.
+     */
     private void requireOpen() {
         requireHealthy();
-        if (!accepting) { throw error(ErrorCode.ILLEGAL_STATE, "runtime closing", null, null); }
+        if (!accepting) {
+            throw error(ErrorCode.ILLEGAL_STATE, "runtime closing", null, null);
+        }
     }
 
-    /** 日志失败后禁止继续读取或提交，防止半安装状态泄露。 */
+    /**
+     * If the log fails, continued reading or commit is prohibited to prevent semi-installation.
+     */
     private void requireHealthy() {
-        if (closed || fatal != null) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "runtime unavailable", null, fatal); }
+        if (closed || fatal != null) {
+            throw error(ErrorCode.STORAGE_UNAVAILABLE, "runtime unavailable", null, fatal);
+        }
     }
 
-    /** 用与数据库相同的 UTF-8 顺序判断半开区间。 */
-    private static boolean inRange(String key, String from, String to) {
+    /**
+     * Use the same UTF-8 order as database to judge semi-open space.
+     *
+     * @param key business key
+     * @param from from
+     * @param to to
+     * @return the operation result
+     */
+    private static boolean inRange(final String key, final String from, final String to) {
         return (from == null || Utf8KeyOrder.compare(key, from) >= 0)
                 && (to == null || Utf8KeyOrder.compare(key, to) < 0);
     }
 
-    /** 对仍保留的写冲突索引计费，覆盖键字符串及索引对象固定开销。 */
-    private static long indexBytes(WalMutation mutation) {
+    /**
+     * Sets a fixed cost for the write conflict index billing, overwrite string and index object that remains.
+     *
+     * @param mutation mutation
+     * @return the operation result
+     */
+    private static long indexBytes(final WalMutation mutation) {
         return 128L + 2L * (mutation.shard().length() + mutation.key().length());
     }
 
-    /** 统一构造带稳定事务号的模式专属异常。 */
-    private static WalMvccException error(ErrorCode code, String message, WalTransaction tx, Throwable cause) {
+    /**
+     * Uniform tectonic zone stability transaction ID model exclusive abnormalities.
+     *
+     * @param code code
+     * @param message message
+     * @param tx transaction context
+     * @param cause cause
+     * @return the operation result
+     */
+    private static WalMvccException error(final ErrorCode code, final String message, final WalTransaction tx, final Throwable cause) {
         return new WalMvccException(code, message, tx == null ? null : tx.id, cause);
     }
 
-    /** 停止接收、排空提交线程、停止物化，再释放 WAL 独占锁。 */
-    @Override public void close() {
-        // Java 21 的 synchronized 中 join 会固定虚拟线程载体；AQS 锁仍串行关闭但允许等待时卸载。
+    /**
+     * Stop receiving, emptied commit threads, stopped materialization, and released WAL lock.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    @Override
+    public void close() {
+        // Join of Java 21 synchronizes fixes a virtual thread carrier; the AQS lock is still serially closed but is allowed to be unloaded while waiting.
         closeGuard.lock();
         try {
-            if (closed) { return; }
+            if (closed) {
+                return;
+            }
             synchronized (gate) {
-                accepting = false; long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                while (replicaExportRunning && System.nanoTime() < until) { try { TimeUnit.NANOSECONDS.timedWait(gate, Math.max(1, until - System.nanoTime())); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IllegalStateException("snapshot export close interrupted; directory remains locked", interrupted); } }
-                if (replicaExportRunning) { throw new IllegalStateException("snapshot export did not drain; directory remains locked"); }
+                accepting = false;
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (replicaExportRunning && System.nanoTime() < until) {
+                    try {
+                        TimeUnit.NANOSECONDS.timedWait(gate, Math.max(1, until - System.nanoTime()));
+                    } catch (final InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException("snapshot export close interrupted; directory remains locked", interrupted);
+                    }
+                }
+                if (replicaExportRunning) {
+                    throw new IllegalStateException("snapshot export did not drain; directory remains locked");
+                }
             }
             join(writer);
-            synchronized (gate) { flushRunning = false; gate.notifyAll(); }
+            synchronized (gate) {
+                flushRunning = false;
+                gate.notifyAll();
+            }
             hook.hit(Stage.BEFORE_MATERIALIZER_JOIN);
             join(materializer);
             synchronized (gate) {
-                for (WalTransaction tx : List.copyOf(active.values())) { abortLocal(tx); }
+                for (WalTransaction tx : List.copyOf(active.values())) {
+                    abortLocal(tx);
+                }
                 closed = true;
-                try { log.close(); }
-                catch (IOException ex) { throw error(ErrorCode.STORAGE_UNAVAILABLE, "close WAL failed", null, ex); }
+                try {
+                    log.close();
+                } catch (final IOException ex) {
+                    throw error(ErrorCode.STORAGE_UNAVAILABLE, "close WAL failed", null, ex);
+                }
             }
-        } finally { closeGuard.unlock(); }
+        } finally {
+            closeGuard.unlock();
+        }
     }
 
-    /** 有界等待后台线程，未停止时不释放文件锁。 */
-    private static void join(Thread thread) {
+    /**
+     * Bounded Waits for the background line to release the file lock if it is not stopped.
+     *
+     * @param thread thread
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static void join(final Thread thread) {
         try {
             thread.join(10_000);
-            if (thread.isAlive()) { throw new IllegalStateException("WAL worker did not stop; directory remains locked"); }
-        } catch (InterruptedException ex) {
+            if (thread.isAlive()) {
+                throw new IllegalStateException("WAL worker did not stop; directory remains locked");
+            }
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted while closing WAL runtime", ex);
         }
+    }
+
+    /**
+     * Internal key identity used to separate shard and user keys.
+     *
+     * @param shard logical shard identifier
+     * @param key business key
+     */
+    record Key(String shard, String key) {
+    }
+
+    /**
+     * Failure location, does not participate in normal transaction syntax.
+     */
+    enum Stage {
+        BEFORE_APPEND, AFTER_FORCE, BEFORE_PUBLISH, DURING_INSTALL, DURING_RECOVERY, AFTER_PUBLISH, BEFORE_MATERIALIZER_JOIN,
+        BEFORE_CHECKPOINT_FILES, AFTER_RECEIPTS_FORCE, AFTER_SNAPSHOT_FORCE, BEFORE_CURRENT_MOVE,
+        AFTER_CURRENT_MOVE, AFTER_CURRENT_FORCE, BEFORE_OLD_GENERATION_DELETE, AFTER_OLD_GENERATION_DELETE,
+        AFTER_BACKUP_FILE_COPY, BEFORE_BACKUP_COMPLETE, AFTER_BACKUP_COMPLETE, AFTER_RESTORE_FILE_COPY,
+        AFTER_RESTORE_BATCH, BEFORE_RESTORE_PUBLISH, AFTER_RESTORE_MOVE, AFTER_RESTORE_READY
+    }
+
+    /**
+     * A test for the sure injection of commit failed or process killed by force interface.
+     */
+    @FunctionalInterface
+    interface FaultHook {
+
+        /**
+         * Carry out injections at specified borders.
+         *
+         * @param stage stage
+         */
+        void hit(Stage stage);
+    }
+
+    /**
+     * Provide independent statistics on commit, memory and the backlog of background.
+     *
+     * @param publishedSequence published sequence
+     * @param safePoint oldest retained snapshot timestamp
+     * @param retainedBytes retained bytes
+     * @param bufferedBytes buffered bytes
+     * @param walBytes wal bytes
+     * @param groupForces group forces
+     * @param activeTransactions active transactions
+     * @param queuedCommits queued commits
+     * @param materializedSequences materialized sequences
+     * @param materializationFailure materialization failure
+     * @param checkpointSequence checkpoint sequence
+     * @param pendingReceipts pending receipts
+     * @param receiptArchives receipt archives
+     * @param retiredReceiptThrough retired receipt through
+     * @param maintenanceFailure maintenance failure
+     * @param retiredMemoryVersions retired memory versions
+     * @param hotCacheBytes hot cache bytes
+     * @param hotCacheKeys hot cache keys
+     * @param cacheHits cache hits
+     * @param cacheMisses cache misses
+     * @param cacheEvictions cache evictions
+     * @param conflictStoreLookups conflict store lookups
+     * @param materializationLag materialization lag
+     * @param backupRunning backup running
+     * @param receiptArchiveBytes receipt archive bytes
+     * @param oldestActiveMillis oldest active millis
+     */
+    public record Stats(long publishedSequence, long safePoint, long retainedBytes, long bufferedBytes,
+            long walBytes, long groupForces, int activeTransactions, int queuedCommits,
+            Map<String, Long> materializedSequences, String materializationFailure,
+            long checkpointSequence, int pendingReceipts, int receiptArchives,
+            long retiredReceiptThrough, String maintenanceFailure, long retiredMemoryVersions,
+            long hotCacheBytes, int hotCacheKeys, long cacheHits, long cacheMisses,
+            long cacheEvictions, long conflictStoreLookups, long materializationLag, boolean backupRunning,
+            long receiptArchiveBytes, long oldestActiveMillis) {
+    }
+
+    /**
+     * A frozen batch candidate cannot redistribute the commit serial number over a term.
+     *
+     * @param transactions transactions
+     * @param records records
+     * @param epoch epoch
+     */
+    private record Prepared(List<WalTransaction> transactions, List<WalCommit> records, long epoch) {
+    }
+
+    /**
+     * Specifies whether the checkpoint is created and the log cannot be removed by pushing watermark when the back end is behind.
+     *
+     * @param created created
+     * @param sequence sequence
+     * @param walBytesBefore wal bytes before
+     * @param walBytesAfter wal bytes after
+     */
+    public record CheckpointResult(boolean created, long sequence, long walBytesBefore, long walBytesAfter) {
+    }
+
+    /**
+     * Unblocked survival, surveillance cannot wait for another slow database call to search for health.
+     *
+     * @param accepting accepting
+     * @param closed closed
+     * @param backup backup
+     * @param readOnly read only
+     * @param proposalBlocked proposal blocked
+     * @param fatal fatal
+     * @param materializationFailure materialization failure
+     * @param checkpointFailure checkpoint failure
+     */
+    public record Lifecycle(boolean accepting, boolean closed, boolean backup, boolean readOnly, boolean proposalBlocked, String fatal,
+            String materializationFailure, String checkpointFailure) {
     }
 }

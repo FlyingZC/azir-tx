@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -11,29 +27,29 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** 有界轮转恢复失联本地段，先物理 fencing 再封存槽并回收已发布候选。 */
+/**
+ * Bounded Rotation recovery Disconnected local, Physical Fencing, Seal Cell and collection candidate have been announced.
+ */
 public final class LocalFirstPublicationRecoveryManager {
+
     private final MysqlLocalFirstPublicationLedger ledger;
+
     private final Map<String, MysqlShardSegmentFence> shards;
+
     private final AtomicReference<RuntimeException> lastFailure = new AtomicReference<>();
+
     private long segmentAfterStart;
+
     private long gcAfterSegmentStart;
 
-    /** 一轮独立统计物理封段、中止尾槽、候选回收与故障数。 */
-    public record RecoveryResult(int sealedSegments, int abortedSlots, int purgedCandidates,
-                                 int failures, long publishedTs) {
-        /** 恢复统计不能出现负计数或回退水位。 */
-        public RecoveryResult {
-            if (sealedSegments < 0 || abortedSlots < 0 || purgedCandidates < 0
-                    || failures < 0 || publishedTs < 0) {
-                throw new IllegalArgumentException("invalid local-first recovery result");
-            }
-        }
-    }
-
-    /** 恢复路由必须与每个分片持久 fence 的目标身份一致。 */
-    public LocalFirstPublicationRecoveryManager(MysqlLocalFirstPublicationLedger ledger,
-                                                Map<String, MysqlShardSegmentFence> shards) {
+    /**
+     * Recovery route must match the target identity for each shard durable sequence.
+     *
+     * @param ledger ledger
+     * @param shards shards
+     */
+    public LocalFirstPublicationRecoveryManager(final MysqlLocalFirstPublicationLedger ledger,
+                                                final Map<String, MysqlShardSegmentFence> shards) {
         this.ledger = Objects.requireNonNull(ledger, "ledger");
         this.shards = Map.copyOf(shards);
         this.shards.forEach((shardId, physical) -> {
@@ -43,8 +59,15 @@ public final class LocalFirstPublicationRecoveryManager {
         });
     }
 
-    /** 先完成段物理 fence 与中心终态，再发布水位并清理已封段分片候选。 */
-    public synchronized RecoveryResult recoverOnce(int segmentLimit, int candidateLimit) {
+    /**
+     * Finish the physical fence and center terminal state, release the watermark and clear the closed shard candidate.
+     *
+     * @param segmentLimit segment limit
+     * @param candidateLimit candidate limit
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public synchronized RecoveryResult recoverOnce(final int segmentLimit, final int candidateLimit) {
         if (segmentLimit < 1 || segmentLimit > 4096 || candidateLimit < 1 || candidateLimit > 4096) {
             throw new IllegalArgumentException("invalid local-first recovery batch limit");
         }
@@ -65,12 +88,12 @@ public final class LocalFirstPublicationRecoveryManager {
                     aborted += ledger.sealFencedSegment(segment, physical);
                 }
                 sealed++;
-            } catch (MvccException ex) {
+            } catch (final MvccException ex) {
                 if (ex.errorCode() != ErrorCode.TRANSACTION_ABORTED) {
                     lastFailure.set(ex);
                     failures++;
                 }
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 lastFailure.set(ex);
                 failures++;
             }
@@ -78,14 +101,15 @@ public final class LocalFirstPublicationRecoveryManager {
         long published;
         try {
             published = ledger.advancePublishedFast(4096);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             lastFailure.set(ex);
             failures++;
             published = ledger.currentPublished();
         }
         List<SegmentReservation> gcSegments = ledger.findPurgeableSegments(gcAfterSegmentStart, candidateLimit);
         gcAfterSegmentStart = gcSegments.size() < candidateLimit
-                ? 0 : gcSegments.getLast().lease().firstTs();
+                ? 0
+                : gcSegments.getLast().lease().firstTs();
         for (SegmentReservation segment : gcSegments) {
             try {
                 var proof = ledger.segmentGcProof(segment.lease().firstTs());
@@ -95,7 +119,7 @@ public final class LocalFirstPublicationRecoveryManager {
                 MysqlShardSegmentFence physical = requireShard(proof.get().shardId());
                 physical.purgeFencedSegmentCandidates(proof.get());
                 purged += ledger.markSegmentCandidatesPurged(proof.get(), physical);
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 lastFailure.set(ex);
                 failures++;
             }
@@ -103,8 +127,14 @@ public final class LocalFirstPublicationRecoveryManager {
         return new RecoveryResult(sealed, aborted, purged, failures, published);
     }
 
-    /** 缺少目标分片时保留 FENCING 和候选 GC 记录供路由恢复后重试。 */
-    private MysqlShardSegmentFence requireShard(String shardId) {
+    /**
+     * Keep FENCING and candidate GC records for route after recovery when target shard is missing.
+     *
+     * @param shardId logical shard identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private MysqlShardSegmentFence requireShard(final String shardId) {
         MysqlShardSegmentFence physical = shards.get(shardId);
         if (physical == null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -113,8 +143,42 @@ public final class LocalFirstPublicationRecoveryManager {
         return physical;
     }
 
-    /** 返回最近一次失败以便运维识别无法发布的最老段。 */
+    /**
+     * Returns the most recent failure so as to allow for the identification of the oldest part that cannot be released.
+     *
+     * @return the operation result
+     */
     public RuntimeException lastFailure() {
         return lastFailure.get();
+    }
+
+    /**
+     * Round of independent statistical physical bands, aborted tailings, candidates collection and failure numbers.
+     *
+     * @param sealedSegments sealed segments
+     * @param abortedSlots aborted slots
+     * @param purgedCandidates purged candidates
+     * @param failures failures
+     * @param publishedTs published ts
+     */
+    public record RecoveryResult(int sealedSegments, int abortedSlots, int purgedCandidates,
+            int failures, long publishedTs) {
+
+        /**
+         * Recovery statistics cannot show negative counts or retreat watermark.
+         *
+         * @param sealedSegments sealed segments
+         * @param abortedSlots aborted slots
+         * @param purgedCandidates purged candidates
+         * @param failures failures
+         * @param publishedTs published ts
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public RecoveryResult {
+            if (sealedSegments < 0 || abortedSlots < 0 || purgedCandidates < 0
+                    || failures < 0 || publishedTs < 0) {
+                throw new IllegalArgumentException("invalid local-first recovery result");
+            }
+        }
     }
 }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.recovery;
 
 import com.flyingzc.azir.storage.StorageAdapter;
@@ -12,30 +28,52 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 后台恢复执行器，按分片扫描并恢复悬挂事务。
+ * Background recovery Executor, press shard scan and recovery hang transaction.
  */
 public final class BackgroundRecoveryRunner {
+
     private final RecoveryManager recoveryManager;
+
     private final Map<String, StorageAdapter> adapters;
+
     private final int metadataBatchSize;
+
     private final int maxTransactionsPerRun;
+
     private final long timeBudgetNanos;
+
     private final BackgroundTaskStats transactionStats = new BackgroundTaskStats();
+
     private final BackgroundTaskStats scanStats = new BackgroundTaskStats();
+
     private final Map<Long, Set<String>> pending = new LinkedHashMap<>();
+
     private long metadataCursor;
+
     private int shardCursor;
 
     /**
-     * 构造 BackgroundRecoveryRunner 实例。
+     * Construct a BackgroundRecoveryRunner instance.
+     *
+     * @param recoveryManager recovery manager
+     * @param adapters adapters
      */
-    public BackgroundRecoveryRunner(RecoveryManager recoveryManager, Map<String, StorageAdapter> adapters) {
+    public BackgroundRecoveryRunner(final RecoveryManager recoveryManager, final Map<String, StorageAdapter> adapters) {
         this(recoveryManager, adapters, 128, 256, 1000);
     }
 
-    /** 配置元数据批次、单轮事务上限和合作式时间预算，保留原构造器。 */
-    public BackgroundRecoveryRunner(RecoveryManager recoveryManager, Map<String, StorageAdapter> adapters,
-                                    int metadataBatchSize, int maxTransactionsPerRun, long timeBudgetMillis) {
+    /**
+     * Configure metadata batch, single-wheel transaction cap and co-time budget, keep the original constructor.
+     *
+     * @param recoveryManager recovery manager
+     * @param adapters adapters
+     * @param metadataBatchSize metadata batch size
+     * @param maxTransactionsPerRun max transactions per run
+     * @param timeBudgetMillis time budget millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public BackgroundRecoveryRunner(final RecoveryManager recoveryManager, final Map<String, StorageAdapter> adapters,
+                                    final int metadataBatchSize, final int maxTransactionsPerRun, final long timeBudgetMillis) {
         if (metadataBatchSize < 1 || maxTransactionsPerRun < 1 || timeBudgetMillis < 1) {
             throw new IllegalArgumentException("recovery limits must be positive");
         }
@@ -47,9 +85,13 @@ public final class BackgroundRecoveryRunner {
     }
 
     /**
-     * 执行一轮悬挂事务恢复。
+     * The executive round is hanging transaction recovery.
+     *
+     * @param perShardLimit per shard limit
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
      */
-    public synchronized int recoverOnce(int perShardLimit) {
+    public synchronized int recoverOnce(final int perShardLimit) {
         if (perShardLimit < 1) {
             throw new IllegalArgumentException("perShardLimit must be positive");
         }
@@ -67,8 +109,8 @@ public final class BackgroundRecoveryRunner {
                 boolean completed = recoveryManager.recover(entry.getKey(), entry.getValue());
                 transactionStats.recordSuccess(completed ? 1 : 0);
                 recovered += completed ? 1 : 0;
-            } catch (RuntimeException ex) {
-                // 单事务错误不能阻断同批其他事务，失败项在下一轮游标扫描时重试。
+            } catch (final RuntimeException ex) {
+                // A single transaction error does not block the other transaction s of the same batch. The failed item is retry at the next cursor scan.
                 transactionStats.recordFailure();
             }
             iterator.remove();
@@ -77,7 +119,9 @@ public final class BackgroundRecoveryRunner {
         return recovered;
     }
 
-    /** 持续前移元数据游标，避免坏事务或没有 intent 的单分片提交饿死后续恢复。 */
+    /**
+     * Continue the premix migration cursor to avoid a single shard commit hunger after recovery with bad transaction or no indent.
+     */
     private void discoverMetadata() {
         try {
             List<TxRecord> candidates = recoveryManager.findRecoveryCandidates(metadataCursor,
@@ -90,13 +134,18 @@ public final class BackgroundRecoveryRunner {
                 metadataCursor = 0;
             }
             scanStats.recordSuccess(candidates.size());
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             scanStats.recordFailure();
         }
     }
 
-    /** 轮转扫描分片并保留实际发现位置；有界队列中的未处理项跨轮保留。 */
-    private void discoverIntents(int perShardLimit, long started) {
+    /**
+     * Rotation scan shard and retain the actual location of the discovery; unprocessed items in the bounded queue are kept across the wheel.
+     *
+     * @param perShardLimit per shard limit
+     * @param started started
+     */
+    private void discoverIntents(final int perShardLimit, final long started) {
         List<String> shards = new ArrayList<>(adapters.keySet());
         shards.sort(String::compareTo);
         for (int scanned = 0; scanned < shards.size() && hasBudget(started); scanned++) {
@@ -110,23 +159,36 @@ public final class BackgroundRecoveryRunner {
                     }
                 }
                 scanStats.recordSuccess(ids.size());
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 scanStats.recordFailure();
             }
         }
     }
 
-    /** 检查批次间时间预算；单次 JDBC 调用仍由驱动连接和查询超时限制。 */
-    private boolean hasBudget(long started) {
+    /**
+     * Check batch interval budget; single JDBC calls are still driven connection and query timeout limits.
+     *
+     * @param started started
+     * @return the operation result
+     */
+    private boolean hasBudget(final long started) {
         return System.nanoTime() - started < timeBudgetNanos;
     }
 
-    /** 返回单事务失败和完成统计。 */
+    /**
+     * Returns single transaction failed and completed statistics.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats transactionStats() {
         return transactionStats;
     }
 
-    /** 返回发现批次的失败和处理统计。 */
+    /**
+     * Returns where batch failed and handles statistics.
+     *
+     * @return the operation result
+     */
     public BackgroundTaskStats scanStats() {
         return scanStats;
     }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -22,24 +38,24 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-/** 等语义 Percolator 逐键与同片批量对照；每个事务写两片各两键并等待物化。 */
+/**
+ * The semantic Percolator type-by-key against the same batch; each transaction writes two keys and waits for materialization.
+ */
 public final class MysqlPercolatorBenchmark {
-    /** 禁止实例化基准入口。 */
-    private MysqlPercolatorBenchmark() { }
 
-    /** 单轮计时结果；延迟按每个完整事务计算，错误必须显式报告。 */
-    public record Result(boolean batchByShard, int concurrency, long committed, long failures,
-                         double seconds, double tps, double p50Millis, double p95Millis, double p99Millis) {
-        /** 生成不含连接凭据的单行 JSON 原始结果。 */
-        public String json() {
-            return String.format(Locale.ROOT,
-                    "{\"batchByShard\":%s,\"concurrency\":%d,\"keysPerTransaction\":4,\"committed\":%d,\"failures\":%d,\"seconds\":%.3f,\"tps\":%.2f,\"p50Millis\":%.3f,\"p95Millis\":%.3f,\"p99Millis\":%.3f}",
-                    batchByShard, concurrency, committed, failures, seconds, tps, p50Millis, p95Millis, p99Millis);
-        }
+    /**
+     * Prohibits the exemplification of benchmark entrance.
+     */
+    private MysqlPercolatorBenchmark() {
     }
 
-    /** 显式读取专用测试数据库地址；不删除任何已有数据或重置时间戳。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Visible read specific database address; no existing data removed or timestamp reset deleted.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         String user = required("AZIR_PERCOLATOR_USER");
         String password = required("AZIR_PERCOLATOR_PASSWORD");
         DataSource poolA = MysqlDataSourceFactory.create(required("AZIR_PERCOLATOR_SHARD_A_URL"), user, password);
@@ -58,14 +74,30 @@ public final class MysqlPercolatorBenchmark {
                 System.out.println(run(tso, Map.of("a", a, "b", b), concurrency, duration, batch).json());
             }
         } finally {
-            if (poolA instanceof AutoCloseable closeable) { closeable.close(); }
-            if (poolB instanceof AutoCloseable closeable) { closeable.close(); }
+            if (poolA instanceof AutoCloseable closeable) {
+                closeable.close();
+            }
+            if (poolB instanceof AutoCloseable closeable) {
+                closeable.close();
+            }
         }
     }
 
-    /** 多工作线程各自使用固定且互不冲突的四键，计时仅包括提交完成于窗口内的事务。 */
-    public static Result run(TimestampOracle tso, Map<String, ? extends PercolatorStore> stores,
-                             int concurrency, int durationSeconds, boolean batch) throws Exception {
+    /**
+     * Multi-workspaces each use a fixed and non-controversial four key, which only includes commit completed in the window.
+     *
+     * @param tso tso
+     * @param stores stores
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param batch batch
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    public static Result run(final TimestampOracle tso, final Map<String, ? extends PercolatorStore> stores,
+                             final int concurrency, final int durationSeconds, final boolean batch) throws Exception {
         if (concurrency < 1 || concurrency > 4096 || durationSeconds < 1 || durationSeconds > 300) {
             throw new IllegalArgumentException("invalid benchmark concurrency or duration");
         }
@@ -79,7 +111,7 @@ public final class MysqlPercolatorBenchmark {
         var firstError = new AtomicReference<Throwable>();
         var latencies = new ConcurrentLinkedQueue<Long>();
         String prefix = "pc-bench:" + UUID.randomUUID() + ":";
-        // 与仓库既有 JDBC 基准一致使用固定平台线程，避免虚拟线程调度干扰 A/B 容量对照。
+        // Use of fixed-platform threads in line with existing JDBC benchmark in the warehouse to avoid virtual linear scheduling interference with A/B capacity.
         try (var executor = Executors.newFixedThreadPool(concurrency)) {
             List<Future<?>> tasks = new java.util.ArrayList<>();
             for (int worker = 0; worker < concurrency; worker++) {
@@ -106,12 +138,12 @@ public final class MysqlPercolatorBenchmark {
                                     committed.incrementAndGet();
                                     latencies.add(finished - started);
                                 }
-                            } catch (RuntimeException failure) {
+                            } catch (final RuntimeException failure) {
                                 failures.incrementAndGet();
                                 firstError.compareAndSet(null, failure);
                             }
                         }
-                    } catch (InterruptedException failure) {
+                    } catch (final InterruptedException failure) {
                         Thread.currentThread().interrupt();
                         firstError.compareAndSet(null, failure);
                     }
@@ -125,26 +157,74 @@ public final class MysqlPercolatorBenchmark {
             long start = System.nanoTime();
             end.set(start + TimeUnit.SECONDS.toNanos(durationSeconds));
             gate.countDown();
-            for (Future<?> task : tasks) { task.get(durationSeconds + 60L, TimeUnit.SECONDS); }
-            if (firstError.get() != null) { throw new IllegalStateException("Percolator benchmark failed", firstError.get()); }
+            for (Future<?> task : tasks) {
+                task.get(durationSeconds + 60L, TimeUnit.SECONDS);
+            }
+            if (firstError.get() != null) {
+                throw new IllegalStateException("Percolator benchmark failed", firstError.get());
+            }
             long[] sorted = latencies.stream().mapToLong(Long::longValue).toArray();
             Arrays.sort(sorted);
-            if (sorted.length == 0) { throw new IllegalStateException("no completed transactions in measurement window"); }
+            if (sorted.length == 0) {
+                throw new IllegalStateException("no completed transactions in measurement window");
+            }
             return new Result(batch, concurrency, committed.get(), failures.get(), durationSeconds,
                     committed.get() / (double) durationSeconds, percentile(sorted, 0.50), percentile(sorted, 0.95), percentile(sorted, 0.99));
         }
     }
 
-    /** 按最近秩百分位计算完整事务延迟。 */
-    private static double percentile(long[] sorted, double percentile) {
+    /**
+     * Full transaction delay based on the latest percentile.
+     *
+     * @param sorted sorted
+     * @param percentile percentile
+     * @return the operation result
+     */
+    private static double percentile(final long[] sorted, final double percentile) {
         int index = Math.max(0, (int) Math.ceil(sorted.length * percentile) - 1);
         return sorted[index] / 1_000_000.0;
     }
 
-    /** 缺少显式配置时停止，避免默认连接业务库。 */
-    private static String required(String name) {
+    /**
+     * Stops when visible configuration is missing, avoiding default connection business library.
+     *
+     * @param name name
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static String required(final String name) {
         String value = System.getenv(name);
-        if (value == null || value.isBlank()) { throw new IllegalArgumentException("missing environment variable " + name); }
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("missing environment variable " + name);
+        }
         return value;
+    }
+
+    /**
+     * Single-wheeled timing results; delays are calculated on a full transaction basis, and errors must be visiblely reported.
+     *
+     * @param batchByShard batch by shard
+     * @param concurrency concurrency
+     * @param committed committed
+     * @param failures failures
+     * @param seconds seconds
+     * @param tps tps
+     * @param p50Millis p50 millis
+     * @param p95Millis p95 millis
+     * @param p99Millis p99 millis
+     */
+    public record Result(boolean batchByShard, int concurrency, long committed, long failures,
+            double seconds, double tps, double p50Millis, double p95Millis, double p99Millis) {
+
+        /**
+         * Generates a single-line original JSON result that does not contain connection receipt.
+         *
+         * @return the operation result
+         */
+        public String json() {
+            return String.format(Locale.ROOT,
+                    "{\"batchByShard\":%s,\"concurrency\":%d,\"keysPerTransaction\":4,\"committed\":%d,\"failures\":%d,\"seconds\":%.3f,\"tps\":%.2f,\"p50Millis\":%.3f,\"p95Millis\":%.3f,\"p99Millis\":%.3f}",
+                    batchByShard, concurrency, committed, failures, seconds, tps, p50Millis, p95Millis, p99Millis);
+        }
     }
 }

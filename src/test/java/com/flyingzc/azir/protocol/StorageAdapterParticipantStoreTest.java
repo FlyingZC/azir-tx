@@ -1,4 +1,23 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.protocol;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.common.IsolationLevel;
 import com.flyingzc.azir.storage.KeyRange;
@@ -14,15 +33,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /**
- * 存储适配器参与者门面测试，验证协议接口正确委托现有存储适配器。
+ * Storage adapter participant Door Test, verify protocol interface correctly entrusts existing storage adapter.
  */
 class StorageAdapterParticipantStoreTest {
+
     /**
-     * 验证写入、提交和查询操作会委托到底层 StorageAdapter。
+     * Verify Writing, commit and Query operations are commissioned to the bottom level StorageAdapter.
      */
     @Test
     void shouldDelegateOperationsToStorageAdapter() {
@@ -40,7 +57,7 @@ class StorageAdapterParticipantStoreTest {
         store.findPendingTransactionIds(5);
         store.gc(20L, 100);
 
-        assertEquals("shard-1", store.shardId());
+        Assertions.assertEquals("shard-1", store.shardId());
         assertTrue(adapter.calls.contains("prewrite:10"));
         assertTrue(adapter.calls.contains("prepare:10"));
         assertTrue(adapter.calls.contains("commit-known:10:cleanup=true"));
@@ -52,7 +69,7 @@ class StorageAdapterParticipantStoreTest {
     }
 
     /**
-     * 验证读路径操作会委托到底层 StorageAdapter。
+     * The verify reading path operation is entrusted to the bottom stageStorageAdapter.
      */
     @Test
     void shouldDelegateReadOperationsToStorageAdapter() {
@@ -68,25 +85,27 @@ class StorageAdapterParticipantStoreTest {
     }
 
     /**
-     * 记录调用的存储适配器测试桩。
+     * Records the callable storage adapter test stake.
      */
     private static final class RecordingStorageAdapter implements StorageAdapter {
+
         private final String shardId;
+
         private final List<String> calls = new ArrayList<>();
 
         /**
-         * 构造记录型存储适配器。
+         * Construct a record storage adapter.
          *
-         * @param shardId 分片编号
+         * @param shardId  Shard Number.
          */
-        private RecordingStorageAdapter(String shardId) {
+        private RecordingStorageAdapter(final String shardId) {
             this.shardId = shardId;
         }
 
         /**
-         * 返回分片编号。
+         * Returns shard number.
          *
-         * @return 分片编号
+         * @return  Shard Number.
          */
         @Override
         public String shardId() {
@@ -94,7 +113,7 @@ class StorageAdapterParticipantStoreTest {
         }
 
         /**
-         * 初始化测试桩。
+         * Initialization test stakes.
          */
         @Override
         public void initialize() {
@@ -102,132 +121,132 @@ class StorageAdapterParticipantStoreTest {
         }
 
         /**
-         * 记录单键读取调用。
+         * Record a single key to read the call.
          *
-         * @param context 读上下文
-         * @param key 业务键
-         * @return 空结果
+         * @param context Read Context.
+         * @param key Business Keys.
+         * @return Empty Results.
          */
         @Override
-        public Optional<VersionedValue> get(ReadContext context, String key) {
+        public Optional<VersionedValue> get(final ReadContext context, final String key) {
             calls.add("get:" + key);
             return Optional.empty();
         }
 
         /**
-         * 记录范围扫描调用。
+         * Record range scanned for call.
          *
-         * @param context 读上下文
-         * @param keyRange 键范围
-         * @return 空列表
+         * @param context Read Context.
+         * @param keyRange Key Range.
+         * @return Empty list.
          */
         @Override
-        public List<VersionedValue> scan(ReadContext context, KeyRange keyRange) {
+        public List<VersionedValue> scan(final ReadContext context, final KeyRange keyRange) {
             calls.add("scan:" + keyRange.startKeyInclusive() + ":" + keyRange.endKeyExclusive());
             return new ArrayList<>();
         }
 
         /**
-         * 记录预写调用。
+         * Record prewrite call.
          *
-         * @param txId 事务编号
-         * @param startTs 开始时间戳
-         * @param mutations 写集合
+         * @param txId  Transaction identifier.
+         * @param startTs  Start timestamp.
+         * @param mutations  Write set.
          */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) {
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
             calls.add("prewrite:" + txId);
         }
 
         /**
-         * 记录 prepare 调用。
+         * Record the prepare call.
          *
-         * @param txId 事务编号
+         * @param txId  Transaction identifier.
          */
         @Override
-        public void prepare(long txId) {
+        public void prepare(final long txId) {
             calls.add("prepare:" + txId);
         }
 
         /**
-         * 记录提交调用。
+         * Record commit call.
          *
-         * @param txId 事务编号
-         * @param commitTs 提交时间戳
+         * @param txId  Transaction identifier.
+         * @param commitTs  Commit timestamp.
          */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
             calls.add("commit:" + txId);
         }
 
         /**
-         * 记录已知写集合提交调用。
+         * Records the known write set commit call.
          *
-         * @param txId 事务编号
-         * @param commitTs 提交时间戳
-         * @param mutations 写集合
-         * @param cleanupIntents 是否清理意向
+         * @param txId  Transaction identifier.
+         * @param commitTs  Commit timestamp.
+         * @param mutations  Write set.
+         * @param cleanupIntents Whether to clear intent.
          */
         @Override
-        public void commit(long txId, long commitTs, List<Mutation> mutations, boolean cleanupIntents) {
+        public void commit(final long txId, final long commitTs, final List<Mutation> mutations, final boolean cleanupIntents) {
             calls.add("commit-known:" + txId + ":cleanup=" + cleanupIntents);
         }
 
         /**
-         * 记录直接提交调用。
+         * Records the direct commit call.
          *
-         * @param txId 事务编号
-         * @param startTs 开始时间戳
-         * @param commitTs 提交时间戳
-         * @param mutations 写集合
+         * @param txId  Transaction identifier.
+         * @param startTs  Start timestamp.
+         * @param commitTs  Commit timestamp.
+         * @param mutations  Write set.
          */
         @Override
-        public void directCommit(long txId, long startTs, long commitTs, List<Mutation> mutations) {
+        public void directCommit(final long txId, final long startTs, final long commitTs, final List<Mutation> mutations) {
             calls.add("directCommit:" + txId);
         }
 
         /**
-         * 记录清理已知意向调用。
+         * Records the cleanup of known intent calls.
          *
-         * @param txId 事务编号
-         * @param mutations 写集合
+         * @param txId  Transaction identifier.
+         * @param mutations  Write set.
          */
         @Override
-        public void cleanupIntents(long txId, List<Mutation> mutations) {
+        public void cleanupIntents(final long txId, final List<Mutation> mutations) {
             calls.add("cleanup-known:" + txId);
         }
 
         /**
-         * 记录回滚调用。
+         * Record rollback call.
          *
-         * @param txId 事务编号
+         * @param txId  Transaction identifier.
          */
         @Override
-        public void abort(long txId) {
+        public void abort(final long txId) {
             calls.add("abort:" + txId);
         }
 
         /**
-         * 记录待恢复事务查询调用。
+         * Record to be called by recovery transaction query.
          *
-         * @param limit 查询数量上限
-         * @return 空集合
+         * @param limit Maximum number of queries.
+         * @return Empty assembly.
          */
         @Override
-        public Set<Long> findPendingTransactionIds(int limit) {
+        public Set<Long> findPendingTransactionIds(final int limit) {
             calls.add("findPending:" + limit);
             return new LinkedHashSet<>();
         }
 
         /**
-         * 记录 GC 调用。
+         * Record GC call.
          *
-         * @param safePoint 安全点
-         * @param limit 清理数量上限
-         * @return 清理数量
+         * @param safePoint  Safe point.
+         * @param limit Maximum number of cleanups.
+         * @return Number of cleanups.
          */
         @Override
-        public int gc(long safePoint, int limit) {
+        public int gc(final long safePoint, final int limit) {
             calls.add("gc:" + safePoint + ":" + limit);
             return 0;
         }

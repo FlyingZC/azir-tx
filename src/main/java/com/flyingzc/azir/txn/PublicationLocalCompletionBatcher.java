@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -14,28 +30,38 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 聚合已获得分片 COMMITTED 证明的中心补决议和连续水位发布。 */
+/**
+ * Convergence has obtained shard COMMITTED certificate for centre supplement decision and continuous watermark release.
+ */
 final class PublicationLocalCompletionBatcher {
+
     private final MysqlPublicationLedger ledger;
+
     private final ArrayBlockingQueue<Request> queue;
+
     private final int maxBatchSize;
+
     private final List<Thread> workers;
+
     private final LongAdder groups = new LongAdder();
+
     private final LongAdder requests = new LongAdder();
+
     private final LongAdder fallbacks = new LongAdder();
+
     private boolean closed;
 
-    /** 一份真实本地终态证明及独立发布结果。 */
-    private record Request(PublicationLocalCommitProof proof, CompletableFuture<Boolean> result) {
-    }
-
-    /** 汇报实际补决议批次大小与失败回退。 */
-    record Stats(long groups, long requests, long fallbacks) {
-    }
-
-    /** 创建有界工作队列及有限后台虚拟线程。 */
-    PublicationLocalCompletionBatcher(MysqlPublicationLedger ledger, int queueCapacity, int maxBatchSize,
-                                      int workerCount) {
+    /**
+     * Creates a list of bounded task forces and limited background virtual threads.
+     *
+     * @param ledger ledger
+     * @param queueCapacity queue capacity
+     * @param maxBatchSize max batch size
+     * @param workerCount worker count
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    PublicationLocalCompletionBatcher(final MysqlPublicationLedger ledger, final int queueCapacity, final int maxBatchSize,
+                                      final int workerCount) {
         if (queueCapacity < 1 || maxBatchSize < 2 || maxBatchSize > 64
                 || workerCount < 1 || workerCount > 8) {
             throw new IllegalArgumentException("invalid local completion batch limits");
@@ -50,8 +76,16 @@ final class PublicationLocalCompletionBatcher {
         this.workers = List.copyOf(started);
     }
 
-    /** 等待自身中心决议提交，并返回本批是否已经越过自身发布水位。 */
-    boolean complete(ParticipantRecord local, long commitTs, String participant) {
+    /**
+     * Waits for your center decision commit and returns whether this batch has crossed its own release watermark.
+     *
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    boolean complete(final ParticipantRecord local, final long commitTs, final String participant) {
         var future = new CompletableFuture<Boolean>();
         var request = new Request(new PublicationLocalCommitProof(local, commitTs, participant), future);
         synchronized (queue) {
@@ -66,7 +100,7 @@ final class PublicationLocalCompletionBatcher {
         }
         try {
             return future.join();
-        } catch (CompletionException ex) {
+        } catch (final CompletionException ex) {
             if (ex.getCause() instanceof RuntimeException cause) {
                 throw cause;
             }
@@ -74,8 +108,12 @@ final class PublicationLocalCompletionBatcher {
         }
     }
 
-    /** 处理完已接受的证明后退出，未决证明仍可由独立恢复器重放。 */
-    void close(long timeoutMillis) {
+    /**
+     * After processing the accepted certificate, exit pending proves that it can still be independent recovery replay.
+     *
+     * @param timeoutMillis timeout millis
+     */
+    void close(final long timeoutMillis) {
         synchronized (queue) {
             closed = true;
         }
@@ -84,17 +122,23 @@ final class PublicationLocalCompletionBatcher {
             for (Thread worker : workers) {
                 worker.join(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
         }
     }
 
-    /** 返回累计批次聚合程度。 */
+    /**
+     * Returns the cumulative batch degree of aggregation.
+     *
+     * @return the operation result
+     */
     Stats stats() {
         return new Stats(groups.sum(), requests.sum(), fallbacks.sum());
     }
 
-    /** 首笔证明到达后短暂收集同批并持久化结果。 */
+    /**
+     * The first certificate briefly collected the same batch and durable storage results after arrival.
+     */
     private void run() {
         while (true) {
             try {
@@ -118,14 +162,18 @@ final class PublicationLocalCompletionBatcher {
                     }
                 }
                 process(batch);
-            } catch (InterruptedException ex) {
+            } catch (final InterruptedException ex) {
                 Thread.interrupted();
             }
         }
     }
 
-    /** 批次失败或提交响应未知时逐笔重放，以持久账本终态隔离问题事务。 */
-    private void process(List<Request> batch) {
+    /**
+     * Batch failed or commit responded to an unknown replay case-by-case problem with durable account book terminal state transaction.
+     *
+     * @param batch batch
+     */
+    private void process(final List<Request> batch) {
         groups.increment();
         requests.add(batch.size());
         if (batch.size() == 1) {
@@ -137,7 +185,7 @@ final class PublicationLocalCompletionBatcher {
             for (int index = 0; index < batch.size(); index++) {
                 batch.get(index).result().complete(results.get(index));
             }
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             fallbacks.increment();
             for (Request request : batch) {
                 resolveIndividually(request);
@@ -145,14 +193,37 @@ final class PublicationLocalCompletionBatcher {
         }
     }
 
-    /** 以原本地 COMMITTED 证明逐笔解析中心决议。 */
-    private void resolveIndividually(Request request) {
+    /**
+     * Prove the pen-by-punction center decision as the original local COMMITTED.
+     *
+     * @param request request
+     */
+    private void resolveIndividually(final Request request) {
         try {
             PublicationLocalCommitProof proof = request.proof();
             request.result().complete(ledger.completeLocalCommitAfterFencing(
                     proof.local(), proof.commitTs(), proof.participant()));
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             request.result().completeExceptionally(ex);
         }
+    }
+
+    /**
+     * A real local terminal proof and independent release.
+     *
+     * @param proof proof
+     * @param result result
+     */
+    private record Request(PublicationLocalCommitProof proof, CompletableFuture<Boolean> result) {
+    }
+
+    /**
+     * Reports the actual decision batch size and failure retreat.
+     *
+     * @param groups groups
+     * @param requests requests
+     * @param fallbacks fallbacks
+     */
+    record Stats(long groups, long requests, long fallbacks) {
     }
 }

@@ -1,4 +1,26 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.common.ErrorCode;
 import com.flyingzc.azir.common.IsolationLevel;
@@ -17,142 +39,337 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import static com.flyingzc.azir.wal.WalMvccRuntimeTest.*;
-import static org.junit.jupiter.api.Assertions.*;
 
-/** 验证复制内核消费共识决议的边界；此受控端口不是生产 Raft 实现。 */
+/**
+ * Verify Copys the boundaries of kernel consumption consensus decision; this controlled port is not produced Raft.
+ */
 class WalReplicaCoreTest {
-    @TempDir Path directory;
 
-    /** 没有已提交回调时不写本地提交日志，不发布也不返回业务成功。 */
-    @Test void onlyCommittedApplicationPublishesAndAcknowledgesWholeBatch() throws Exception {
-        try (var cluster = new Cluster(directory); var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
-            var leader = cluster.nodes.getFirst(); var tx = pair(leader, "value");
-            var future = tasks.submit(() -> leader.commit(tx)); assertTrue(cluster.submitted.await(5, TimeUnit.SECONDS));
-            assertFalse(future.isDone()); for (var node : cluster.nodes) { assertEquals(0, node.stats().publishedSequence()); assertEquals(60, node.stats().walBytes()); }
-            cluster.applyPending(); assertEquals(1, future.get(5, TimeUnit.SECONDS).commitSequence());
-            for (var node : cluster.nodes) { assertEquals(1, node.stats().publishedSequence()); }
-            cluster.moveLeader(1); var reader = cluster.nodes.get(1).begin(IsolationLevel.REPEATABLE_READ); var snapshot = cluster.nodes.get(1).beginReadStatement(reader);
-            for (String shard : Set.of("a", "b")) { assertEquals("value", text(cluster.nodes.get(1).get(reader, shard, "k", snapshot).orElseThrow())); }
-            cluster.nodes.get(1).rollback(reader); assertThrows(WalMvccException.class, () -> leader.begin(IsolationLevel.READ_COMMITTED));
-        }
-    }
+    @TempDir
+    Path directory;
 
-    /** 共识等待失败不是回滚；晚到的已提交回调可解析 UUID，期间不能复用业务序号。 */
-    @Test void unresolvedSubmissionBlocksNewDecisionsUntilCommittedResolution() throws Exception {
+    /**
+     * Commit returns do not write local commit logs and do not publish or return business success.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void onlyCommittedApplicationPublishesAndAcknowledgesWholeBatch() throws Exception {
         try (var cluster = new Cluster(directory); var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
-            var leader = cluster.nodes.getFirst(); var tx = pair(leader, "late"); var future = tasks.submit(() -> leader.commit(tx));
-            assertTrue(cluster.submitted.await(5, TimeUnit.SECONDS)); cluster.response.completeExceptionally(new IllegalStateException("lost consensus response"));
-            var failure = assertThrows(java.util.concurrent.ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
-            assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, ((WalMvccException) failure.getCause()).errorCode());
-            waitFor(() -> leader.lifecycle().proposalBlocked()); assertEquals(0, leader.stats().publishedSequence());
+            var leader = cluster.nodes.getFirst();
+            var tx = pair(leader, "value");
+            var future = tasks.submit(() -> leader.commit(tx));
+            assertTrue(cluster.submitted.await(5, TimeUnit.SECONDS));
+            assertFalse(future.isDone());
+            for (var node : cluster.nodes) {
+                Assertions.assertEquals(0, node.stats().publishedSequence());
+                Assertions.assertEquals(60, node.stats().walBytes());
+            }
+            cluster.applyPending();
+            Assertions.assertEquals(1, future.get(5, TimeUnit.SECONDS).commitSequence());
+            for (var node : cluster.nodes) {
+                Assertions.assertEquals(1, node.stats().publishedSequence());
+            }
+            cluster.moveLeader(1);
+            var reader = cluster.nodes.get(1).begin(IsolationLevel.REPEATABLE_READ);
+            var snapshot = cluster.nodes.get(1).beginReadStatement(reader);
+            for (String shard : Set.of("a", "b")) {
+                Assertions.assertEquals("value", text(cluster.nodes.get(1).get(reader, shard, "k", snapshot).orElseThrow()));
+            }
+            cluster.nodes.get(1).rollback(reader);
             assertThrows(WalMvccException.class, () -> leader.begin(IsolationLevel.READ_COMMITTED));
-            cluster.applyPending(); assertFalse(leader.lifecycle().proposalBlocked()); assertTrue(leader.findCommitted(tx.id()).isPresent());
-            cluster.response = new CompletableFuture<>(); cluster.submitted = new CountDownLatch(1);
-            var next = pair(leader, "next"); var committing = tasks.submit(() -> leader.commit(next)); assertTrue(cluster.submitted.await(5, TimeUnit.SECONDS));
-            cluster.applyPending(); assertEquals(2, committing.get(5, TimeUnit.SECONDS).commitSequence());
         }
     }
 
-    /** 任期变化退休旧句柄，延迟通知不能误清理新任期事务。 */
-    @Test void fencingInvalidatesOldTransactionsAndPreservesNewEpochHandles() throws Exception {
+    /**
+     * Consensus waiting to fail is not rollback; late commit call-back can resolve UUID and cannot reuse business serial numbers during this period.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void unresolvedSubmissionBlocksNewDecisionsUntilCommittedResolution() throws Exception {
+        try (var cluster = new Cluster(directory); var tasks = Executors.newVirtualThreadPerTaskExecutor()) {
+            var leader = cluster.nodes.getFirst();
+            var tx = pair(leader, "late");
+            var future = tasks.submit(() -> leader.commit(tx));
+            assertTrue(cluster.submitted.await(5, TimeUnit.SECONDS));
+            cluster.response.completeExceptionally(new IllegalStateException("lost consensus response"));
+            var failure = assertThrows(java.util.concurrent.ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS));
+            Assertions.assertEquals(ErrorCode.TRANSACTION_STATUS_UNKNOWN, ((WalMvccException) failure.getCause()).errorCode());
+            waitFor(() -> leader.lifecycle().proposalBlocked());
+            Assertions.assertEquals(0, leader.stats().publishedSequence());
+            assertThrows(WalMvccException.class, () -> leader.begin(IsolationLevel.READ_COMMITTED));
+            cluster.applyPending();
+            assertFalse(leader.lifecycle().proposalBlocked());
+            assertTrue(leader.findCommitted(tx.id()).isPresent());
+            cluster.response = new CompletableFuture<>();
+            cluster.submitted = new CountDownLatch(1);
+            var next = pair(leader, "next");
+            var committing = tasks.submit(() -> leader.commit(next));
+            assertTrue(cluster.submitted.await(5, TimeUnit.SECONDS));
+            cluster.applyPending();
+            Assertions.assertEquals(2, committing.get(5, TimeUnit.SECONDS).commitSequence());
+        }
+    }
+
+    /**
+     * Change of term retirement old handle, delayed notification cannot wrongly clear the new term transaction.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void fencingInvalidatesOldTransactionsAndPreservesNewEpochHandles() throws Exception {
         try (var cluster = new Cluster(directory)) {
-            var old = cluster.nodes.getFirst().begin(IsolationLevel.REPEATABLE_READ); cluster.moveLeader(1);
+            var old = cluster.nodes.getFirst().begin(IsolationLevel.REPEATABLE_READ);
+            cluster.moveLeader(1);
             assertThrows(WalMvccException.class, () -> cluster.nodes.getFirst().get(old, "a", "k"));
-            var current = cluster.nodes.get(1).begin(IsolationLevel.REPEATABLE_READ); cluster.nodes.get(1).fenceEpoch(1);
-            assertTrue(cluster.nodes.get(1).get(current, "a", "k").isEmpty()); cluster.nodes.get(1).rollback(current);
+            var current = cluster.nodes.get(1).begin(IsolationLevel.REPEATABLE_READ);
+            cluster.nodes.get(1).fenceEpoch(1);
+            assertTrue(cluster.nodes.get(1).get(current, "a", "k").isEmpty());
+            cluster.nodes.get(1).rollback(current);
         }
     }
 
-    /** 模式、组及节点身份持久绑定；普通入口和另一个节点都不能接管目录。 */
-    @Test void replicaModeAndIdentitySurviveCheckpointAndRejectStandaloneOpen() throws Exception {
-        Path root = directory.resolve("identity"); var authority = new Immediate(); var identity = new WalReplicaIdentity(UUID.randomUUID(), UUID.randomUUID(), "node1");
+    /**
+     * Modes, groups and nodes identity durable bind; neither the normal entrance nor another node can take over the directory.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void replicaModeAndIdentitySurviveCheckpointAndRejectStandaloneOpen() throws Exception {
+        Path root = directory.resolve("identity");
+        var authority = new Immediate();
+        var identity = new WalReplicaIdentity(UUID.randomUUID(), UUID.randomUUID(), "node1");
         try (var runtime = WalMvccRuntime.openReplica(root, Set.of("a", "b"), Map.of(), WalOptions.defaults(), WalRetentionOptions.preserveAll(), identity, authority)) {
-            authority.runtime = runtime; runtime.commit(pair(runtime, "persisted")); assertTrue(runtime.checkpoint().created());
+            authority.runtime = runtime;
+            runtime.commit(pair(runtime, "persisted"));
+            assertTrue(runtime.checkpoint().created());
         }
         assertThrows(WalMvccException.class, () -> WalMvccRuntime.open(root, Set.of("a", "b"), WalOptions.defaults()));
         var wrong = new WalReplicaIdentity(identity.engineId(), identity.groupId(), "node2");
         assertThrows(WalMvccException.class, () -> WalMvccRuntime.openReplica(root, Set.of("a", "b"), Map.of(), WalOptions.defaults(), WalRetentionOptions.preserveAll(), wrong, authority));
         try (var runtime = WalMvccRuntime.openReplica(root, Set.of("a", "b"), Map.of(), WalOptions.defaults(), WalRetentionOptions.preserveAll(), identity, authority)) {
-            authority.runtime = runtime; assertEquals(1, runtime.stats().publishedSequence()); assertEquals(2, runtime.commit(pair(runtime, "after")).commitSequence());
+            authority.runtime = runtime;
+            Assertions.assertEquals(1, runtime.stats().publishedSequence());
+            Assertions.assertEquals(2, runtime.commit(pair(runtime, "after")).commitSequence());
             assertThrows(WalMvccException.class, () -> runtime.backup(directory.resolve("unsafe-replica-backup"), WalBackupOptions.defaults()));
         }
     }
 
-    /** 丢失初始化目录的持久入口必须拒绝，不能把原副本误创建为零序号。 */
-    @Test void replicaIdentityWithoutWalIsNotAnEmptyEngine() throws Exception {
-        Path root = directory.resolve("missing"); var authority = new Immediate(); var identity = new WalReplicaIdentity(UUID.randomUUID(), UUID.randomUUID(), "node");
-        try (var runtime = WalMvccRuntime.openReplica(root, Set.of("a"), Map.of(), WalOptions.defaults(), WalRetentionOptions.preserveAll(), identity, authority)) { authority.runtime = runtime; }
-        Files.delete(root.resolve("ENGINE")); Files.delete(root.resolve("transactions.wal"));
+    /**
+     * The durable entry for missing initialised directories must be rejected and the original replica cannot be created by mistake as a zero serial number.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void replicaIdentityWithoutWalIsNotAnEmptyEngine() throws Exception {
+        Path root = directory.resolve("missing");
+        var authority = new Immediate();
+        var identity = new WalReplicaIdentity(UUID.randomUUID(), UUID.randomUUID(), "node");
+        try (var runtime = WalMvccRuntime.openReplica(root, Set.of("a"), Map.of(), WalOptions.defaults(), WalRetentionOptions.preserveAll(), identity, authority)) {
+            authority.runtime = runtime;
+        }
+        Files.delete(root.resolve("ENGINE"));
+        Files.delete(root.resolve("transactions.wal"));
         assertThrows(WalMvccException.class, () -> WalMvccRuntime.openReplica(root, Set.of("a"), Map.of(), WalOptions.defaults(), WalRetentionOptions.preserveAll(), identity, authority));
         assertFalse(Files.exists(root.resolve("transactions.wal")));
     }
 
-    /** 重放匹配决议幂等，内容不同或序号跳跃时停止本副本而不泄露部分状态。 */
-    @Test void committedReplayMustMatchExactDecision() throws Exception {
-        var authority = new Immediate(); var identity = new WalReplicaIdentity(UUID.randomUUID(), UUID.randomUUID(), "node");
+    /**
+     * Replay matches decision idempotent, and stops this replica when the content is different or the serial number jumps without divulging part of it.
+     *
+     * @throws Exception if the operation cannot complete
+     */
+    @Test
+    void committedReplayMustMatchExactDecision() throws Exception {
+        var authority = new Immediate();
+        var identity = new WalReplicaIdentity(UUID.randomUUID(), UUID.randomUUID(), "node");
         try (var runtime = WalMvccRuntime.openReplica(directory, Set.of("a"), Map.of(), WalOptions.defaults(), WalRetentionOptions.preserveAll(), identity, authority)) {
-            authority.runtime = runtime; var record = new WalCommit(UUID.randomUUID(), 1, 0, List.of(new WalMutation("a", "k", bytes("value"))));
-            runtime.applyCommitted(authority, List.of(record)); runtime.applyCommitted(authority, List.of(record)); assertEquals(1, runtime.stats().publishedSequence());
+            authority.runtime = runtime;
+            var record = new WalCommit(UUID.randomUUID(), 1, 0, List.of(new WalMutation("a", "k", bytes("value"))));
+            runtime.applyCommitted(authority, List.of(record));
+            runtime.applyCommitted(authority, List.of(record));
+            Assertions.assertEquals(1, runtime.stats().publishedSequence());
             var bad = new WalCommit(record.transactionId(), 1, 0, List.of(new WalMutation("a", "k", bytes("wrong"))));
-            assertThrows(WalMvccException.class, () -> runtime.applyCommitted(authority, List.of(bad))); assertNotNull(runtime.lifecycle().fatal());
+            assertThrows(WalMvccException.class, () -> runtime.applyCommitted(authority, List.of(bad)));
+            assertNotNull(runtime.lifecycle().fatal());
         }
     }
 
-    /** 构造同一事务的完整跨片写集。 */
-    private static WalTransaction pair(WalMvccRuntime runtime, String value) {
-        var tx = runtime.begin(IsolationLevel.REPEATABLE_READ); runtime.put(tx, "a", "k", bytes(value)); runtime.put(tx, "b", "k", bytes(value)); return tx;
+    /**
+     * Construct the complete cross-shard write set of the same transaction.
+     *
+     * @param runtime runtime
+     * @param value value to write
+     * @return the operation result
+     */
+    private static WalTransaction pair(final WalMvccRuntime runtime, final String value) {
+        var tx = runtime.begin(IsolationLevel.REPEATABLE_READ);
+        runtime.put(tx, "a", "k", bytes(value));
+        runtime.put(tx, "b", "k", bytes(value));
+        return tx;
     }
 
-    /** 受控端口允许测试分开观察提交请求和已提交回调。 */
+    /**
+     * Controlled ports allow testing to separate commit requests and commit calls.
+     */
     private static final class Cluster implements AutoCloseable {
-        final List<WalMvccRuntime> nodes = new ArrayList<>(); final List<Authority> authorities = new ArrayList<>();
-        volatile int leader; volatile long term = 1; volatile CountDownLatch submitted = new CountDownLatch(1);
-        volatile CompletableFuture<Void> response = new CompletableFuture<>(); volatile List<WalCommit> pending;
 
-        /** 每个副本拥有独立目录，共享逻辑引擎身份。 */
-        Cluster(Path directory) {
-            UUID engine = UUID.randomUUID(); UUID group = UUID.randomUUID();
+        final List<WalMvccRuntime> nodes = new ArrayList<>();
+
+        final List<Authority> authorities = new ArrayList<>();
+
+        volatile int leader;
+
+        volatile long term = 1;
+
+        volatile CountDownLatch submitted = new CountDownLatch(1);
+
+        volatile CompletableFuture<Void> response = new CompletableFuture<>();
+
+        volatile List<WalCommit> pending;
+
+        /**
+         * Each replica has a separate directory and shares the logic engine identity.
+         *
+         * @param directory directory
+         */
+        Cluster(final Path directory) {
+            UUID engine = UUID.randomUUID();
+            UUID group = UUID.randomUUID();
             for (int i = 0; i < 3; i++) {
-                var authority = new Authority(this, i); authorities.add(authority);
+                var authority = new Authority(this, i);
+                authorities.add(authority);
                 nodes.add(WalMvccRuntime.openReplica(directory.resolve("node" + i), Set.of("a", "b"), Map.of(), WalOptions.defaults().withTimeout(5000),
                         WalRetentionOptions.preserveAll(), new WalReplicaIdentity(engine, group, "node" + i), authority));
             }
         }
 
-        /** 模拟已由可信端口决定提交的批次，先安装两个副本再安装领导者。 */
+        /**
+         * Simulates that batch of commit has been determined by a trusted port, with two replica first installed and the leader installed.
+         */
         void applyPending() {
-            for (int i = 0; i < 3; i++) { if (i != leader) { nodes.get(i).applyCommitted(authorities.get(i), pending); } }
-            nodes.get(leader).applyCommitted(authorities.get(leader), pending); response.complete(null);
+            for (int i = 0; i < 3; i++) {
+                if (i != leader) {
+                    nodes.get(i).applyCommitted(authorities.get(i), pending);
+                }
+            }
+            nodes.get(leader).applyCommitted(authorities.get(leader), pending);
+            response.complete(null);
         }
 
-        /** 模拟角色通知，不代表实现了生产选举协议。 */
-        void moveLeader(int next) { long old = term; leader = next; term++; for (var node : nodes) { node.fenceEpoch(old); } }
+        /**
+         * Simulation of role announcements does not mean that a production election agreement has been reached.
+         *
+         * @param next next
+         */
+        void moveLeader(final int next) {
+            long old = term;
+            leader = next;
+            term++;
+            for (var node : nodes) {
+                node.fenceEpoch(old);
+            }
+        }
 
-        /** 先释放未完成请求，避免测试故障遗留等待线程。 */
-        @Override public void close() { response.completeExceptionally(new IllegalStateException("test closed")); for (var node : nodes) { node.close(); } }
+        /**
+         * Release the outstanding request and avoid testing the failure legacy waiting thread.
+         */
+        @Override
+        public void close() {
+            response.completeExceptionally(new IllegalStateException("test closed"));
+            for (var node : nodes) {
+                node.close();
+            }
+        }
     }
 
-    /** 每个内核使用独立的能力对象，不能用另一个节点的端口安装。 */
+    /**
+     * Each kernel uses an independent capable object and cannot be installed at the port of another node.
+     *
+     * @param cluster cluster
+     * @param node node
+     */
     private record Authority(Cluster cluster, int node) implements WalCommitAuthority {
-        /** 本地角色检查不阻塞。 */
-        @Override public long epoch() { return cluster.leader == node ? cluster.term : 0; }
-        /** 测试的受控屏障，真实网络屏障在 Ratis 集成中另验。 */
-        @Override public long readBarrier(long timeoutMillis) { return epoch(); }
-        /** 保存候选批次，父测试显式决定何时回调安装。 */
-        @Override public CompletionStage<Void> submit(long epoch, List<WalCommit> commits) {
-            if (epoch != epoch()) { return CompletableFuture.failedFuture(new IllegalStateException("not leader")); }
-            cluster.pending = commits; cluster.submitted.countDown(); return cluster.response;
+
+        /**
+         * Local Role checks are not blocked.
+         *
+         * @return the operation result
+         */
+        @Override
+        public long epoch() {
+            return cluster.leader == node ? cluster.term : 0;
+        }
+
+        /**
+         * Controlled barrier, real network barrier tested separately in Ratis integration.
+         *
+         * @param timeoutMillis timeout millis
+         * @return the operation result
+         */
+        @Override
+        public long readBarrier(final long timeoutMillis) {
+            return epoch();
+        }
+
+        /**
+         * Saves candidate batch, the parent test visible determines when to call back for installation.
+         *
+         * @param epoch epoch
+         * @param commits commits
+         * @return the operation result
+         */
+        @Override
+        public CompletionStage<Void> submit(final long epoch, final List<WalCommit> commits) {
+            if (epoch != epoch()) {
+                return CompletableFuture.failedFuture(new IllegalStateException("not leader"));
+            }
+            cluster.pending = commits;
+            cluster.submitted.countDown();
+            return cluster.response;
         }
     }
 
-    /** 同步回调检查核心没有在共识等待时持有不可重入的跨线程安装锁。 */
+    /**
+     * Synchronization check core does not have a non-renewable cross-line installation lock while waiting for consensus.
+     */
     private static final class Immediate implements WalCommitAuthority {
+
         WalMvccRuntime runtime;
-        /** 固定测试任期。 */
-        @Override public long epoch() { return 1; }
-        /** 返回固定已验证测试任期。 */
-        @Override public long readBarrier(long timeoutMillis) { return 1; }
-        /** 安装完整记录后才确认。 */
-        @Override public CompletionStage<Void> submit(long epoch, List<WalCommit> commits) { runtime.applyCommitted(this, commits); return CompletableFuture.completedFuture(null); }
+
+        /**
+         * Fixed test term.
+         *
+         * @return the operation result
+         */
+        @Override
+        public long epoch() {
+            return 1;
+        }
+
+        /**
+         * Returns a fixed verify test term.
+         *
+         * @param timeoutMillis timeout millis
+         * @return the operation result
+         */
+        @Override
+        public long readBarrier(final long timeoutMillis) {
+            return 1;
+        }
+
+        /**
+         * The complete record is installed for confirmation.
+         *
+         * @param epoch epoch
+         * @param commits commits
+         * @return the operation result
+         */
+        @Override
+        public CompletionStage<Void> submit(final long epoch, final List<WalCommit> commits) {
+            runtime.applyCommitted(this, commits);
+            return CompletableFuture.completedFuture(null);
+        }
     }
 }

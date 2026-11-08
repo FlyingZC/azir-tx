@@ -1,4 +1,27 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.recovery;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.common.IsolationLevel;
 import com.flyingzc.azir.common.TxStatus;
@@ -20,11 +43,14 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-/** 验证租约接管、单分片本地提交补中心及恢复错误隔离。 */
+/**
+ * Verify lease Takeover, Single shard local commit Remedial Centre and recovery Error segregation.
+ */
 class PublicationRecoveryTest {
-    /** 独立恢复器必须为旧二参 MySQL 适配器绑定中心权威，不需要启动数据库。 */
+
+    /**
+     * Independent recovery must bind the old MySQL adapter to centre authority without starting database.
+     */
     @Test
     void standaloneRecoveryBindsLegacyMysqlAdapter() {
         var metadata = new InMemoryTransactionMetadataStore();
@@ -38,7 +64,9 @@ class PublicationRecoveryTest {
         }
     }
 
-    /** 非法路由在绑定之前被拒绝，合法映射才绑定同一元数据实例。 */
+    /**
+     * The illegal route was denied prior to binding, and the same meta-data example was validly mapped.
+     */
     @Test
     void recoveryValidatesRoutesBeforeBindingAuthority() {
         var metadata = new InMemoryTransactionMetadataStore();
@@ -48,10 +76,12 @@ class PublicationRecoveryTest {
         assertThrows(com.flyingzc.azir.common.MvccException.class, () -> new RecoveryManager(metadata, Map.of("a,b", adapter)));
         assertNull(adapter.configuredMetadata);
         new RecoveryManager(metadata, Map.of("a", adapter));
-        assertSame(metadata, adapter.configuredMetadata);
+        Assertions.assertSame(metadata, adapter.configuredMetadata);
     }
 
-    /** 原子提交参与者的空记录、未决记录及不匹配终态都不能解除中心未知槽。 */
+    /**
+     * None of the empty atomic commit participant, pending records, or mismatch terminal state removes the centre unknown slot.
+     */
     @Test
     void atomicFenceRequiresMatchingDurableTerminalRecord() {
         List<Optional<ParticipantRecord>> invalidRecords = List.of(Optional.empty(),
@@ -72,14 +102,16 @@ class PublicationRecoveryTest {
             metadata.markLocalCommitPending(1, 10);
             var recovery = new RecoveryManager(metadata, Map.of("a", adapter));
             assertThrows(com.flyingzc.azir.common.MvccException.class, () -> recovery.recover(1));
-            assertEquals(TxStatus.PREPARING, metadata.get(1).orElseThrow().status());
-            assertEquals(10L, metadata.get(1).orElseThrow().commitTs());
+            Assertions.assertEquals(TxStatus.PREPARING, metadata.get(1).orElseThrow().status());
+            Assertions.assertEquals(10L, metadata.get(1).orElseThrow().commitTs());
             assertThrows(com.flyingzc.azir.common.MvccException.class, metadata::assertNoPendingPublications);
             assertTrue(adapter.aborted.isEmpty());
         }
     }
 
-    /** 没有独立提交权威的旧适配器使用中心先回滚、锁外清理路径。 */
+    /**
+     * No independent commit authority old adapter uses centre rollback first, lock out the path.
+     */
     @Test
     void nonAtomicParticipantDoesNotNeedLocalFenceRecord() {
         var metadata = new InMemoryTransactionMetadataStore();
@@ -87,12 +119,14 @@ class PublicationRecoveryTest {
         metadata.create(1, 1, IsolationLevel.REPEATABLE_READ);
         metadata.registerParticipants(1, Set.of("a"));
         new RecoveryManager(metadata, Map.of("a", adapter)).recover(1);
-        assertEquals(TxStatus.ABORTED, metadata.get(1).orElseThrow().status());
+        Assertions.assertEquals(TxStatus.ABORTED, metadata.get(1).orElseThrow().status());
         assertTrue(adapter.fenced.isEmpty());
-        assertEquals(List.of(1L), adapter.aborted);
+        Assertions.assertEquals(List.of(1L), adapter.aborted);
     }
 
-    /** 本地终态 fencing 失败时必须保留中心占位，不能先写 ABORTED 放行新快照。 */
+    /**
+     * Local terminal state funcing must be kept in the center when it fails, not first write ABORTED to release new snapshot.
+     */
     @Test
     void failedParticipantFenceKeepsPendingPublication() {
         var metadata = new InMemoryTransactionMetadataStore();
@@ -103,14 +137,16 @@ class PublicationRecoveryTest {
         metadata.markLocalCommitPending(1, 10);
         var recovery = new RecoveryManager(metadata, Map.of("a", adapter));
         assertThrows(IllegalStateException.class, () -> recovery.recover(1));
-        assertEquals(TxStatus.PREPARING, metadata.get(1).orElseThrow().status());
-        assertEquals(10L, metadata.get(1).orElseThrow().commitTs());
+        Assertions.assertEquals(TxStatus.PREPARING, metadata.get(1).orElseThrow().status());
+        Assertions.assertEquals(10L, metadata.get(1).orElseThrow().commitTs());
         assertThrows(com.flyingzc.azir.common.MvccException.class, metadata::assertNoPendingPublications);
         assertTrue(adapter.committed.isEmpty());
         assertTrue(adapter.aborted.isEmpty());
     }
 
-    /** 有效租约保护 ACTIVE；到期后接管，元数据缺失的 intent 不构成回滚授权。 */
+    /**
+     * Effective lease protection of ACTIVE; when taken over after maturity, missing inents of metadata do not constitute an rollback authorization.
+     */
     @Test
     void activeLeaseAndMissingMetadataPreventAbort() {
         var metadata = new InMemoryTransactionMetadataStore();
@@ -121,15 +157,17 @@ class PublicationRecoveryTest {
         metadata.registerSnapshot(1, 1, Long.MAX_VALUE);
         assertFalse(recovery.recover(1, Set.of("a")));
         assertFalse(recovery.recover(2, Set.of("a")));
-        assertEquals(TxStatus.ACTIVE, metadata.get(1).orElseThrow().status());
+        Assertions.assertEquals(TxStatus.ACTIVE, metadata.get(1).orElseThrow().status());
         assertTrue(adapter.aborted.isEmpty());
         metadata.releaseSnapshot(1);
         metadata.registerSnapshot(1, 1, 1);
         assertTrue(recovery.recover(1, Set.of("a")));
-        assertEquals(List.of(1L), adapter.aborted);
+        Assertions.assertEquals(List.of(1L), adapter.aborted);
     }
 
-    /** 本地已提交的单分片只能按原提交时间戳补中心，不能回滚。 */
+    /**
+     * The local commit single shard can only be used as the commit timestamp patch centre, not rollback.
+     */
     @Test
     void localCommitCompletesCentralDecisionOutsideFanoutLock() {
         var metadata = new InMemoryTransactionMetadataStore();
@@ -139,16 +177,18 @@ class PublicationRecoveryTest {
         metadata.registerParticipants(1, Set.of("a"));
         metadata.markLocalCommitPending(1, 10);
         new RecoveryManager(metadata, Map.of("a", adapter)).recover(1);
-        assertEquals(TxStatus.COMMITTED, metadata.get(1).orElseThrow().status());
-        assertEquals(10L, metadata.get(1).orElseThrow().commitTs());
-        assertEquals(List.of(1L), adapter.committed);
+        Assertions.assertEquals(TxStatus.COMMITTED, metadata.get(1).orElseThrow().status());
+        Assertions.assertEquals(10L, metadata.get(1).orElseThrow().commitTs());
+        Assertions.assertEquals(List.of(1L), adapter.committed);
         assertTrue(adapter.aborted.isEmpty());
-        assertEquals(List.of(1L), adapter.fenced);
+        Assertions.assertEquals(List.of(1L), adapter.fenced);
         assertDoesNotThrow(metadata::assertNoPendingPublications);
         assertTrue(metadata.findRecoveryCandidates(Long.MAX_VALUE, 0, 10).isEmpty());
     }
 
-    /** 元数据候选不依赖 intent，坏事务失败后同批后续事务仍会完成。 */
+    /**
+     * Metadata candidate does not rely on inent, bad transaction fails and subsequent batch transaction will still be completed.
+     */
     @Test
     void metadataCandidatesRecoverWithoutIntentsAndIsolateFailures() {
         var metadata = new InMemoryTransactionMetadataStore();
@@ -158,14 +198,16 @@ class PublicationRecoveryTest {
         adapter.failCommitTxId = 1;
         var recovery = new RecoveryManager(metadata, Map.of("a", adapter));
         var runner = new BackgroundRecoveryRunner(recovery, Map.of("a", adapter), 2, 2, 10_000);
-        assertEquals(1, runner.recoverOnce(2));
-        assertEquals(1, runner.transactionStats().failureCount());
-        assertEquals(List.of(2L), adapter.committed);
-        assertEquals(1L, metadata.findRecoveryCandidates(Long.MAX_VALUE, 0, 10).getFirst().txId());
-        assertEquals(1L, metadata.oldestActiveStartTs().orElseThrow());
+        Assertions.assertEquals(1, runner.recoverOnce(2));
+        Assertions.assertEquals(1, runner.transactionStats().failureCount());
+        Assertions.assertEquals(List.of(2L), adapter.committed);
+        Assertions.assertEquals(1L, metadata.findRecoveryCandidates(Long.MAX_VALUE, 0, 10).getFirst().txId());
+        Assertions.assertEquals(1L, metadata.oldestActiveStartTs().orElseThrow());
     }
 
-    /** 保留扫描实际发现的分片，ABORTED 即使元数据参与者为空也会清理该分片。 */
+    /**
+     * Keeps scanned shard, ABORTED even if the metadata participant is empty.
+     */
     @Test
     void discoveredShardIsRetainedForTerminalCleanup() {
         var metadata = new InMemoryTransactionMetadataStore();
@@ -174,68 +216,147 @@ class PublicationRecoveryTest {
         metadata.create(1, 1, IsolationLevel.REPEATABLE_READ);
         metadata.markAborted(1);
         var runner = new BackgroundRecoveryRunner(new RecoveryManager(metadata, Map.of("a", adapter)), Map.of("a", adapter));
-        assertEquals(1, runner.recoverOnce(10));
-        assertEquals(List.of(1L), adapter.aborted);
+        Assertions.assertEquals(1, runner.recoverOnce(10));
+        Assertions.assertEquals(List.of(1L), adapter.aborted);
     }
 
-    /** 记录恢复副作用并断言提交和回滚物化发生在发布锁外。 */
+    /**
+     * Record recovery side effects and assert that commit and rollback materialization occurred outside the release lock.
+     */
     private static final class RecordingAdapter implements StorageAdapter {
+
         private final InMemoryTransactionMetadataStore metadata;
+
         private final List<Long> committed = new ArrayList<>();
+
         private final List<Long> aborted = new ArrayList<>();
+
         private final List<Long> fenced = new ArrayList<>();
+
         private ParticipantRecord local;
+
         private Set<Long> pending = Set.of();
+
         private long failCommitTxId = -1;
+
         private boolean failFence;
+
         private boolean atomicDirect;
+
         private boolean preserveFenceRecord;
+
         private TransactionMetadataStore configuredMetadata;
 
-        /** 注入真实元数据实例以检查监视器持有状态。 */
-        private RecordingAdapter(InMemoryTransactionMetadataStore metadata) {
+        /**
+         * Injecting a real metadata instance to check the monitor ' s hold.
+         *
+         * @param metadata metadata
+         */
+        private RecordingAdapter(final InMemoryTransactionMetadataStore metadata) {
             this.metadata = metadata;
         }
 
-        /** 返回测试分片编号。 */
+        /**
+         * Returns test shard number.
+         *
+         * @return the operation result
+         */
         @Override
-        public String shardId() { return "a"; }
+        public String shardId() {
+            return "a";
+        }
 
-        /** 测试适配器无需初始化。 */
+        /**
+         * The test adaptor does not need to be initialized.
+         */
         @Override
-        public void initialize() { }
+        public void initialize() {
+        }
 
-        /** 记录恢复器绑定的权威，供独立构造测试验证。 */
+        /**
+         * Record authority bound by recovery for independent tectonic testing verify.
+         *
+         * @param store store
+         */
         @Override
-        public void configureMetadataStore(TransactionMetadataStore store) { configuredMetadata = store; }
+        public void configureMetadataStore(final TransactionMetadataStore store) {
+            configuredMetadata = store;
+        }
 
-        /** 按测试场景声明是否拥有原子本地提交权威。 */
+        /**
+         * Test the scene to state whether atomic local commit authority is owned.
+         *
+         * @return the operation result
+         */
         @Override
-        public boolean supportsAtomicDirectCommit() { return atomicDirect; }
+        public boolean supportsAtomicDirectCommit() {
+            return atomicDirect;
+        }
 
-        /** 此测试不执行读取。 */
+        /**
+         * This test does not perform reading.
+         *
+         * @param context context
+         * @param key business key
+         * @return the operation result
+         */
         @Override
-        public Optional<VersionedValue> get(ReadContext context, String key) { return Optional.empty(); }
+        public Optional<VersionedValue> get(final ReadContext context, final String key) {
+            return Optional.empty();
+        }
 
-        /** 此测试不执行范围扫描。 */
+        /**
+         * This test does not perform a range scan.
+         *
+         * @param context context
+         * @param range range
+         * @return the operation result
+         */
         @Override
-        public List<VersionedValue> scan(ReadContext context, KeyRange range) { return List.of(); }
+        public List<VersionedValue> scan(final ReadContext context, final KeyRange range) {
+            return List.of();
+        }
 
-        /** 此测试不执行预写。 */
+        /**
+         * This test does not perform prewrite.
+         *
+         * @param txId transaction identifier
+         * @param startTs transaction start timestamp
+         * @param mutations transaction write set
+         */
         @Override
-        public void prewrite(long txId, long startTs, List<Mutation> mutations) { }
+        public void prewrite(final long txId, final long startTs, final List<Mutation> mutations) {
+        }
 
-        /** 此测试不执行 prepare。 */
+        /**
+         * This test does not perform prepare.
+         *
+         * @param txId transaction identifier
+         */
         @Override
-        public void prepare(long txId) { }
+        public void prepare(final long txId) {
+        }
 
-        /** 返回模拟的持久化本地决议。 */
+        /**
+         * Returns the simulated durable storage local decision.
+         *
+         * @param txId transaction identifier
+         * @return the operation result
+         */
         @Override
-        public Optional<ParticipantRecord> participantRecord(long txId) { return Optional.ofNullable(local); }
+        public Optional<ParticipantRecord> participantRecord(final long txId) {
+            return Optional.ofNullable(local);
+        }
 
-        /** 断言物化不持有发布锁，并按配置模拟单事务错误。 */
+        /**
+         * The materialization assertion does not hold the release lock and the configuration simulator transaction is wrong.
+         *
+         * @param txId transaction identifier
+         * @param commitTs durable commit timestamp
+         * @throws IllegalStateException if the operation cannot complete
+         */
         @Override
-        public void commit(long txId, long commitTs) {
+        public void commit(final long txId, final long commitTs) {
             assertFalse(Thread.holdsLock(metadata));
             if (txId == failCommitTxId) {
                 throw new IllegalStateException("participant unavailable");
@@ -243,9 +364,14 @@ class PublicationRecoveryTest {
             committed.add(txId);
         }
 
-        /** 屏障内封住迟到写，屏障外记录物化；本地已提交事务的回滚保持无副作用。 */
+        /**
+         * Barrier contains lateness, barrier records materialization; local commit transaction rollback maintains no side effects.
+         *
+         * @param txId transaction identifier
+         * @throws IllegalStateException if the operation cannot complete
+         */
         @Override
-        public void abort(long txId) {
+        public void abort(final long txId) {
             if (Thread.holdsLock(metadata)) {
                 if (failFence) {
                     throw new IllegalStateException("participant fence unavailable");
@@ -259,12 +385,27 @@ class PublicationRecoveryTest {
             }
         }
 
-        /** 返回模拟 intent 扫描结果。 */
+        /**
+         * Returns the results of the simulation indent scan.
+         *
+         * @param limit maximum number of items
+         * @return the operation result
+         */
         @Override
-        public Set<Long> findPendingTransactionIds(int limit) { return pending; }
+        public Set<Long> findPendingTransactionIds(final int limit) {
+            return pending;
+        }
 
-        /** 此测试不回收存储数据。 */
+        /**
+         * This test does not store collection data.
+         *
+         * @param safePoint oldest retained snapshot timestamp
+         * @param limit maximum number of items
+         * @return the operation result
+         */
         @Override
-        public int gc(long safePoint, int limit) { return 0; }
+        public int gc(final long safePoint, final int limit) {
+            return 0;
+        }
     }
 }

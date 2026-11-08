@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -20,22 +36,34 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 进程级向量读者租约和 GC 安全下界共用持久行串行化的产品原型。 */
+/**
+ * Process-level vector reader lease and GC shared a serialized prototype of the durable line.
+ */
 final class MysqlVectorSnapshotLeaseStore {
+
     private static final String FLOOR_TABLE = "mvcc_vector_gc_floor_v1";
+
     private static final String LEASE_TABLE = "mvcc_vector_reader_lease_v1";
+
     private final DataSource center;
+
     private final List<String> routes;
+
     private final int stripes;
+
     private final String layoutHash;
+
     private volatile String expectedIdentity;
 
-    /** 持久 GC 下界的代数只在下界真正推进时递增。 */
-    private record Floor(MysqlStripedSnapshotOracle.Snapshot snapshot, long generation) {
-    }
-
-    /** 固定路由和分条布局，不能用另一种拓扑解释租约向量。 */
-    MysqlVectorSnapshotLeaseStore(DataSource center, List<String> routes, int stripes) {
+    /**
+     * Fixed route and strip layouts cannot be used to explain the lease vector with another pounce.
+     *
+     * @param center center
+     * @param routes routes
+     * @param stripes stripes
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    MysqlVectorSnapshotLeaseStore(final DataSource center, final List<String> routes, final int stripes) {
         this.center = Objects.requireNonNull(center, "center");
         this.routes = routes.stream().sorted().toList();
         if (this.routes.isEmpty() || this.routes.stream().anyMatch(route -> route == null || route.isBlank())
@@ -47,17 +75,27 @@ final class MysqlVectorSnapshotLeaseStore {
         this.layoutHash = MysqlPublishedVectorCut.layoutFingerprint(this.routes, stripes);
     }
 
-    /** GC 调度器在启动前核对控制库实际身份。 */
+    /**
+     * GC Scheduler check the actual identity control library before startup.
+     *
+     * @return the operation result
+     */
     DataSource centerDataSource() {
         return center;
     }
 
-    /** 固定分片名与分条数的哈希是跨进程 GC 下界解释的前提。 */
+    /**
+     * Hashi, which fixes shard and splits, is a prerequisite for interpretation across the GC lower boundary of the process.
+     *
+     * @return the operation result
+     */
     String layoutHash() {
         return layoutHash;
     }
 
-    /** 初始化只补缺失零下界与租约表，重启不能清空旧读者或前进安全点。 */
+    /**
+     * Initialization only fills the missing bottom zero and lease tables, restarting cannot empty old reader or advance safe point.
+     */
     void initializeProduct() {
         try (Connection connection = center.getConnection(); Statement sql = connection.createStatement()) {
             String identity = MysqlVectorDatabaseIdentity.read(connection);
@@ -97,14 +135,21 @@ final class MysqlVectorSnapshotLeaseStore {
             }
             readFloor(connection, false);
             expectedIdentity = identity;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("initialize vector snapshot protection failed", ex);
         }
     }
 
-    /** 先锁 GC 下界再登记进程最老可读切面，旧切面低于已回收下界时失败。 */
-    Guard acquire(String ownerId, MysqlStripedSnapshotOracle.Snapshot floor,
-                  long leaseMillis) {
+    /**
+     * Locking the GC bottom-to-register process is the oldest read snapshot, and failed when the old cut side was lower than the already collection bottom.
+     *
+     * @param ownerId owner id
+     * @param floor floor
+     * @param leaseMillis lease millis
+     * @return the operation result
+     */
+    Guard acquire(final String ownerId, final MysqlStripedSnapshotOracle.Snapshot floor,
+                  final long leaseMillis) {
         requireOwnerAndLease(ownerId, leaseMillis);
         Objects.requireNonNull(floor, "floor");
         long requestStarted = System.nanoTime();
@@ -158,14 +203,19 @@ final class MysqlVectorSnapshotLeaseStore {
             });
             return new Guard(ownerId, generation, leaseMillis,
                     conservativeDeadline(requestStarted, leaseMillis));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("acquire vector reader lease failed", ex);
         }
     }
 
-    /** GC 只推进至当前可信发布切面和全部未过期进程保护下界的逐分量最小值。 */
+    /**
+     * GC will advance only to the minimum fractions protected by the current credible release cut-off and all unexpired processes.
+     *
+     * @param published published
+     * @return the operation result
+     */
     MysqlStripedSnapshotOracle.Snapshot advanceSafeFloor(
-            MysqlStripedSnapshotOracle.Snapshot published) {
+                                                         final MysqlStripedSnapshotOracle.Snapshot published) {
         Objects.requireNonNull(published, "published");
         try {
             return MysqlConnectionContext.inTransaction(center, connection -> {
@@ -207,22 +257,31 @@ final class MysqlVectorSnapshotLeaseStore {
                 }
                 return next;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("advance vector GC floor failed", ex);
         }
     }
 
-    /** 返回已持久发布的 GC 下界，不把本地缓存作为回收依据。 */
+    /**
+     * Returns the lower bounds of GC that have been released by durable, without using local cache as the basis for collection.
+     *
+     * @return the operation result
+     */
     MysqlStripedSnapshotOracle.Snapshot currentSafeFloor() {
         try (Connection connection = center.getConnection()) {
             return readFloor(connection, false).snapshot();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("read vector GC floor failed", ex);
         }
     }
 
-    /** 当前进程最老活跃切面只可单调上移，且不得越过持久 GC 下界反向续租。 */
-    private void renew(Guard guard, MysqlStripedSnapshotOracle.Snapshot floor) {
+    /**
+     * The oldest active side of the current process can be moved up only in a single way and may not be extended backwards across the lower durable GC boundary.
+     *
+     * @param guard guard
+     * @param floor floor
+     */
+    private void renew(final Guard guard, final MysqlStripedSnapshotOracle.Snapshot floor) {
         guard.requireActive();
         Objects.requireNonNull(floor, "floor");
         long requestStarted = System.nanoTime();
@@ -270,7 +329,7 @@ final class MysqlVectorSnapshotLeaseStore {
                 return null;
             });
             guard.validUntilNanos = conservativeDeadline(requestStarted, guard.leaseMillis);
-        } catch (SQLException | RuntimeException ex) {
+        } catch (final SQLException | RuntimeException ex) {
             guard.revoked.set(true);
             if (ex instanceof SQLException sql) {
                 throw unavailable("renew vector reader lease failed", sql);
@@ -279,8 +338,12 @@ final class MysqlVectorSnapshotLeaseStore {
         }
     }
 
-    /** 本地先撤销服务资格，再让同代数持久租约到期并保留接任代数。 */
-    private void release(Guard guard) {
+    /**
+     * Local First disallows service eligibility, then the same algebra durable lease expires and keeps the successor algebra.
+     *
+     * @param guard guard
+     */
+    private void release(final Guard guard) {
         guard.revoked.set(true);
         try {
             MysqlConnectionContext.inTransaction(center, connection -> {
@@ -299,71 +362,29 @@ final class MysqlVectorSnapshotLeaseStore {
                 }
                 return null;
             });
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("release vector reader lease failed", ex);
         }
     }
 
-    /** 同一进程的本地租约守卫不允许其他代数续约或继续服务。 */
-    final class Guard implements AutoCloseable {
-        private final String ownerId;
-        private final long generation;
-        private final long leaseMillis;
-        private final AtomicBoolean revoked = new AtomicBoolean();
-        private final AtomicBoolean released = new AtomicBoolean();
-        private volatile long validUntilNanos;
-
-        /** 只能由成功落盘的 acquire 构造。 */
-        private Guard(String ownerId, long generation, long leaseMillis, long validUntilNanos) {
-            this.ownerId = ownerId;
-            this.generation = generation;
-            this.leaseMillis = leaseMillis;
-            this.validUntilNanos = validUntilNanos;
-        }
-
-        /** 返回当前持久代数以识别故障后的旧进程。 */
-        long generation() {
-            return generation;
-        }
-
-        /** 本地截止早于中心租约，断联时立即停止读切面服务。 */
-        void requireActive() {
-            if (revoked.get() || System.nanoTime() - validUntilNanos >= 0) {
-                throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                        "vector reader lease expired or was revoked", true, null);
-            }
-        }
-
-        /** 续租必须携带此进程当前最老活跃切面。 */
-        synchronized void renew(MysqlStripedSnapshotOracle.Snapshot floor) {
-            MysqlVectorSnapshotLeaseStore.this.renew(this, floor);
-        }
-
-        /** 发布者或读者进程故障时立即拒绝本地后续读，中心租约自然到期。 */
-        void revokeLocally() {
-            revoked.set(true);
-        }
-
-        /** 先停止本地服务，再让 GC 可以不再保留本进程旧切面。 */
-        @Override
-        public synchronized void close() {
-            revoked.set(true);
-            if (released.compareAndSet(false, true)) {
-                MysqlVectorSnapshotLeaseStore.this.release(this);
-            }
-        }
-    }
-
-    /** 读取中心单例行并验证布局、代数及非负向量。 */
-    private Floor readFloor(Connection connection, boolean lock) throws SQLException {
+    /**
+     * Reads the centre list routinely with verify layout, algebra and non-negative vectors.
+     *
+     * @param connection connection
+     * @param lock lock
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private Floor readFloor(final Connection connection, final boolean lock) throws SQLException {
         String expected = expectedIdentity;
         if (expected != null && !expected.equals(MysqlVectorDatabaseIdentity.read(connection))) {
             throw illegal("vector reader control identity changed before safe floor access");
         }
         String sql = "select layout_hash, decision_epoch, vector_bytes, generation from "
                 + FLOOR_TABLE + " where singleton_id = 1" + (lock ? " for update" : "");
-        try (PreparedStatement query = connection.prepareStatement(sql);
-             ResultSet row = query.executeQuery()) {
+        try (
+                PreparedStatement query = connection.prepareStatement(sql);
+                ResultSet row = query.executeQuery()) {
             if (!row.next() || !layoutHash.equals(row.getString(1)) || row.getLong(4) < 1) {
                 throw new SQLException("vector GC floor layout or generation is invalid");
             }
@@ -372,9 +393,15 @@ final class MysqlVectorSnapshotLeaseStore {
         }
     }
 
-    /** 每条路径只接受同一固定布局、且逐分量不早于已回收下界的切面。 */
-    void requireAtLeast(MysqlStripedSnapshotOracle.Snapshot candidate,
-                        MysqlStripedSnapshotOracle.Snapshot floor) {
+    /**
+     * Each path accepts only the same fixed layout and not earlier than the cut of an already collection lower boundary.
+     *
+     * @param candidate candidate
+     * @param floor floor
+     * @throws MvccException if the operation cannot complete
+     */
+    void requireAtLeast(final MysqlStripedSnapshotOracle.Snapshot candidate,
+                        final MysqlStripedSnapshotOracle.Snapshot floor) {
         encode(candidate);
         if (candidate.decisionEpoch() < floor.decisionEpoch()) {
             throw new MvccException(ErrorCode.SNAPSHOT_TOO_OLD,
@@ -390,10 +417,16 @@ final class MysqlVectorSnapshotLeaseStore {
         }
     }
 
-    /** GC 对每个分量取当前发布上界与所有有效读者最老切面的最小值。 */
+    /**
+     * GC takes the minimum value for each fraction of the current published upper bounds and all valid reader 's oldest sides.
+     *
+     * @param left left
+     * @param right right
+     * @return the operation result
+     */
     MysqlStripedSnapshotOracle.Snapshot minimum(
-            MysqlStripedSnapshotOracle.Snapshot left,
-            MysqlStripedSnapshotOracle.Snapshot right) {
+                                                final MysqlStripedSnapshotOracle.Snapshot left,
+                                                final MysqlStripedSnapshotOracle.Snapshot right) {
         Map<String, List<Long>> merged = new LinkedHashMap<>();
         for (String route : routes) {
             List<Long> components = new ArrayList<>(stripes);
@@ -406,8 +439,14 @@ final class MysqlVectorSnapshotLeaseStore {
                 Math.min(left.decisionEpoch(), right.decisionEpoch()), merged);
     }
 
-    /** 向量按布局顺序编码，不依赖 Map 遍历顺序。 */
-    private byte[] encode(MysqlStripedSnapshotOracle.Snapshot snapshot) {
+    /**
+     * Vectors are coded in layout order, without Map going through order.
+     *
+     * @param snapshot snapshot
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private byte[] encode(final MysqlStripedSnapshotOracle.Snapshot snapshot) {
         ByteBuffer bytes = ByteBuffer.allocate(
                 Math.multiplyExact(Math.multiplyExact(routes.size(), stripes), Long.BYTES));
         if (snapshot.localSequences().size() != routes.size()) {
@@ -428,8 +467,14 @@ final class MysqlVectorSnapshotLeaseStore {
         return bytes.array();
     }
 
-    /** 解码前先验证字节长度和每一分量，损坏租约不能放宽安全下界。 */
-    private Map<String, List<Long>> decode(byte[] encoded) throws SQLException {
+    /**
+     * Before decoding, verify byte length and each fraction, damage lease does not relax the lower level of safety.
+     *
+     * @param encoded encoded
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private Map<String, List<Long>> decode(final byte[] encoded) throws SQLException {
         int expected = Math.multiplyExact(Math.multiplyExact(routes.size(), stripes), Long.BYTES);
         if (encoded == null || encoded.length != expected) {
             throw new SQLException("vector reader lease bytes differ from layout");
@@ -450,7 +495,11 @@ final class MysqlVectorSnapshotLeaseStore {
         return Map.copyOf(result);
     }
 
-    /** 初始 GC 下界为零，故障重建不能从当前最新切面跳过旧读者。 */
+    /**
+     * Initial GC bottom line is zero, failure reconstruction cannot skip the old reader from the current latest cut.
+     *
+     * @return the operation result
+     */
     private MysqlStripedSnapshotOracle.Snapshot zeroSnapshot() {
         Map<String, List<Long>> values = new LinkedHashMap<>();
         for (String route : routes) {
@@ -459,8 +508,14 @@ final class MysqlVectorSnapshotLeaseStore {
         return new MysqlStripedSnapshotOracle.Snapshot(0, values);
     }
 
-    /** 数据库时间用于判断所有协调进程共有的持久租约期限。 */
-    private static long databaseNow(Connection connection) throws SQLException {
+    /**
+     * Database time is used to judge the durable lease duration common to all coordination processes.
+     *
+     * @param connection connection
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long databaseNow(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select cast(unix_timestamp(current_timestamp(3)) * 1000 as signed)
                 """); ResultSet row = query.executeQuery()) {
@@ -471,28 +526,141 @@ final class MysqlVectorSnapshotLeaseStore {
         }
     }
 
-    /** 进程本地服务截止预留数据库租约的网络与时钟余量。 */
-    private static long conservativeDeadline(long startedNanos, long leaseMillis) {
+    /**
+     * Process local service cutoff for database lease network and clock balance.
+     *
+     * @param startedNanos started nanos
+     * @param leaseMillis lease millis
+     * @return the operation result
+     */
+    private static long conservativeDeadline(final long startedNanos, final long leaseMillis) {
         long margin = Math.max(25, leaseMillis / 5);
         return Math.addExact(startedNanos,
                 TimeUnit.MILLISECONDS.toNanos(leaseMillis - margin));
     }
 
-    /** 进程身份和租期必须保持可索引与可保守续租。 */
-    private static void requireOwnerAndLease(String ownerId, long leaseMillis) {
+    /**
+     * Process identity and lease periods must be indexable and conservatively renewable.
+     *
+     * @param ownerId owner id
+     * @param leaseMillis lease millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static void requireOwnerAndLease(final String ownerId, final long leaseMillis) {
         if (ownerId == null || ownerId.isBlank() || ownerId.length() > 128
                 || leaseMillis < 200 || leaseMillis > 60_000) {
             throw new IllegalArgumentException("invalid vector reader owner or lease duration");
         }
     }
 
-    /** 协议不变量不成立时停止读和 GC，不把它当作可重试 SQL 错误。 */
-    private static MvccException illegal(String message) {
+    /**
+     * The protocol stops reading and GC when the variable is not valid, rather than treating it as an retry SQL error.
+     *
+     * @param message message
+     * @return the operation result
+     */
+    private static MvccException illegal(final String message) {
         return new MvccException(ErrorCode.ILLEGAL_STATE, message, false, null);
     }
 
-    /** 数据库无法提供持久栅栏时失败关闭。 */
-    private static MvccException unavailable(String message, SQLException cause) {
+    /**
+     * Database failed to close when providing durable fence.
+     *
+     * @param message message
+     * @param cause cause
+     * @return the operation result
+     */
+    private static MvccException unavailable(final String message, final SQLException cause) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, null, cause);
+    }
+
+    /**
+     * The algebra of the durable GC lower boundary only increases as it really advances.
+     *
+     * @param snapshot snapshot
+     * @param generation generation
+     */
+    private record Floor(MysqlStripedSnapshotOracle.Snapshot snapshot, long generation) {
+    }
+
+    /**
+     * The local lease guards in the same process do not allow other algebras to renew or continue their service.
+     */
+    final class Guard implements AutoCloseable {
+
+        private final String ownerId;
+
+        private final long generation;
+
+        private final long leaseMillis;
+
+        private final AtomicBoolean revoked = new AtomicBoolean();
+
+        private final AtomicBoolean released = new AtomicBoolean();
+
+        private volatile long validUntilNanos;
+
+        /**
+         * It can only be constructed from acquire that has successfully landed.
+         *
+         * @param ownerId owner id
+         * @param generation generation
+         * @param leaseMillis lease millis
+         * @param validUntilNanos valid until nanos
+         */
+        private Guard(final String ownerId, final long generation, final long leaseMillis, final long validUntilNanos) {
+            this.ownerId = ownerId;
+            this.generation = generation;
+            this.leaseMillis = leaseMillis;
+            this.validUntilNanos = validUntilNanos;
+        }
+
+        /**
+         * Returns the current durable algebra to recognize old processes after failure.
+         *
+         * @return the operation result
+         */
+        long generation() {
+            return generation;
+        }
+
+        /**
+         * Local By the end of the center lease, immediately stop the read snapshot service when it is disconnected.
+         *
+         * @throws MvccException if the operation cannot complete
+         */
+        void requireActive() {
+            if (revoked.get() || System.nanoTime() - validUntilNanos >= 0) {
+                throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                        "vector reader lease expired or was revoked", true, null);
+            }
+        }
+
+        /**
+         * The renewal of the lease must carry with it one of the oldest active aspects of the process at present.
+         *
+         * @param floor floor
+         */
+        synchronized void renew(final MysqlStripedSnapshotOracle.Snapshot floor) {
+            MysqlVectorSnapshotLeaseStore.this.renew(this, floor);
+        }
+
+        /**
+         * The publisher or reader process failure immediately rejects the local follow-up reading, and the centre lease automatically expires.
+         */
+        void revokeLocally() {
+            revoked.set(true);
+        }
+
+        /**
+         * Stop local service first, and then GC can no longer keep the old cut of this process.
+         */
+        @Override
+        public synchronized void close() {
+            revoked.set(true);
+            if (released.compareAndSet(false, true)) {
+                MysqlVectorSnapshotLeaseStore.this.release(this);
+            }
+        }
     }
 }

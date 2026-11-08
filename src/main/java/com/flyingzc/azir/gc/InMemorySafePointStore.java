@@ -1,22 +1,43 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.gc;
 
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 基于内存的安全点存储实现。
+ * Safe point storage based on memory achieved.
  */
 public final class InMemorySafePointStore implements SafePointStore {
+
     private final AtomicLong safePoint;
 
     /**
-     * 构造 InMemorySafePointStore 实例。
+     * Construct a InMemorySafePointStore instance.
+     *
+     * @param initialSafePoint initial safe point
      */
-    public InMemorySafePointStore(long initialSafePoint) {
+    public InMemorySafePointStore(final long initialSafePoint) {
         this.safePoint = new AtomicLong(initialSafePoint);
     }
 
     /**
-     * 返回当前安全点时间戳。
+     * Return the current safe point.
+     *
+     * @return the operation result
      */
     @Override
     public long currentSafePoint() {
@@ -24,10 +45,13 @@ public final class InMemorySafePointStore implements SafePointStore {
     }
 
     /**
-     * 尝试将安全点推进到候选时间戳。
+     * Try to advance the safe point to the candidate timestamp.
+     *
+     * @param candidateSafePoint candidate safe point
+     * @return the operation result
      */
     @Override
-    public long advanceTo(long candidateSafePoint) {
+    public long advanceTo(final long candidateSafePoint) {
         return safePoint.updateAndGet(current -> Math.max(current, candidateSafePoint));
     }
 }

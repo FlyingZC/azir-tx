@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal.ha;
 
 import com.flyingzc.azir.wal.WalMaterializedStore;
@@ -6,59 +22,175 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.UUID;
 
-/** 按副本与稳定代次分配独立后端，重开必须返回同一空间，新代次不得复用旧代次数据库。 */
+/**
+ * Press replica to allocate an independent backend with stability generation, restart must return to the same space, and new generation cannot reuse old generation database.
+ */
 @FunctionalInterface
 public interface WalReplicaBackendFactory {
-    /** 返回未初始化的适配器及自有资源；分配可以幂等重试，不得清空已有空间。 */
+
+    /**
+     * Returns an uninitiated adapter and its own resources; distribution can be idempotent retry without emptying existing space.
+     *
+     * @param identity identity
+     * @param generation generation
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
     Lease open(WalReplicaIdentity identity, UUID generation) throws IOException;
 
-    /** 只有显式实现不复活和幂等删除协议的适配器才能回收后端。 */
-    default boolean supportsRetirement() { return false; }
-
-    /** 游标属于适配器，单轮只处理有限分片；许可只能由持有节点锁的状态管理器传入。 */
-    default RetirementProgress retire(WalGenerationRetirement permit, String cursor, int shardLimit) throws IOException { throw new IOException("backend retirement not supported"); }
-
-    /** 后端退休进度不可伪装为事务数据或额度已释放。 */
-    record RetirementProgress(String cursor, boolean complete, int inspected, int dropped) {
-        /** 拒绝无界游标和错误计数。 */
-        public RetirementProgress { if (cursor == null || cursor.length() > 512 || inspected < 0 || dropped < 0 || dropped > inspected) { throw new IllegalArgumentException("invalid backend retirement progress"); } }
+    /**
+     * The collection backend is only possible if the non-restoration and idempotent delete protocol adaptor is visible.
+     *
+     * @return the operation result
+     */
+    default boolean supportsRetirement() {
+        return false;
     }
 
-    /** 纯本地存储也使用同一代次协议，不伪装成 MySQL 冷副本。 */
-    static WalReplicaBackendFactory localOnly() { return new WalReplicaBackendFactory() {
-        /** 本地模式没有外部存储空间。 */
-        @Override public Lease open(WalReplicaIdentity identity, UUID generation) { return new Lease(Map.of(), () -> { }); }
-        /** 本地目录由节点自己安全回收。 */
-        @Override public boolean supportsRetirement() { return true; }
-        /** 后端阶段无需删除，但仍须验证许可。 */
-        @Override public RetirementProgress retire(WalGenerationRetirement permit, String cursor, int limit) throws IOException { permit.verify(); return new RetirementProgress("local", true, 0, 0); }
-    }; }
+    /**
+     * Cursor is a adapter, with only limited single-wheel processing shard; permission may be imported only by state manager holding node locks.
+     *
+     * @param permit permit
+     * @param cursor cursor
+     * @param shardLimit shard limit
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
+    default RetirementProgress retire(final WalGenerationRetirement permit, final String cursor, final int shardLimit) throws IOException {
+        throw new IOException("backend retirement not supported");
+    }
 
-    /** 一代后端的自有生命周期，节点关闭只释放本次租约资源。 */
+    /**
+     * The pure local storage also uses the same generation protocol and does not disguise as MySQL Cold replica.
+     *
+     * @return the operation result
+     */
+    static WalReplicaBackendFactory localOnly() {
+        return new WalReplicaBackendFactory() {
+
+            /**
+             * Local mode does not have external storage space.
+             *
+             * @param identity identity
+             * @param generation generation
+             * @return the operation result
+             */
+            @Override
+            public Lease open(final WalReplicaIdentity identity, final UUID generation) {
+                return new Lease(Map.of(), () -> {
+                });
+            }
+
+            /**
+             * The local directory is secure by node collection.
+             *
+             * @return the operation result
+             */
+            @Override
+            public boolean supportsRetirement() {
+                return true;
+            }
+
+            /**
+             * The back-end phase does not need to be deleted, but verify permission is still required.
+             *
+             * @param permit permit
+             * @param cursor cursor
+             * @param limit maximum number of items
+             * @return the operation result
+             * @throws IOException if the operation cannot complete
+             */
+            @Override
+            public RetirementProgress retire(final WalGenerationRetirement permit, final String cursor, final int limit) throws IOException {
+                permit.verify();
+                return new RetirementProgress("local", true, 0, 0);
+            }
+        };
+    }
+
+    /**
+     * Backend retirement progress cannot be disguised as transaction data or level released.
+     *
+     * @param cursor cursor
+     * @param complete complete
+     * @param inspected inspected
+     * @param dropped dropped
+     */
+    record RetirementProgress(String cursor, boolean complete, int inspected, int dropped) {
+
+        /**
+         * Rejects unbounded cursor and error count.
+         *
+         * @param cursor cursor
+         * @param complete complete
+         * @param inspected inspected
+         * @param dropped dropped
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        public RetirementProgress {
+            if (cursor == null || cursor.length() > 512 || inspected < 0 || dropped < 0 || dropped > inspected) {
+                throw new IllegalArgumentException("invalid backend retirement progress");
+            }
+        }
+    }
+
+    /**
+     * The end of the generation has its own life cycle, and nodal closures only release this lease resource.
+     */
     final class Lease implements AutoCloseable {
+
         private final Map<String, WalMaterializedStore> stores;
+
         private final Release release;
+
         private boolean closed;
 
-        /** 连接池归属由工厂明确提供，不能默认关闭调用方共享连接池。 */
-        public Lease(Map<String, WalMaterializedStore> stores, Release release) {
-            this.stores = Map.copyOf(stores); this.release = java.util.Objects.requireNonNull(release);
+        /**
+         * Connection pool ownership is provided explicitly by the plant, and the caller share connection pool cannot be disabled by default.
+         *
+         * @param stores stores
+         * @param release release
+         */
+        public Lease(final Map<String, WalMaterializedStore> stores, final Release release) {
+            this.stores = Map.copyOf(stores);
+            this.release = java.util.Objects.requireNonNull(release);
         }
 
-        /** 路由不可被调用方在安装中途更换。 */
-        public Map<String, WalMaterializedStore> stores() { return stores; }
+        /**
+         * Routes may not be replaced by the caller in the middle of installation.
+         *
+         * @return the operation result
+         */
+        public Map<String, WalMaterializedStore> stores() {
+            return stores;
+        }
 
-        /** 成功后才标记关闭；失败保留重试能力，并发关闭须等待实际释放结果。 */
-        @Override public synchronized void close() throws IOException {
-            if (closed) { return; }
+        /**
+         * Mark off after success; failed to retain retry capability, concurrent closure is subject to actual release results.
+         *
+         * @throws IOException if the operation cannot complete
+         */
+        @Override
+        public synchronized void close() throws IOException {
+            if (closed) {
+                return;
+            }
             release.close();
             closed = true;
         }
     }
 
-    /** 工厂只释放自己拥有的资源，不允许借关闭回调删除任意业务数据。 */
-    @FunctionalInterface interface Release {
-        /** 有界关闭本代自有资源；部分释放后失败时，重试须继续清理剩余资源。 */
+    /**
+     * The plant only releases its own resources and does not allow for the removal of random business data through closed callbacks.
+     */
+    @FunctionalInterface
+    interface Release {
+
+        /**
+         * Bounded Closes the current generation ' s own resources; when partial release fails, retry continues to clean up the remaining resources.
+         *
+         * @throws IOException if the operation cannot complete
+         */
         void close() throws IOException;
     }
 }

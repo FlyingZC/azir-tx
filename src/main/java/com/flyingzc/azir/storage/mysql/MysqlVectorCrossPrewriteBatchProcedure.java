@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.MutationType;
@@ -14,18 +30,31 @@ import java.util.List;
 import java.util.Objects;
 import java.util.stream.IntStream;
 
-/** 多笔独立跨片事务在一个分片事务内原子写真实意向与保留序号。 */
+/**
+ * Multiple separate cross-shard transaction atomic in one shard transaction writing real intent and retention serial numbers.
+ */
 final class MysqlVectorCrossPrewriteBatchProcedure {
+
     private final DataSource dataSource;
+
     private volatile boolean ready;
 
-    /** 同一批次只在单个物理分片数据库内提交。 */
-    MysqlVectorCrossPrewriteBatchProcedure(DataSource dataSource) {
+    /**
+     * The same batch is only within a single physical shard database.
+     *
+     * @param dataSource database connection source
+     */
+    MysqlVectorCrossPrewriteBatchProcedure(final DataSource dataSource) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     }
 
-    /** 只安装版本化例程，重启不会清理已有意向或水位。 */
-    void ensure(Connection connection) throws SQLException {
+    /**
+     * Only install version routines, restarting will not clear existing intent or watermark.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
+     */
+    void ensure(final Connection connection) throws SQLException {
         try (PreparedStatement query = connection.prepareStatement("""
                 select 1 from information_schema.routines
                 where routine_schema = database()
@@ -224,7 +253,7 @@ final class MysqlVectorCrossPrewriteBatchProcedure {
                 """)) {
             create.execute();
             ready = true;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             if (ex.getErrorCode() != 1304) {
                 throw ex;
             }
@@ -232,8 +261,16 @@ final class MysqlVectorCrossPrewriteBatchProcedure {
         }
     }
 
-    /** 分条与键的固定加锁顺序不改变调用者请求顺序和逐笔证明身份。 */
-    List<Long> prewrite(List<MysqlStorageAdapter.VectorPrewriteRequest> requests) throws SQLException {
+    /**
+     * The fixed locking order of the rows and keys does not change the caller 's request order and the verb identity.
+     *
+     * @param requests requests
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws NumberFormatException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    List<Long> prewrite(final List<MysqlStorageAdapter.VectorPrewriteRequest> requests) throws SQLException {
         if (!ready || requests == null || requests.isEmpty() || requests.size() > 64) {
             throw new IllegalArgumentException("invalid vector cross prewrite batch");
         }
@@ -296,7 +333,7 @@ final class MysqlVectorCrossPrewriteBatchProcedure {
                         }
                         original[ordered.get(index).index()] = sequence;
                     }
-                } catch (NumberFormatException ex) {
+                } catch (final NumberFormatException ex) {
                     throw new SQLException("vector cross prewrite batch returned invalid sequence", ex);
                 }
                 return List.of(original);
@@ -304,7 +341,12 @@ final class MysqlVectorCrossPrewriteBatchProcedure {
         }
     }
 
-    /** 排序后保留原位置，确保中心凭据对应原事务号。 */
+    /**
+     * Keep the original position after sorting to ensure that the centre receipt corresponds to the original transaction ID.
+     *
+     * @param index index
+     * @param request request
+     */
     private record IndexedRequest(int index, MysqlStorageAdapter.VectorPrewriteRequest request) {
     }
 }

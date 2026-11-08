@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metadata;
 
 import com.flyingzc.azir.common.IsolationLevel;
@@ -10,160 +26,302 @@ import java.util.Set;
 import java.util.function.Supplier;
 
 /**
- * 事务元数据存储接口，定义事务生命周期状态的持久化操作。
+ * Transaction metadata Storage interface, defines the durable storage operation for transaction life cycle states.
  */
 public interface TransactionMetadataStore {
-    /** 返回租约与恢复统一使用的墙钟；分布式实现应覆盖为控制面权威时钟。 */
+
+    /**
+     * Returns a wall clock that is used in conjunction with recovery; distribution realization should cover the control side of the authority clock.
+     *
+     * @return the operation result
+     */
     default long currentTimeMillis() {
         return System.currentTimeMillis();
     }
 
-    /** 持久化单分片本地提交占位；已登记唯一参与者，且固定的 commitTs 必须严格大于 startTs。 */
-    default void markLocalCommitPending(long txId, long commitTs) {
+    /**
+     * Durable storage single shard local commit position; the only registered participant and fixed groupTs must be more strict than startTs.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @throws MvccException if the operation cannot complete
+     */
+    default void markLocalCommitPending(final long txId, final long commitTs) {
         throw new MvccException(ErrorCode.ILLEGAL_STATE, "local publication fencing is required", false, txId);
     }
 
     /**
-     * 新快照和 GC 必须确认没有本地提交未知槽；不支持时禁止继续发布。
-     * 未知槽牺牲全库新读可用性，等待原租约到期和参与者终态 fencing 后才解除。
+     * New snapshot and GC must confirm that there is no unknown slot local commit; continued publication is prohibited if not supported. Unknown slots sacrifice full library readability
+     * until the original lease expires and participant terminal state closing is released.
+     *
+     * @throws MvccException if the operation cannot complete
      */
     default void assertNoPendingPublications() {
         throw new MvccException(ErrorCode.ILLEGAL_STATE, "pending publication inspection is required", false, null);
     }
 
-    /** 在可重入发布屏障内执行快照登记、提交决议或安全点推进；默认仅保证同实例互斥。 */
-    default <T> T withPublicationLock(Supplier<T> action) {
+    /**
+     * Execute snapshot registration, commit decision or safe point propulsion within re-enactable barrier; default guarantees only cross-repeated with the example.
+     *
+     * @param <T> value type
+     * @param action action
+     * @return the operation result
+     */
+    default <T> T withPublicationLock(final Supplier<T> action) {
         synchronized (this) {
             return action.get();
         }
     }
 
-    /** 独立登记快照的固定截止租约；重复登记不得延长截止时间或提高保护下界。 */
-    default void registerSnapshot(long txId, long readTs, long expiresAtMillis) {
+    /**
+     * A fixed deadline of lease for independent registration of snapshot; duplicate registration may not extend the deadline or raise the lower level of protection.
+     *
+     * @param txId transaction identifier
+     * @param readTs snapshot read timestamp
+     * @param expiresAtMillis expires at millis
+     * @throws MvccException if the operation cannot complete
+     */
+    default void registerSnapshot(final long txId, final long readTs, final long expiresAtMillis) {
         throw new MvccException(ErrorCode.ILLEGAL_STATE, "snapshot leases are required", false, txId);
     }
 
-    /** 查询租约原始截止时间，包括尚未清理的过期租约；不支持时禁止恢复接管。 */
-    default Optional<Long> snapshotExpiry(long txId) {
+    /**
+     * Query lease original deadline, including expired lease which has not been cleared; if not supported, the recovery takeover is forbidden.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    default Optional<Long> snapshotExpiry(final long txId) {
         throw new MvccException(ErrorCode.ILLEGAL_STATE, "snapshot leases are required", false, txId);
     }
 
-    /** 校验持久租约仍使用原截止时间且未到期；存储实现可合并截止时间与权威时钟读取。 */
-    default boolean isSnapshotLeaseValid(long txId, long expectedExpiresAtMillis) {
+    /**
+     * Validate durable lease is still with the original cut-off date and not due; storage achieves combined cut-off time and authority clock reading.
+     *
+     * @param txId transaction identifier
+     * @param expectedExpiresAtMillis expected expires at millis
+     * @return the operation result
+     */
+    default boolean isSnapshotLeaseValid(final long txId, final long expectedExpiresAtMillis) {
         Optional<Long> expiry = snapshotExpiry(txId);
         return expiry.isPresent() && expiry.get() == expectedExpiresAtMillis
                 && currentTimeMillis() < expectedExpiresAtMillis;
     }
 
-    /** 释放事务快照保护，重复释放无副作用。 */
-    default void releaseSnapshot(long txId) {
+    /**
+     * Release transaction snapshot protection, repeated release without side effects.
+     *
+     * @param txId transaction identifier
+     * @throws MvccException if the operation cannot complete
+     */
+    default void releaseSnapshot(final long txId) {
         throw new MvccException(ErrorCode.ILLEGAL_STATE, "snapshot leases are required", false, txId);
     }
 
-    /** 在预写前合并非空白且不含逗号的参与者标识；终态记录保持不变并返回真实状态。 */
-    default TxRecord registerParticipants(long txId, Set<String> participants) {
+    /**
+     * Merges non-empty and comma-free participant identification before prewrite; terminal state records remain unchanged and return to real status.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    default TxRecord registerParticipants(final long txId, final Set<String> participants) {
         throw new MvccException(ErrorCode.ILLEGAL_STATE, "participant registration is required", false, txId);
     }
 
-    /** 按 txId 升序返回未完成物化的终态以及租约缺失或到期的未决事务。 */
-    default List<TxRecord> findRecoveryCandidates(long nowMillis, long afterTxId, int limit) {
+    /**
+     * Returns the terminal state and lease missing or expired pending transaction in txId ascending order.
+     *
+     * @param nowMillis now millis
+     * @param afterTxId after tx id
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    default List<TxRecord> findRecoveryCandidates(final long nowMillis, final long afterTxId, final int limit) {
         return List.of();
     }
 
-    /** 仅在全部参与者成功完成终态物化后标记；默认不授权删除历史决议。 */
-    default void markFinalized(long txId) {
+    /**
+     * Mark terminal state materialization only after all participant successful; the deletion of history decision is not authorized by default.
+     *
+     * @param txId transaction identifier
+     */
+    default void markFinalized(final long txId) {
     }
 
-    /** 有界删除早于安全点和保留截止时间且已物化的终态；默认保守保留。 */
-    default int purgeFinalized(long safePoint, long finalizedBeforeMillis, int limit) {
-        return 0;
-    }
-
-    /** 有界删除截止时间不晚于 nowMillis 的租约，不修改事务决议。 */
-    default int expireSnapshots(long nowMillis, int limit) {
+    /**
+     * Bounded Deletes the terminal state earlier than safe point and the reservation deadline, which is already materialization; by default a conservative reservation.
+     *
+     * @param safePoint oldest retained snapshot timestamp
+     * @param finalizedBeforeMillis finalized before millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    default int purgeFinalized(final long safePoint, final long finalizedBeforeMillis, final int limit) {
         return 0;
     }
 
     /**
-     * 创建组件实例或事务记录。
+     * Bounded Delete the lease deadline not later than now Millis without changing transaction decision.
+     *
+     * @param nowMillis now millis
+     * @param limit maximum number of items
+     * @return the operation result
+     */
+    default int expireSnapshots(final long nowMillis, final int limit) {
+        return 0;
+    }
+
+    /**
+     * Create the component or transaction record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
      */
     TxRecord create(long txId, long startTs, IsolationLevel isolationLevel);
 
-    /** 首次持久化事务时一并登记完整参与者，必须在参与者预写前完成。 */
-    default TxRecord createWithParticipants(long txId, long startTs, IsolationLevel isolationLevel,
-                                            Set<String> participants) {
+    /**
+     * Complete participant at first durable storage transaction must be completed before participant prewrite.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @return the operation result
+     */
+    default TxRecord createWithParticipants(final long txId, final long startTs, final IsolationLevel isolationLevel,
+                                            final Set<String> participants) {
         create(txId, startTs, isolationLevel);
         return registerParticipants(txId, participants);
     }
 
     /**
-     * 创建 PREPARING 状态的事务元数据记录。
+     * Create a PREPARING transaction metadata record.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @return the operation result
      */
     TxRecord createPreparing(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants);
 
     /**
-     * 创建 COMMITTED 状态的事务元数据记录，commitTs 必须严格大于 startTs。
+     * Creates a transaction metadata record of COMMITTED status, the committeeTs must be more strict than startTs.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
+     * @param participants participants
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     TxRecord createCommitted(long txId, long startTs, IsolationLevel isolationLevel, Set<String> participants, long commitTs);
 
     /**
-     * 读取指定键或事务的当前可见数据。
+     * Read the currently visible data for the key or transaction.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
      */
     Optional<TxRecord> get(long txId);
 
     /**
-     * 将事务标记为 PREPARING 状态。
+     * Mark the transaction PREPARING.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @return the operation result
      */
     TxRecord markPreparing(long txId, Set<String> participants);
 
     /**
-     * 将事务标记为 COMMITTED 状态，commitTs 必须严格大于已存储的 startTs。
+     * Mark the transaction COMMITTED; commitTs must be strictly greater than the stored startTs.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     TxRecord markCommitted(long txId, long commitTs);
 
     /**
-     * 将事务标记为 COMMITTED 状态，commitTs 必须严格大于已存储的 startTs。
+     * Mark the transaction COMMITTED; commitTs must be strictly greater than the stored startTs.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     TxRecord markCommitted(long txId, Set<String> participants, long commitTs);
 
     /**
-     * 快速持久化 PREPARING 状态。
+     * Persist PREPARING through the fast path.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
      */
-    default void persistPreparing(long txId, Set<String> participants) {
+    default void persistPreparing(final long txId, final Set<String> participants) {
         markPreparing(txId, participants);
     }
 
     /**
-     * 快速持久化 COMMITTED 状态。
+     * Persist the COMMITTED state through the fast path.
+     *
+     * @param txId transaction identifier
+     * @param commitTs durable commit timestamp
      */
-    default void persistCommitted(long txId, long commitTs) {
+    default void persistCommitted(final long txId, final long commitTs) {
         markCommitted(txId, commitTs);
     }
 
     /**
-     * 快速持久化 COMMITTED 状态。
+     * Persist the COMMITTED state through the fast path.
+     *
+     * @param txId transaction identifier
+     * @param participants participants
+     * @param commitTs durable commit timestamp
      */
-    default void persistCommitted(long txId, Set<String> participants, long commitTs) {
+    default void persistCommitted(final long txId, final Set<String> participants, final long commitTs) {
         markCommitted(txId, participants, commitTs);
     }
 
     /**
-     * 将单分片事务标记为已提交。
+     * Mark the single-shard transaction committed.
+     *
+     * @param txId transaction identifier
+     * @param participant participant
+     * @param commitTs durable commit timestamp
+     * @return the operation result
      */
     TxRecord markSingleShardCommitted(long txId, String participant, long commitTs);
 
-    /** 持久化单分片决议；不需要返回记录时允许存储实现使用等价的原子条件更新。 */
-    default void persistSingleShardCommitted(long txId, String participant, long commitTs) {
+    /**
+     * Durable storage Single shard decision; allows the storage of an atomic condition that achieves the use of the equivalent when the record is not required to be returned.
+     *
+     * @param txId transaction identifier
+     * @param participant participant
+     * @param commitTs durable commit timestamp
+     */
+    default void persistSingleShardCommitted(final long txId, final String participant, final long commitTs) {
         markSingleShardCommitted(txId, participant, commitTs);
     }
 
     /**
-     * 将事务标记为 ABORTED 状态。
+     * Mark the transaction ABORTED.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
      */
     TxRecord markAborted(long txId);
 
     /**
-     * 查询最老的活跃快照或尚未完成物化事务下界，包含独立租约与未 finalized 的终态。
+     * Query the oldest active snapshot or have not completed the lower materialization transaction boundary, including independent lease and unfinalized terminal state.
+     *
+     * @return the operation result
      */
     Optional<Long> oldestActiveStartTs();
 }

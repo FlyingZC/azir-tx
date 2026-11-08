@@ -1,4 +1,32 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.flyingzc.azir.percolator.PercolatorStore.Action;
+import com.flyingzc.azir.percolator.PercolatorStore.Decision;
+import com.flyingzc.azir.percolator.PercolatorStore.Lock;
+import com.flyingzc.azir.percolator.PercolatorStore.Snapshot;
+import com.flyingzc.azir.percolator.PercolatorStore.State;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.common.ErrorCode;
 import com.flyingzc.azir.common.MvccException;
@@ -26,44 +54,69 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import static com.flyingzc.azir.common.IsolationLevel.*;
-import static com.flyingzc.azir.percolator.PercolatorStore.*;
-import static org.junit.jupiter.api.Assertions.*;
 
-/** 在两个独立 MySQL 实例验证 Percolator SQL 装配、分页隔离、错误终态和恢复。 */
+/**
+ * In two stand-alone MySQL examples verify Percolator SQL assembly, page breaks, errors terminal state and recovery.
+ */
 @Testcontainers
 class PercolatorSqlIntegrationTest {
+
     @Container
     private static final MySQLContainer<?> MYSQL_A = new MySQLContainer<>("mysql:8.4")
             .withDatabaseName("pc_sql").withUsername("test").withPassword("test");
+
     @Container
     private static final MySQLContainer<?> MYSQL_B = new MySQLContainer<>("mysql:8.4")
             .withDatabaseName("pc_sql").withUsername("test").withPassword("test");
+
     private static DataSource poolA;
+
     private static DataSource poolB;
+
     private static final ShardResolver RESOLVER = ShardResolver.hashByKey(List.of("a", "b"));
+
     private static final SqlStorageKeyCodec KEYS = new SqlStorageKeyCodec();
+
     private MysqlPercolatorStore a;
+
     private MysqlPercolatorStore b;
+
     private MysqlTimestampOracle tso;
+
     private PercolatorSqlEngine engine;
 
-    /** 使用公开装配入口初始化协议数据空间和持久 TSO。 */
+    /**
+     * Use open assembly access to initialize protocol data space and durable TSO.
+     */
     @BeforeAll
     static void open() {
         poolA = MysqlDataSourceFactory.create(MYSQL_A.getJdbcUrl(), MYSQL_A.getUsername(), MYSQL_A.getPassword());
         poolB = MysqlDataSourceFactory.create(MYSQL_B.getJdbcUrl(), MYSQL_B.getUsername(), MYSQL_B.getPassword());
-        try (var initialized = PercolatorSqlEngine.mysql(poolA, Map.of("a", poolA, "b", poolB), RESOLVER, SqlValueCodec.utf8(), READ_COMMITTED)) { }
+        try (var initialized = PercolatorSqlEngine.mysql(poolA, Map.of("a", poolA, "b", poolB), RESOLVER, SqlValueCodec.utf8(), READ_COMMITTED)) {
+        }
 
     }
 
-    /** 所有会话关闭后由测试拥有者关闭连接池。 */
+    /**
+     * All session closes after test owner closes connection pool.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @AfterAll
     static void close() throws Exception {
-        if (poolA instanceof AutoCloseable closeable) { closeable.close(); }
-        if (poolB instanceof AutoCloseable closeable) { closeable.close(); }
+        if (poolA instanceof AutoCloseable closeable) {
+            closeable.close();
+        }
+        if (poolB instanceof AutoCloseable closeable) {
+            closeable.close();
+        }
     }
 
-    /** 每项测试清空独立协议表但保留单调 TSO，默认每页一键覆盖真实跨页查询。 */
+    /**
+     * Each test emptys the separate protocol table but keeps a single tune TSO, defaulting that each page contains a true cross-page query.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @BeforeEach
     void reset() throws Exception {
         for (DataSource source : List.of(poolA, poolB)) {
@@ -79,80 +132,94 @@ class PercolatorSqlIntegrationTest {
         engine = engine(new PercolatorRuntime(tso, Map.of("a", a, "b", b)), SqlExecutionOptions.defaults());
     }
 
-    /** 相同 SqlEngine/SqlSession 接口可显式选择新模型，并返回原 primary 提交身份。 */
+    /**
+     * Same SqlEngine/ SqlSsession interface visiblely selects the new model and returns its original purimay commit identity.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void mysqlFactorySupportsExistingSqlApiAndDurableCommitIdentity() throws Exception {
-        try (var selected = PercolatorSqlEngine.mysql(poolA, Map.of("a", poolA, "b", poolB),
-                RESOLVER, SqlValueCodec.utf8(), READ_COMMITTED);
-             SqlSession session = selected.openSession()) {
+        try (
+                var selected = PercolatorSqlEngine.mysql(poolA, Map.of("a", poolA, "b", poolB),
+                        RESOLVER, SqlValueCodec.utf8(), READ_COMMITTED);
+                SqlSession session = selected.openSession()) {
             var result = session.execute("insert into account (id, value) values ('1', 'one'), ('2', 'two')");
-            assertEquals(2, result.updateCount());
+            Assertions.assertEquals(2, result.updateCount());
             assertNull(result.commitResult());
             var commit = result.percolatorCommitResult();
             assertNotNull(commit);
             assertNotNull(commit.handle());
             assertTrue(commit.commitTs() > commit.handle().startTs());
             assertTrue(commit.pendingSecondaries().isEmpty());
-            assertEquals(State.COMMITTED, engine.runtime().lookup(commit.handle()).state());
-            assertEquals("one", session.execute("select value from account where id='1'").singleRow().get("value"));
-            assertEquals(0, session.execute("select value from account where id='1'").percolatorCommitResult().commitTs());
+            Assertions.assertEquals(State.COMMITTED, engine.runtime().lookup(commit.handle()).state());
+            Assertions.assertEquals("one", session.execute("select value from account where id='1'").singleRow().get("value"));
+            Assertions.assertEquals(0, session.execute("select value from account where id='1'").percolatorCommitResult().commitTs());
         }
-        // 新工厂只初始化自己的协议空间与共用 TSO，不创建旧模型逐笔事务元数据。
+        // The new plant only initializes its own protocol space and shared TSO, without creating an old model one by one transaction metadata.
         try (var connection = poolA.getConnection(); var query = connection.prepareStatement("""
                 select count(*) from information_schema.tables
                 where table_schema=database() and table_name='mvcc_txn'
                 """); var rows = query.executeQuery()) {
             rows.next();
-            assertEquals(0, rows.getInt(1));
+            Assertions.assertEquals(0, rows.getInt(1));
         }
         assertThrows(IllegalArgumentException.class, () -> PercolatorSqlEngine.mysql(poolA,
                 Map.of("a", poolA, "alias", poolA), RESOLVER, SqlValueCodec.utf8(), READ_COMMITTED));
     }
 
-    /** 显式 SQL 事务跨片读己之写，回滚不会泄漏到另一个自动提交会话。 */
+    /**
+     * Visible SQL transaction cross-shard read-your-own-writes, rollback does not leak to another autocommit session.
+     */
     @Test
     void explicitTransactionReadsOwnWritesAndRollsBackEveryShard() {
         try (var writer = engine.openSession(); var reader = engine.openSession()) {
             writer.execute("begin repeatable read");
             writer.execute("insert into account (id,value) values ('1','one'),('2','two')");
-            assertEquals(List.of("one", "two"), values(writer.execute("select value from account order by id")));
-            assertEquals("0", reader.execute("select count(*) as n from account").singleRow().get("n"));
+            Assertions.assertEquals(List.of("one", "two"), values(writer.execute("select value from account order by id")));
+            Assertions.assertEquals("0", reader.execute("select count(*) as n from account").singleRow().get("n"));
             writer.execute("rollback");
             assertFalse(writer.active());
-            assertEquals("0", reader.execute("select count(*) as n from account").singleRow().get("n"));
+            Assertions.assertEquals("0", reader.execute("select count(*) as n from account").singleRow().get("n"));
             writer.begin(REPEATABLE_READ);
             writer.execute("insert into account (id,value) values ('1','saved'),('2','saved')");
             assertNotNull(writer.commit().percolatorCommitResult());
-            assertEquals("2", reader.execute("select count(*) as n from account").singleRow().get("n"));
+            Assertions.assertEquals("2", reader.execute("select count(*) as n from account").singleRow().get("n"));
         }
     }
 
-    /** RC 在 SQL 语句之间取新边界，RR 在跨页扫描、删除和重读期间保持旧快照。 */
+    /**
+     * RC takes a new boundary between SQL statements, and RR keeps the old snapshot while scanned, deleted and rereading across the page.
+     */
     @Test
     void sqlRcAndRrPreserveTheirSnapshotBoundaries() {
         insert("insert into account (id,value) values ('1','old'),('2','old'),('3','old')");
         try (var rr = engine.openSession(); var rc = engine.openSession(); var writer = engine.openSession()) {
             rr.begin(REPEATABLE_READ);
             rc.begin(READ_COMMITTED);
-            assertEquals(List.of("old", "old", "old"), values(rr.execute("select value from account order by id")));
-            assertEquals("old", rc.execute("select value from account where id='2'").singleRow().get("value"));
+            Assertions.assertEquals(List.of("old", "old", "old"), values(rr.execute("select value from account order by id")));
+            Assertions.assertEquals("old", rc.execute("select value from account where id='2'").singleRow().get("value"));
             writer.execute("update account set value='new' where id='2'");
             writer.execute("delete from account where id='1'");
             writer.execute("insert into account (id,value) values ('4','new')");
-            assertEquals(List.of("old", "old", "old"), values(rr.execute("select value from account order by id")));
-            assertEquals(List.of("new", "old", "new"), values(rc.execute("select value from account order by id")));
+            Assertions.assertEquals(List.of("old", "old", "old"), values(rr.execute("select value from account order by id")));
+            Assertions.assertEquals(List.of("new", "old", "new"), values(rc.execute("select value from account order by id")));
             rr.rollback();
             rc.rollback();
         }
     }
 
-    /** 同一 RC SQL 首次取页后发生跨片提交，后续页和另一分片仍使用原 readTs。 */
+    /**
+     * The same RC SQL takes the original readTs after the first page cross-shard commit, followed by the next page and another shard.
+     */
     @Test
     void oneRcSqlUsesOneTimestampAcrossPagesAndShards() {
         insert("insert into account (id,value) values ('1','old'),('2','old'),('3','old')");
         var first = new ProbedStore(a);
         var allocations = new AtomicInteger();
-        var runtime = new PercolatorRuntime(() -> { allocations.incrementAndGet(); return tso.nextTimestamp(); },
+        var runtime = new PercolatorRuntime(() -> {
+            allocations.incrementAndGet();
+            return tso.nextTimestamp();
+        },
                 Map.of("a", first, "b", b));
         first.afterKeys = () -> {
             try (var writer = engine.runtime().begin(REPEATABLE_READ)) {
@@ -166,32 +233,36 @@ class PercolatorSqlIntegrationTest {
         try (var session = paged.openSession()) {
             session.begin(READ_COMMITTED);
             int before = allocations.get();
-            assertEquals(List.of("old", "old", "old"), values(session.execute("select value from account order by id")));
-            assertEquals(before + 1, allocations.get(), "one RC read boundary for the entire SQL");
-            assertEquals(List.of("new", "new", "old", "new"), values(session.execute("select value from account order by id")));
+            Assertions.assertEquals(List.of("old", "old", "old"), values(session.execute("select value from account order by id")));
+            Assertions.assertEquals(before + 1, allocations.get(), "one RC read boundary for the entire SQL");
+            Assertions.assertEquals(List.of("new", "new", "old", "new"), values(session.execute("select value from account order by id")));
             session.rollback();
         }
     }
 
-    /** Calcite 的条件 DML、JOIN、聚合和 INSERT SELECT 都经新后端实际读写。 */
+    /**
+     * Calcite conditions DML, JOIN, Syndication and INSERT SELECT are read and written by the new backend.
+     */
     @Test
     void relationalSqlAndTableNamespacesUsePercolator() {
         insert("insert into account (id,value) values ('1','gold'),('2','gold'),('3','silver')");
         insert("insert into tag (id,value) values ('1','yes'),('2','yes')");
         try (var session = engine.openSession()) {
             var grouped = session.execute("select a.value as label,count(*) as n from account a join tag t on a.id=t.id group by a.value");
-            assertEquals("gold", grouped.singleRow().get("label"));
-            assertEquals("2", grouped.singleRow().get("n"));
-            assertEquals(2, session.execute("update account set value=upper(value) where id in ('1','2')").updateCount());
-            assertEquals(3, session.execute("insert into archive(id,value) select id,value from account").updateCount());
-            assertEquals(1, session.execute("delete from account where value='silver'").updateCount());
-            assertEquals(List.of("GOLD", "GOLD"), values(session.execute("select value from account order by id")));
-            assertEquals("3", session.execute("select count(*) as n from archive").singleRow().get("n"));
-            assertEquals(List.of("yes", "yes"), values(session.execute("select value from tag order by id")));
+            Assertions.assertEquals("gold", grouped.singleRow().get("label"));
+            Assertions.assertEquals("2", grouped.singleRow().get("n"));
+            Assertions.assertEquals(2, session.execute("update account set value=upper(value) where id in ('1','2')").updateCount());
+            Assertions.assertEquals(3, session.execute("insert into archive(id,value) select id,value from account").updateCount());
+            Assertions.assertEquals(1, session.execute("delete from account where value='silver'").updateCount());
+            Assertions.assertEquals(List.of("GOLD", "GOLD"), values(session.execute("select value from account order by id")));
+            Assertions.assertEquals("3", session.execute("select count(*) as n from archive").singleRow().get("n"));
+            Assertions.assertEquals(List.of("yes", "yes"), values(session.execute("select value from tag order by id")));
         }
     }
 
-    /** 一条失败 SQL 必须撤销此前显式事务的写入，ROLLBACK 前不能隐含转为自动提交。 */
+    /**
+     * A failed SQL must undo the previous visible transaction writing and ROLLBACK cannot be converted to autocommit by implication.
+     */
     @Test
     void failedDataSqlInvalidatesAndRollsBackEntireExplicitTransaction() {
         insert("insert into account(id,value) values ('1','saved')");
@@ -204,12 +275,14 @@ class PercolatorSqlIntegrationTest {
             assertThrows(MvccException.class, () -> session.execute("insert into account(id,value) values ('4','bad')"));
             assertThrows(MvccException.class, () -> session.begin(READ_COMMITTED));
             session.rollback();
-            assertEquals(List.of("saved"), values(session.execute("select value from account order by id")));
+            Assertions.assertEquals(List.of("saved"), values(session.execute("select value from account order by id")));
             session.execute("insert into account(id,value) values ('2','reused')");
         }
     }
 
-    /** 解析失败同样不能遗留此前已经缓冲的显式事务写入。 */
+    /**
+     * The parsing failed also cannot leave a visible transaction writing that was already buffer.
+     */
     @Test
     void invalidSyntaxRollsBackTheExplicitTransaction() {
         try (var session = engine.openSession()) {
@@ -218,11 +291,13 @@ class PercolatorSqlIntegrationTest {
             assertThrows(MvccException.class, () -> session.execute("insert into account nonsense"));
             assertFalse(session.active());
             session.rollback();
-            assertEquals("0", session.execute("select count(*) as n from account").singleRow().get("n"));
+            Assertions.assertEquals("0", session.execute("select count(*) as n from account").singleRow().get("n"));
         }
     }
 
-    /** 两个事务并发插入相同主键时，后提交者必须冲突而不能覆盖已经确认的插入。 */
+    /**
+     * When two transaction concurrent inserts the same primary key, the later commit must conflict and do not overwrite the confirmed insertion.
+     */
     @Test
     void concurrentInsertUsesPercolatorWriteConflictValidation() {
         try (var first = engine.openSession(); var second = engine.openSession()) {
@@ -231,13 +306,15 @@ class PercolatorSqlIntegrationTest {
             first.execute("insert into account(id,value) values ('1','first')");
             second.execute("insert into account(id,value) values ('1','second')");
             first.commit();
-            assertEquals(ErrorCode.WRITE_CONFLICT, assertThrows(MvccException.class, second::commit).errorCode());
+            Assertions.assertEquals(ErrorCode.WRITE_CONFLICT, assertThrows(MvccException.class, second::commit).errorCode());
             second.rollback();
-            assertEquals("first", second.execute("select value from account where id='1'").singleRow().get("value"));
+            Assertions.assertEquals("first", second.execute("select value from account where id='1'").singleRow().get("value"));
         }
     }
 
-    /** 真实 primary 落盘后回复和查询均失败，SQL 异常必须携带可跨会话恢复的完整身份。 */
+    /**
+     * The real primary response and query failed. SQL anomalies must carry the complete identity that cross session recovery.
+     */
     @Test
     void autocommitUnknownPreservesPrimaryIdentityAndCannotFakeRollback() {
         var fault = new ProbedStore(a);
@@ -248,21 +325,23 @@ class PercolatorSqlIntegrationTest {
         var failure = assertThrows(PercolatorTransactionStatusUnknownException.class,
                 () -> session.execute("insert into account(id,value) values ('1','one'),('2','two')"));
         assertFalse(failure.retryable());
-        assertEquals(failure.handle().startTs(), failure.txId());
+        Assertions.assertEquals(failure.handle().startTs(), failure.txId());
         assertFalse(session.active());
         assertThrows(MvccException.class, () -> session.execute("insert into account(id,value) values ('3','bad')"));
         assertThrows(PercolatorTransactionStatusUnknownException.class, session::rollback);
-        assertEquals(1, b.pending(10).size());
+        Assertions.assertEquals(1, b.pending(10).size());
         session.close();
         session.close();
-        assertEquals(State.COMMITTED, engine.runtime().lookup(failure.handle()).state());
-        assertEquals(1, engine.runtime().recover(10));
+        Assertions.assertEquals(State.COMMITTED, engine.runtime().lookup(failure.handle()).state());
+        Assertions.assertEquals(1, engine.runtime().recover(10));
         try (var reader = engine.openSession()) {
-            assertEquals(List.of("one", "two"), values(reader.execute("select value from account order by id")));
+            Assertions.assertEquals(List.of("one", "two"), values(reader.execute("select value from account order by id")));
         }
     }
 
-    /** 显式 COMMIT 同样保留 UNKNOWN，不允许再次提交或用 ROLLBACK 覆盖原决议。 */
+    /**
+     * Visible COMMIT also retains UNKNOWN, which does not allow commit again or to overwrite the original decision with ROLLBACK.
+     */
     @Test
     void explicitCommitUnknownKeepsTheOriginalHandle() {
         var fault = new ProbedStore(a);
@@ -276,15 +355,17 @@ class PercolatorSqlIntegrationTest {
             assertFalse(session.active());
             assertThrows(MvccException.class, session::commit);
             var rollback = assertThrows(PercolatorTransactionStatusUnknownException.class, session::rollback);
-            assertEquals(unknown.handle(), rollback.handle());
-            assertEquals(State.COMMITTED, engine.runtime().lookup(unknown.handle()).state());
+            Assertions.assertEquals(unknown.handle(), rollback.handle());
+            Assertions.assertEquals(State.COMMITTED, engine.runtime().lookup(unknown.handle()).state());
         }
-        assertEquals(1, b.pending(10).size());
+        Assertions.assertEquals(1, b.pending(10).size());
         engine.runtime().recover(10);
         assertTrue(b.pending(10).isEmpty());
     }
 
-    /** secondary 未补交时 SQL 返回已确认凭据和待处理键，之后的扫描按原 commitTs 补齐。 */
+    /**
+     * Secondary When finalization SQL returns confirmed receipt and pending key, followed by scans completed with the original groupTs.
+     */
     @Test
     void sqlCommitReportsPendingSecondaryAndReadResolvesIt() {
         var fault = new ProbedStore(b);
@@ -294,29 +375,33 @@ class PercolatorSqlIntegrationTest {
             session.begin(REPEATABLE_READ);
             session.execute("insert into account(id,value) values ('1','one'),('2','two')");
             var commit = session.commit().percolatorCommitResult();
-            assertEquals(List.of(new PercolatorKey("b", KEYS.encode("account", "1"))), commit.pendingSecondaries());
-            assertEquals(State.COMMITTED, engine.runtime().lookup(commit.handle()).state());
+            Assertions.assertEquals(List.of(new PercolatorKey("b", KEYS.encode("account", "1"))), commit.pendingSecondaries());
+            Assertions.assertEquals(State.COMMITTED, engine.runtime().lookup(commit.handle()).state());
         }
         try (var reader = engine.openSession()) {
-            assertEquals(List.of("one", "two"), values(reader.execute("select value from account order by id")));
+            Assertions.assertEquals(List.of("one", "two"), values(reader.execute("select value from account order by id")));
         }
         assertTrue(b.pending(10).isEmpty());
     }
 
-    /** 相关未决锁不能在全表扫描中被跳过，防止把可能已决议的事务读成部分结果。 */
+    /**
+     * The relevant pending lock cannot be skipped in the full-table scan to prevent possible decision transaction from being read as a partial result.
+     */
     @Test
     void sqlScanDoesNotSkipUnresolvedLocks() {
         try (var writer = engine.runtime().begin(REPEATABLE_READ); var reader = engine.openSession()) {
             writer.put("a", KEYS.encode("account", "2"), bytes("pending"));
             writer.prewrite();
-            assertEquals(ErrorCode.LOCK_CONFLICT,
+            Assertions.assertEquals(ErrorCode.LOCK_CONFLICT,
                     assertThrows(MvccException.class, () -> reader.execute("select count(*) as n from account")).errorCode());
             writer.commit();
-            assertEquals("1", reader.execute("select count(*) as n from account").singleRow().get("n"));
+            Assertions.assertEquals("1", reader.execute("select count(*) as n from account").singleRow().get("n"));
         }
     }
 
-    /** 不可见 guard 与墓碑占用 SQL 输入预算，不能用空页绕过扫描限制。 */
+    /**
+     * Unvisible guard and tombstone owns SQL input budget and cannot bypass the scan limit with an empty page.
+     */
     @Test
     void invisibleCandidatesAndTombstonesConsumeSqlScanBudget() {
         try (var tx = engine.runtime().begin(REPEATABLE_READ)) {
@@ -327,31 +412,35 @@ class PercolatorSqlIntegrationTest {
         }
         var tight = engine(engine.runtime(), new SqlExecutionOptions(1, 100, 1024, 1, 1024));
         try (var reader = tight.openSession()) {
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED,
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED,
                     assertThrows(MvccException.class, () -> reader.execute("select count(*) as n from account")).errorCode());
         }
         try (var reader = engine.openSession()) {
-            assertEquals("0", reader.execute("select count(*) as n from account").singleRow().get("n"));
+            Assertions.assertEquals("0", reader.execute("select count(*) as n from account").singleRow().get("n"));
         }
     }
 
-    /** 简单点查与关系查询都遵守结果预算，超限后不能发布部分写入。 */
+    /**
+     * Simple check-and-relationship queries comply with the result budget, which cannot be published after exceeding the limit.
+     */
     @Test
     void sqlResultBudgetsApplyToBothPlannerPaths() {
         insert("insert into account(id,value) values ('1','one'),('2','two')");
         var rowLimited = engine(engine.runtime(), new SqlExecutionOptions(1, 1, 1024));
         try (var reader = rowLimited.openSession()) {
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED,
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED,
                     assertThrows(MvccException.class, () -> reader.execute("select * from account order by id")).errorCode());
         }
         var byteLimited = engine(engine.runtime(), new SqlExecutionOptions(1, 100, 1));
         try (var reader = byteLimited.openSession()) {
-            assertEquals(ErrorCode.RESOURCE_EXHAUSTED,
+            Assertions.assertEquals(ErrorCode.RESOURCE_EXHAUSTED,
                     assertThrows(MvccException.class, () -> reader.execute("select value from account where id='1'")).errorCode());
         }
     }
 
-    /** 同页归并本事务写入，按 UTF-8 游标顺序跨过回滚残留和删除键。 */
+    /**
+     * The same-same transaction text is written, crosses the rollback residue and delete key in UTF-8 cursor.
+     */
     @Test
     void kvPagesOverlayOwnWritesAndAdvancePastInvisibleKeys() {
         try (var aborted = engine.runtime().begin(REPEATABLE_READ)) {
@@ -377,21 +466,29 @@ class PercolatorSqlIntegrationTest {
             String after = null;
             do {
                 var page = view.scanPage("a", range, after, 1);
-                assertEquals(1, page.entries().size());
+                Assertions.assertEquals(1, page.entries().size());
                 var entry = page.entries().getFirst();
                 keys.add(entry.key());
-                if (entry.value() != null) { visible.add(new String(entry.value(), StandardCharsets.UTF_8)); }
-                if (page.nextKey() != null) { assertNotEquals(after, page.nextKey()); }
+                if (entry.value() != null) {
+                    visible.add(new String(entry.value(), StandardCharsets.UTF_8));
+                }
+                if (page.nextKey() != null) {
+                    Assertions.assertNotEquals(after, page.nextKey());
+                }
                 after = page.nextKey();
             } while (after != null);
-            assertEquals(List.of("a", "b", "c", "d", "\ue000", "😀"), keys);
-            assertEquals(List.of("own", "new", "bmp", "supplementary"), visible);
+            Assertions.assertEquals(List.of("a", "b", "c", "d", "\ue000", "😀"), keys);
+            Assertions.assertEquals(List.of("own", "new", "bmp", "supplementary"), visible);
             assertTrue(view.scanPage("a", new KeyRange("z", "a"), null, 2).entries().isEmpty());
             assertThrows(IllegalArgumentException.class, () -> view.scanPage("a", range, null, 0));
         }
     }
 
-    /** 关闭会话回滚未提交写，关闭状态不可逆且不关闭应用拥有的 MySQL 池。 */
+    /**
+     * Close session rollback without commit writing, close state irreversible and do not close the MySQL pool that is owned.
+     *
+     * @throws Exception if the operation cannot complete
+     */
     @Test
     void closedSessionCannotExecuteOrReopenAndDoesNotOwnPools() throws Exception {
         var session = engine.openSession();
@@ -405,87 +502,198 @@ class PercolatorSqlIntegrationTest {
         assertThrows(MvccException.class, session::commit);
         assertThrows(MvccException.class, session::rollback);
         try (var reader = engine.openSession()) {
-            assertEquals("0", reader.execute("select count(*) as n from account").singleRow().get("n"));
+            Assertions.assertEquals("0", reader.execute("select count(*) as n from account").singleRow().get("n"));
         }
-        try (var connection = poolA.getConnection()) { assertFalse(connection.isClosed()); }
+        try (var connection = poolA.getConnection()) {
+            assertFalse(connection.isClosed());
+        }
     }
 
-    /** 借用指定运行时并采用一键一页以覆盖 SQL 分页行为。 */
-    private PercolatorSqlEngine engine(PercolatorRuntime runtime, SqlExecutionOptions options) {
+    /**
+     * Use the specified run time and use a one-page key to overwrite SQL page break behavior.
+     *
+     * @param runtime runtime
+     * @param options options
+     * @return the operation result
+     */
+    private PercolatorSqlEngine engine(final PercolatorRuntime runtime, final SqlExecutionOptions options) {
         return new PercolatorSqlEngine(runtime, new HybridSqlPlanner(), RESOLVER, SqlValueCodec.utf8(), READ_COMMITTED,
                 new SqlExecutionOptions(1, options.maxResultRows(), options.maxResultBytes(),
                         options.maxScannedRows(), options.maxScannedBytes()));
     }
 
-    /** 用自动提交 SQL 建立持久测试数据。 */
-    private void insert(String sql) { try (var session = engine.openSession()) { session.execute(sql); } }
+    /**
+     * Creates durable test data with autocommit SQL.
+     *
+     * @param sql sql
+     */
+    private void insert(final String sql) {
+        try (var session = engine.openSession()) {
+            session.execute(sql);
+        }
+    }
 
-    /** 按结果顺序提取业务 value。 */
-    private static List<String> values(SqlExecutionResult result) { return result.rows().stream().map(row -> row.get("value")).toList(); }
+    /**
+     * Draw business value in order of results.
+     *
+     * @param result result
+     * @return the operation result
+     */
+    private static List<String> values(final SqlExecutionResult result) {
+        return result.rows().stream().map(row -> row.get("value")).toList();
+    }
 
-    /** 生成 UTF-8 测试值。 */
-    private static byte[] bytes(String value) { return value.getBytes(StandardCharsets.UTF_8); }
+    /**
+     * Generates the UTF-8 test value.
+     *
+     * @param value value to write
+     * @return the operation result
+     */
+    private static byte[] bytes(final String value) {
+        return value.getBytes(StandardCharsets.UTF_8);
+    }
 
-    /** 保留真实 MySQL 行为，仅在明确边界执行提交回复丢失和分页交错。 */
+    /**
+     * Retains the real MySQL act, only to clear the border for commit returns loss and page staggering.
+     */
     private static final class ProbedStore implements PercolatorStore {
+
         private final PercolatorStore delegate;
+
         private final AtomicBoolean keysObserved = new AtomicBoolean();
+
         Runnable afterKeys;
+
         boolean loseCommitReply;
+
         boolean failInspect;
+
         boolean failFinish;
 
-        /** 包装真实分片，不构造伪造提交记录。 */
-        ProbedStore(PercolatorStore delegate) { this.delegate = delegate; }
+        /**
+         * Packing is real shard and does not construct false commit records.
+         *
+         * @param delegate delegate
+         */
+        ProbedStore(final PercolatorStore delegate) {
+            this.delegate = delegate;
+        }
 
-        /** 保留逻辑分片编号。 */
+        /**
+         * Keeps the logical shard number.
+         *
+         * @return the operation result
+         */
         @Override
-        public String shardId() { return delegate.shardId(); }
+        public String shardId() {
+            return delegate.shardId();
+        }
 
-        /** 初始化真实协议表。 */
+        /**
+         * Initializes the true protocol table.
+         */
         @Override
-        public void initialize() { delegate.initialize(); }
+        public void initialize() {
+            delegate.initialize();
+        }
 
-        /** 原样预写数据与锁。 */
+        /**
+         * Original prewrite data and lock.
+         *
+         * @param start start
+         * @param primary original Percolator primary identity
+         * @param ttl ttl
+         * @param mutations transaction write set
+         */
         @Override
-        public void prewrite(long start, PercolatorKey primary, long ttl, List<Mutation> mutations) {
+        public void prewrite(final long start, final PercolatorKey primary, final long ttl, final List<Mutation> mutations) {
             delegate.prewrite(start, primary, ttl, mutations);
         }
 
-        /** 原样读取同一本地一致性快照。 */
+        /**
+         * Read the same local Consistency snapshot as it is.
+         *
+         * @param key business key
+         * @param readTs snapshot read timestamp
+         * @return the operation result
+         */
         @Override
-        public Snapshot snapshot(String key, long readTs) { return delegate.snapshot(key, readTs); }
+        public Snapshot snapshot(final String key, final long readTs) {
+            return delegate.snapshot(key, readTs);
+        }
 
-        /** 首次取页返回后才触发另一事务，不在持有 JDBC 连接时重入业务。 */
+        /**
+         * The first page is returned before another transaction is triggered and does not recommence business when holding JDBC connection.
+         *
+         * @param range range
+         * @param after after
+         * @param limit maximum number of items
+         * @return the operation result
+         */
         @Override
-        public List<String> keys(KeyRange range, String after, int limit) {
+        public List<String> keys(final KeyRange range, final String after, final int limit) {
             List<String> result = delegate.keys(range, after, limit);
-            if (afterKeys != null && keysObserved.compareAndSet(false, true)) { afterKeys.run(); }
+            if (afterKeys != null && keysObserved.compareAndSet(false, true)) {
+                afterKeys.run();
+            }
             return result;
         }
 
-        /** COMMIT 真实持久化后丢回复，INSPECT 故障保留为 UNKNOWN。 */
+        /**
+         * COMMIT real durable storage drops a reply, INSPECT failure retains UNKNOWN.
+         *
+         * @param key business key
+         * @param start start
+         * @param action action
+         * @param commitTs durable commit timestamp
+         * @return the operation result
+         */
         @Override
-        public Decision primary(PercolatorKey key, long start, Action action, long commitTs) {
-            if (action == Action.INSPECT && failInspect) { throw unavailable(start); }
+        public Decision primary(final PercolatorKey key, final long start, final Action action, final long commitTs) {
+            if (action == Action.INSPECT && failInspect) {
+                throw unavailable(start);
+            }
             Decision result = delegate.primary(key, start, action, commitTs);
-            if (action == Action.COMMIT && loseCommitReply) { throw unavailable(start); }
+            if (action == Action.COMMIT && loseCommitReply) {
+                throw unavailable(start);
+            }
             return result;
         }
 
-        /** 不可达的 secondary 保留锁供后续运行时解析。 */
+        /**
+         * Unattainable secondary maintains locks for subsequent operation to resolve.
+         *
+         * @param start start
+         * @param primary original Percolator primary identity
+         * @param decision decision
+         * @param keys keys
+         */
         @Override
-        public void finish(long start, PercolatorKey primary, Decision decision, List<String> keys) {
-            if (failFinish) { throw unavailable(start); }
+        public void finish(final long start, final PercolatorKey primary, final Decision decision, final List<String> keys) {
+            if (failFinish) {
+                throw unavailable(start);
+            }
             delegate.finish(start, primary, decision, keys);
         }
 
-        /** 有界发现真实残留锁。 */
+        /**
+         * Bounded Found real left-over locks.
+         *
+         * @param limit maximum number of items
+         * @return the operation result
+         */
         @Override
-        public List<Lock> pending(int limit) { return delegate.pending(limit); }
+        public List<Lock> pending(final int limit) {
+            return delegate.pending(limit);
+        }
 
-        /** 注入可识别的存储不可达故障。 */
-        private static MvccException unavailable(long start) {
+        /**
+         * Injecting identifiable storage is not within failure.
+         *
+         * @param start start
+         * @return the operation result
+         */
+        private static MvccException unavailable(final long start) {
             return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "injected Percolator SQL outage", true, start);
         }
     }

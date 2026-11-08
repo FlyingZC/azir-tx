@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -17,36 +33,52 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** 内存向量发布者的中心租约实验，旧代数失效后禁止继续提供读切面与 ACK。 */
+/**
+ * The central lease experiment of the memory vector publisher prohibits the continuation of read snapshot and ACK after the old algebra has expired.
+ */
 final class MysqlVectorCutLeaderLease {
+
     private final DataSource center;
+
     private final String layoutHash;
+
     private final String leaseTable;
 
-    /** 客户端只可连接当前未过期代数对应的领导者端点。 */
-    record LeaderEndpoint(String ownerId, long generation, long remainingMillis) {
-        /** 排除空地址、未初始化代数和已过期的中心租约。 */
-        LeaderEndpoint {
-            if (ownerId == null || ownerId.isBlank() || generation < 1 || remainingMillis < 1) {
-                throw new IllegalArgumentException("invalid vector leader endpoint");
-            }
-        }
-    }
-
-    /** 绑定控制库与固定路由布局，不让接任者用相同代数解释另一套分片。 */
-    MysqlVectorCutLeaderLease(DataSource center, Map<String, DataSource> shards, int stripes) {
+    /**
+     * Ties the control library to a fixed route layout that prevents the successor from explaining another set of shard with the same algebra.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     */
+    MysqlVectorCutLeaderLease(final DataSource center, final Map<String, DataSource> shards, final int stripes) {
         this(center, shards, stripes, false);
     }
 
-    /** 正式事务服务使用独立持久租约表，不和容量实验争夺领导者。 */
-    static MysqlVectorCutLeaderLease forProduct(DataSource center,
-                                                 Map<String, DataSource> shards, int stripes) {
+    /**
+     * The official transaction service uses a stand-alone durable lease table, which does not compete with the capacity experiment for leadership.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @return the operation result
+     */
+    static MysqlVectorCutLeaderLease forProduct(final DataSource center,
+                                                final Map<String, DataSource> shards, final int stripes) {
         return new MysqlVectorCutLeaderLease(center, shards, stripes, true);
     }
 
-    /** 两套固定表名共用同一代数和布局校验逻辑。 */
-    private MysqlVectorCutLeaderLease(DataSource center, Map<String, DataSource> shards,
-                                      int stripes, boolean product) {
+    /**
+     * Two sets of fixed table names share the same generation number and layout validate logic.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param product product
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private MysqlVectorCutLeaderLease(final DataSource center, final Map<String, DataSource> shards,
+                                      final int stripes, final boolean product) {
         this.center = Objects.requireNonNull(center, "center");
         Objects.requireNonNull(shards, "shards");
         List<String> routes = shards.keySet().stream().sorted().toList();
@@ -57,12 +89,21 @@ final class MysqlVectorCutLeaderLease {
         this.leaseTable = product ? "mvcc_vector_leader_v1" : "bench_striped_vector_leader";
     }
 
-    /** 运行时必须和远端客户端使用同一个持久租约命名空间。 */
+    /**
+     * Run on the same durable lease namespace as a remote client.
+     *
+     * @return the operation result
+     */
     boolean productMode() {
         return "mvcc_vector_leader_v1".equals(leaseTable);
     }
 
-    /** 只有显式隔离实验才重建租约表。 */
+    /**
+     * Only visible isolation experiments can recreate the lease table.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
     void initializeIsolated() {
         if (!"bench_striped_vector_leader".equals(leaseTable)) {
             throw new IllegalStateException("product vector leader requires non-destructive initialization");
@@ -88,12 +129,16 @@ final class MysqlVectorCutLeaderLease {
                     throw new SQLException("initial vector leader row was not persisted");
                 }
             }
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("initialize vector leader lease failed", ex);
         }
     }
 
-    /** 正式租约初始化只补缺失单例并校验布局，不清除当前有效领导者。 */
+    /**
+     * Formal lease initialization only fills a single case of missing and validate layout, without clearing the current effective leader.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     void initializeProduct() {
         if (!"mvcc_vector_leader_v1".equals(leaseTable)) {
             throw new IllegalStateException("benchmark vector leader requires isolated initialization");
@@ -118,13 +163,19 @@ final class MysqlVectorCutLeaderLease {
                 insert.executeUpdate();
             }
             discover();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("initialize product vector leader lease failed", ex);
         }
     }
 
-    /** 租约仍有效时拒绝任何新领导者；过期接任原子增加代数。 */
-    Optional<LeaseGuard> acquire(String ownerId, long leaseMillis) {
+    /**
+     * Lease rejects any new leader while still valid; expired succession atomic adds algebra.
+     *
+     * @param ownerId owner id
+     * @param leaseMillis lease millis
+     * @return the operation result
+     */
+    Optional<LeaseGuard> acquire(final String ownerId, final long leaseMillis) {
         requireIdentity(ownerId, leaseMillis);
         long requestStarted = System.nanoTime();
         try {
@@ -138,8 +189,9 @@ final class MysqlVectorCutLeaderLease {
                                cast(unix_timestamp(current_timestamp(3)) * 1000 as signed) as now_millis
                         from %s where singleton_id = 1 for update
                         """.formatted(leaseTable);
-                try (PreparedStatement query = connection.prepareStatement(querySql);
-                     ResultSet row = query.executeQuery()) {
+                try (
+                        PreparedStatement query = connection.prepareStatement(querySql);
+                        ResultSet row = query.executeQuery()) {
                     if (!row.next()) {
                         throw new SQLException("vector leader lease row is missing");
                     }
@@ -176,22 +228,28 @@ final class MysqlVectorCutLeaderLease {
             });
             return generation == null ? Optional.empty()
                     : Optional.of(new LeaseGuard(center, leaseTable, ownerId, layoutHash,
-                    generation, leaseMillis,
-                    conservativeDeadline(requestStarted, leaseMillis)));
-        } catch (SQLException ex) {
+                            generation, leaseMillis,
+                            conservativeDeadline(requestStarted, leaseMillis)));
+        } catch (final SQLException ex) {
             throw unavailable("acquire vector leader lease failed", ex);
         }
     }
 
-    /** 读侧只查询中心租约而不修改它，过期或路由布局错误时失败关闭。 */
+    /**
+     * Reads a side search center lease without modifying it, which failed to close when expired or the route layout was wrong.
+     *
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
     Optional<LeaderEndpoint> discover() {
         String querySql = """
                 select owner_id, layout_hash, generation, expires_at,
                        cast(unix_timestamp(current_timestamp(3)) * 1000 as signed) as now_millis
                 from %s where singleton_id = 1
                 """.formatted(leaseTable);
-        try (Connection connection = center.getConnection(); PreparedStatement query = connection.prepareStatement(querySql);
-             ResultSet row = query.executeQuery()) {
+        try (
+                Connection connection = center.getConnection(); PreparedStatement query = connection.prepareStatement(querySql);
+                ResultSet row = query.executeQuery()) {
             if (!row.next() || !layoutHash.equals(row.getString("layout_hash"))) {
                 throw new SQLException("vector leader route layout is missing or changed");
             }
@@ -201,45 +259,107 @@ final class MysqlVectorCutLeaderLease {
                 return Optional.empty();
             }
             return Optional.of(new LeaderEndpoint(owner, row.getLong("generation"), remaining));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("discover vector leader failed", ex);
         }
     }
 
-    /** 限制租约身份、数据库期限和本地安全余量的取值。 */
-    private static void requireIdentity(String ownerId, long leaseMillis) {
+    /**
+     * Limits the extraction values for lease identity, database duration and local safe balance.
+     *
+     * @param ownerId owner id
+     * @param leaseMillis lease millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static void requireIdentity(final String ownerId, final long leaseMillis) {
         if (ownerId == null || ownerId.isBlank() || ownerId.length() > 128
                 || leaseMillis < 200 || leaseMillis > 60_000) {
             throw new IllegalArgumentException("invalid vector leader owner or lease duration");
         }
     }
 
-    /** 本地截止从请求发送前计时并留出余量，先于数据库租约到期。 */
-    private static long conservativeDeadline(long requestStarted, long leaseMillis) {
+    /**
+     * Local Counts and leaves a balance before sending the request, prior to the expiration of database lease.
+     *
+     * @param requestStarted request started
+     * @param leaseMillis lease millis
+     * @return the operation result
+     */
+    private static long conservativeDeadline(final long requestStarted, final long leaseMillis) {
         long margin = Math.max(25, leaseMillis / 5);
         return Math.addExact(requestStarted, TimeUnit.MILLISECONDS.toNanos(leaseMillis - margin));
     }
 
-    /** 控制面不可达时保持失败关闭，不能凭本地推测接任发布。 */
-    private static MvccException unavailable(String message, SQLException cause) {
+    /**
+     * Keeps the control face unreachable until it is closed and cannot be released by local surmise.
+     *
+     * @param message message
+     * @param cause cause
+     * @return the operation result
+     */
+    private static MvccException unavailable(final String message, final SQLException cause) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, null, cause);
     }
 
-    /** 一个代数的本地截止仅由确认成功的中心租约结果延长。 */
+    /**
+     * Client can only connection to the leader peer of the current unexpired algebra.
+     *
+     * @param ownerId owner id
+     * @param generation generation
+     * @param remainingMillis remaining millis
+     */
+    record LeaderEndpoint(String ownerId, long generation, long remainingMillis) {
+
+        /**
+         * Excludes empty addresses, uninitialized algebras and expired centres lease.
+         *
+         * @param ownerId owner id
+         * @param generation generation
+         * @param remainingMillis remaining millis
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        LeaderEndpoint {
+            if (ownerId == null || ownerId.isBlank() || generation < 1 || remainingMillis < 1) {
+                throw new IllegalArgumentException("invalid vector leader endpoint");
+            }
+        }
+    }
+
+    /**
+     * Local of an algebra is extended only by the confirmed success centre lease.
+     */
     static final class LeaseGuard {
+
         private final DataSource center;
+
         private final String leaseTable;
+
         private final String ownerId;
+
         private final String layoutHash;
+
         private final long generation;
+
         private final long leaseMillis;
+
         private final AtomicBoolean revoked = new AtomicBoolean();
+
         private volatile long validUntilNanos;
 
-        /** 只由中心成功接任创建，不接受外部伪造代数。 */
-        private LeaseGuard(DataSource center, String leaseTable, String ownerId,
-                           String layoutHash, long generation,
-                           long leaseMillis, long validUntilNanos) {
+        /**
+         * The Centre was created only successfully and did not accept any external forgery of algebras.
+         *
+         * @param center center
+         * @param leaseTable lease table
+         * @param ownerId owner id
+         * @param layoutHash layout hash
+         * @param generation generation
+         * @param leaseMillis lease millis
+         * @param validUntilNanos valid until nanos
+         */
+        private LeaseGuard(final DataSource center, final String leaseTable, final String ownerId,
+                           final String layoutHash, final long generation,
+                           final long leaseMillis, final long validUntilNanos) {
             this.center = center;
             this.leaseTable = leaseTable;
             this.ownerId = ownerId;
@@ -249,22 +369,38 @@ final class MysqlVectorCutLeaderLease {
             this.validUntilNanos = validUntilNanos;
         }
 
-        /** 返回客户端响应须携带的领导者代数。 */
+        /**
+         * Returns the algebra that the client must carry for its response.
+         *
+         * @return the operation result
+         */
         long generation() {
             return generation;
         }
 
-        /** 发布者只可解释取得租约时写入中心的同一分片布局。 */
+        /**
+         * The publisher can only explain that the same shard layout is written to the centre when lease is obtained.
+         *
+         * @return the operation result
+         */
         String layoutHash() {
             return layoutHash;
         }
 
-        /** 切面来源必须与取得代数的中心租约表一致。 */
+        /**
+         * The cut-off source must be consistent with the lease table at the centre where algebras are obtained.
+         *
+         * @return the operation result
+         */
         boolean productMode() {
             return "mvcc_vector_leader_v1".equals(leaseTable);
         }
 
-        /** 发布、读切面和确认前都检查本地保守截止。 */
+        /**
+         * Check local for a conservative deadline before publishing, read snapshot and confirming.
+         *
+         * @throws MvccException if the operation cannot complete
+         */
         void requireActive() {
             if (revoked.get() || remainingNanos() <= 0) {
                 throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -272,12 +408,18 @@ final class MysqlVectorCutLeaderLease {
             }
         }
 
-        /** 等待中的 ACK 用此截止及时退出，而不等完整事务超时。 */
+        /**
+         * The waiting ACK exits in time with this cut-off instead of waiting for complete transaction timeout.
+         *
+         * @return the operation result
+         */
         long remainingNanos() {
             return revoked.get() ? 0 : validUntilNanos - System.nanoTime();
         }
 
-        /** 只有同代数且未过期的中心行才能延长本地截止。 */
+        /**
+         * The local deadline can only be extended by the same algebra and unexpired centre line.
+         */
         void renew() {
             requireActive();
             long requestStarted = System.nanoTime();
@@ -293,8 +435,9 @@ final class MysqlVectorCutLeaderLease {
                                    cast(unix_timestamp(current_timestamp(3)) * 1000 as signed) as now_millis
                             from %s where singleton_id = 1 for update
                             """.formatted(leaseTable);
-                    try (PreparedStatement query = connection.prepareStatement(querySql);
-                         ResultSet row = query.executeQuery()) {
+                    try (
+                            PreparedStatement query = connection.prepareStatement(querySql);
+                            ResultSet row = query.executeQuery()) {
                         if (!row.next()) {
                             throw new SQLException("vector leader lease row is missing");
                         }
@@ -326,13 +469,15 @@ final class MysqlVectorCutLeaderLease {
                     return null;
                 });
                 validUntilNanos = conservativeDeadline(requestStarted, leaseMillis);
-            } catch (SQLException ex) {
+            } catch (final SQLException ex) {
                 revoked.set(true);
                 throw unavailable("renew vector leader lease failed", ex);
             }
         }
 
-        /** 本进程自愿退出时立即拒绝后续读写，中心租约仍等到自然到期。 */
+        /**
+         * Follow-up reading and writing is refused immediately upon the voluntary exit of this process, and Centre lease still waits until its natural expiry.
+         */
         void revokeLocally() {
             revoked.set(true);
         }

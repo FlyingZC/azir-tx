@@ -1,22 +1,50 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage;
 
 import com.flyingzc.azir.common.MutationType;
 
 /**
- * 写入变更对象，描述一次 put 或 delete 操作。
+ * Writes to change objects, describing a put or delete operation.
+ *
+ * @param key business key
+ * @param type type
+ * @param value value to write
  */
 public record Mutation(String key, MutationType type, byte[] value) {
+
     /**
-     * 在事务中写入键值数据。
+     * Write a key-value pair in the transaction.
+     *
+     * @param key business key
+     * @param value value to write
+     * @return the operation result
      */
-    public static Mutation put(String key, byte[] value) {
+    public static Mutation put(final String key, final byte[] value) {
         return new Mutation(key, MutationType.PUT, value);
     }
 
     /**
-     * 在事务中删除键值数据。
+     * Delete the key in the transaction.
+     *
+     * @param key business key
+     * @return the operation result
      */
-    public static Mutation delete(String key) {
+    public static Mutation delete(final String key) {
         return new Mutation(key, MutationType.DELETE, null);
     }
 }

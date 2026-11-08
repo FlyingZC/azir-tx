@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -18,26 +34,50 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-/** 用一条持久协调器租约保护本地先提交协议的多笔 RC/RR 快照。 */
+/**
+ * Multiple RC/RR snapshot with an durable coordinator lease to protect the local first commit protocol.
+ */
 final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
+
     private static final long MAX_COORDINATOR_ID = (1L << 20) - 1;
+
     private static final long MAX_LOCAL_SEQUENCE = (1L << 43) - 1;
+
     private final MysqlLocalFirstPublicationLedger control;
+
     private final long transactionTimeoutMillis;
+
     private final long leaseMillis;
+
     private final ReentrantReadWriteLock membership = new ReentrantReadWriteLock(true);
+
     private final ConcurrentHashMap<Long, Long> activeReadTs = new ConcurrentHashMap<>();
+
     private final AtomicLong sequence = new AtomicLong();
+
     private final ScheduledExecutorService refresher;
+
     private final AtomicReference<RuntimeException> lastFailure = new AtomicReference<>();
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private volatile CoordinatorSnapshotLease lease;
+
     private volatile boolean fenced;
 
-    /** 要求协调器租约覆盖完整事务期限并留有后台续租余量。 */
-    LocalFirstCoordinatorSnapshots(MysqlLocalFirstPublicationLedger control,
-                                   long transactionTimeoutMillis, long leaseMillis,
-                                   long refreshIntervalMillis) {
+    /**
+     * Coordinator lease is required to overwrite the full transaction term and leave an background lease extension.
+     *
+     * @param control control
+     * @param transactionTimeoutMillis transaction timeout millis
+     * @param leaseMillis lease millis
+     * @param refreshIntervalMillis refresh interval millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    LocalFirstCoordinatorSnapshots(final MysqlLocalFirstPublicationLedger control,
+                                   final long transactionTimeoutMillis, final long leaseMillis,
+                                   final long refreshIntervalMillis) {
         if (transactionTimeoutMillis < 1 || leaseMillis <= transactionTimeoutMillis
                 || leaseMillis > 86_400_000L || refreshIntervalMillis < 1
                 || refreshIntervalMillis >= leaseMillis - transactionTimeoutMillis) {
@@ -52,14 +92,19 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
             throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,
                     "local-first coordinator id namespace exhausted", false, null);
         }
-        this.refresher = Executors.newSingleThreadScheduledExecutor(task ->
-                Thread.ofPlatform().daemon().name("mvcc-local-first-coordinator-refresh").unstarted(task));
+        this.refresher = Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform().daemon().name("mvcc-local-first-coordinator-refresh").unstarted(task));
         refresher.scheduleWithFixedDelay(this::refreshSafely, refreshIntervalMillis,
                 refreshIntervalMillis, TimeUnit.MILLISECONDS);
     }
 
-    /** 读栅栏保证快照登记先于续租提高最老活跃下界。 */
-    BeginReservation begin(IsolationLevel isolationLevel) {
+    /**
+     * Read fence Guarantee that snapshot registration precedes renewal of lease to increase the oldest active lower bounds.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    BeginReservation begin(final IsolationLevel isolationLevel) {
         Objects.requireNonNull(isolationLevel, "isolationLevel");
         for (int attempt = 0; attempt < 2; attempt++) {
             boolean renewNeeded = false;
@@ -71,7 +116,7 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
                 try {
                     view = control.snapshotUnderCoordinatorLease(current.coordinatorId(),
                             current.generation(), transactionTimeoutMillis);
-                } catch (MvccException ex) {
+                } catch (final MvccException ex) {
                     if (ex.errorCode() == ErrorCode.TRANSACTION_TIMEOUT && attempt == 0) {
                         renewNeeded = true;
                         view = null;
@@ -96,8 +141,13 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
                 "local-first coordinator lease cannot cover a new transaction", false, null);
     }
 
-    /** 需要时对分片操作前复核控制库持久代数和数据库截止时间。 */
-    void assertProtected(BeginReservation tx) {
+    /**
+     * Review shard control library durable algebra and database deadline when required.
+     *
+     * @param tx transaction context
+     * @throws MvccException if the operation cannot complete
+     */
+    void assertProtected(final BeginReservation tx) {
         membership.readLock().lock();
         try {
             requireAvailable();
@@ -114,12 +164,20 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
         }
     }
 
-    /** 事务完成后只删本地成员，单个事务不再写控制快照表。 */
-    void release(long txId) {
+    /**
+     * When transaction is finished, only local members will be deleted and individual transaction will no longer write control snapshot tables.
+     *
+     * @param txId transaction identifier
+     */
+    void release(final long txId) {
         activeReadTs.remove(txId);
     }
 
-    /** 段预留在排他成员栅栏下读取最老活跃快照，防止遗漏正在 begin 的旧 RR。 */
+    /**
+     * The segment is scheduled to remain with the exclusionary member fence to read the oldest active snapshot and prevent omissions from being begin's old RR.
+     *
+     * @return the operation result
+     */
     long floorForReservation() {
         membership.writeLock().lock();
         try {
@@ -131,7 +189,11 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
         }
     }
 
-    /** 排他本地栅栏内把持久下界推进至最老活跃读水位。 */
+    /**
+     * Discretion local fence moves the lower durable bounds to the oldest active reading watermark.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     void refresh() {
         membership.writeLock().lock();
         try {
@@ -147,7 +209,7 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
             try {
                 lease = control.renewCoordinatorLease(current.coordinatorId(),
                         current.generation(), oldest, leaseMillis);
-            } catch (MvccException ex) {
+            } catch (final MvccException ex) {
                 if (ex.errorCode() == ErrorCode.TRANSACTION_ABORTED) {
                     fenced = true;
                 }
@@ -158,12 +220,18 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
         }
     }
 
-    /** 返回最近一次后台续租失败以便隔离基准停止错误地宣称成功。 */
+    /**
+     * Returns the latest background renewal failed to isolate benchmark and stop falsely claiming success.
+     *
+     * @return the operation result
+     */
     RuntimeException lastRefreshFailure() {
         return lastFailure.get();
     }
 
-    /** 正常关闭只在本地没有活跃快照时删除协调器租约。 */
+    /**
+     * Normal close only removes coordinator lease when local is not active snapshot.
+     */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -180,8 +248,14 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
         }
     }
 
-    /** 协调器持久编号与本地单调序列组成不会碰撞的负事务号。 */
-    private long nextTransactionId(long coordinatorId) {
+    /**
+     * Coordinator durable number and local monotonous sequence make-up of negative transaction ID that does not collide.
+     *
+     * @param coordinatorId coordinator id
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
+    private long nextTransactionId(final long coordinatorId) {
         long next = sequence.incrementAndGet();
         if (next > MAX_LOCAL_SEQUENCE) {
             throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,
@@ -190,7 +264,11 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
         return Long.MIN_VALUE | (coordinatorId << 43) | next;
     }
 
-    /** 失去当前持久代数后本协调器不再开始或验证事务。 */
+    /**
+     * The coordinator after losing the current durable algebra does not start again or verify transaction.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     private void requireAvailable() {
         if (closed.get() || fenced) {
             throw new MvccException(ErrorCode.TRANSACTION_ABORTED,
@@ -198,11 +276,13 @@ final class LocalFirstCoordinatorSnapshots implements AutoCloseable {
         }
     }
 
-    /** 后台失败留证并由下一轮续租重试，不能静默丢失保护。 */
+    /**
+     * Background failed to leave a certificate and renew the retry lease for the next round, without silent loss of protection.
+     */
     private void refreshSafely() {
         try {
             refresh();
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             lastFailure.set(ex);
         }
     }

@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.txn;
 
 import com.flyingzc.azir.api.Transaction;
@@ -63,295 +79,530 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
- * 事务管理器，协调 TSO、元数据和分片存储完成 MVCC 事务。
+ * Coordinates global MVCC transactions, durable decisions, participant finalization and snapshot protection.
  */
 public final class TransactionManager implements AutoCloseable {
+
     private final TimestampOracle timestampOracle;
+
     private final TransactionMetadataStore metadataStore;
+
     private final SafePointStore safePointStore;
+
     private final Map<String, StorageAdapter> adapters;
+
     private final TransactionOptions options;
+
     private final TransactionClassifier transactionClassifier;
+
     private final TransactionMetrics metrics;
+
     private final MysqlPublicationLedger publicationLedger;
+
     private final MysqlSegmentPublicationLedger segmentLedger;
+
     private final PublicationSegmentOwnerRegistry segmentOwner;
+
     private final SegmentPublicationMaintenanceScheduler segmentScheduler;
+
     private final PublicationSegmentCommitBatcher segmentCommitBatcher;
+
     private final boolean segmentDirectSingleShard;
+
     private final boolean segmentOverlapMaterialization;
+
     private final boolean segmentFastMaterialization;
+
     private final CoordinatorSnapshotRegistry coordinatorRegistry;
+
     private final boolean ledgerDirectSingleShard;
+
     private final PublicationCommitBatcher publicationCommitBatcher;
+
     private final PublicationLocalReserveBatcher localReserveBatcher;
+
     private final PublicationLocalCompletionBatcher localCompletionBatcher;
+
     private final PublicationBeginBatcher beginBatcher;
+
     private final ExecutorService participantExecutor;
+
     private final ExecutorService asyncCommitExecutor;
+
     private final ExecutorService intentCleanupExecutor;
+
     private final Map<String, Semaphore> shardPermits = new HashMap<>();
+
     private final Semaphore transactionPermits;
+
     private final Map<Long, Transaction> activeTransactions = new ConcurrentHashMap<>();
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private final LongAdder synchronousFallbacks = new LongAdder();
+
     private final LongAdder backgroundFailures = new LongAdder();
+
     private final Object transactionOwner = new Object();
 
     /**
-     * 构造 TransactionManager 实例。
+     * Construct a TransactionManager instance.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param adapters adapters
      */
-    public TransactionManager(TimestampOracle timestampOracle,
-                              TransactionMetadataStore metadataStore,
-                              Map<String, StorageAdapter> adapters) {
+    public TransactionManager(final TimestampOracle timestampOracle,
+                              final TransactionMetadataStore metadataStore,
+                              final Map<String, StorageAdapter> adapters) {
         this(timestampOracle, metadataStore, NoOpSafePointStore.INSTANCE, TransactionOptions.defaults(), adapters);
     }
 
     /**
-     * 构造 TransactionManager 实例。
+     * Construct a TransactionManager instance.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param adapters adapters
      */
-    public TransactionManager(TimestampOracle timestampOracle,
-                              TransactionMetadataStore metadataStore,
-                              SafePointStore safePointStore,
-                              Map<String, StorageAdapter> adapters) {
+    public TransactionManager(final TimestampOracle timestampOracle,
+                              final TransactionMetadataStore metadataStore,
+                              final SafePointStore safePointStore,
+                              final Map<String, StorageAdapter> adapters) {
         this(timestampOracle, metadataStore, safePointStore, TransactionOptions.defaults(), adapters);
     }
 
     /**
-     * 构造 TransactionManager 实例。
+     * Construct a TransactionManager instance.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param options options
+     * @param adapters adapters
      */
-    public TransactionManager(TimestampOracle timestampOracle,
-                              TransactionMetadataStore metadataStore,
-                              TransactionOptions options,
-                              Map<String, StorageAdapter> adapters) {
+    public TransactionManager(final TimestampOracle timestampOracle,
+                              final TransactionMetadataStore metadataStore,
+                              final TransactionOptions options,
+                              final Map<String, StorageAdapter> adapters) {
         this(timestampOracle, metadataStore, NoOpSafePointStore.INSTANCE, options, adapters);
     }
 
     /**
-     * 构造 TransactionManager 实例。
+     * Construct a TransactionManager instance.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
      */
-    public TransactionManager(TimestampOracle timestampOracle,
-                              TransactionMetadataStore metadataStore,
-                              TransactionOptions options,
-                              Map<String, StorageAdapter> adapters,
-                              TransactionMetrics metrics) {
+    public TransactionManager(final TimestampOracle timestampOracle,
+                              final TransactionMetadataStore metadataStore,
+                              final TransactionOptions options,
+                              final Map<String, StorageAdapter> adapters,
+                              final TransactionMetrics metrics) {
         this(timestampOracle, metadataStore, NoOpSafePointStore.INSTANCE, options, adapters, metrics);
     }
 
     /**
-     * 构造 TransactionManager 实例。
+     * Construct a TransactionManager instance.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
      */
-    public TransactionManager(TimestampOracle timestampOracle,
-                              TransactionMetadataStore metadataStore,
-                              SafePointStore safePointStore,
-                              TransactionOptions options,
-                              Map<String, StorageAdapter> adapters) {
+    public TransactionManager(final TimestampOracle timestampOracle,
+                              final TransactionMetadataStore metadataStore,
+                              final SafePointStore safePointStore,
+                              final TransactionOptions options,
+                              final Map<String, StorageAdapter> adapters) {
         this(timestampOracle, metadataStore, safePointStore, options, adapters, NoOpTransactionMetrics.INSTANCE);
     }
 
     /**
-     * 构造 TransactionManager 实例。
+     * Construct a TransactionManager instance.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
      */
-    public TransactionManager(TimestampOracle timestampOracle,
-                              TransactionMetadataStore metadataStore,
-                              SafePointStore safePointStore,
-                              TransactionOptions options,
-                              Map<String, StorageAdapter> adapters,
-                              TransactionMetrics metrics) {
+    public TransactionManager(final TimestampOracle timestampOracle,
+                              final TransactionMetadataStore metadataStore,
+                              final SafePointStore safePointStore,
+                              final TransactionOptions options,
+                              final Map<String, StorageAdapter> adapters,
+                              final TransactionMetrics metrics) {
         this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics, null);
     }
 
-    /** 新账本模式仅在控制面权威一致且写入可解析已提交 intent 时构造。 */
-    TransactionManager(TimestampOracle timestampOracle,
-                       TransactionMetadataStore metadataStore,
-                       SafePointStore safePointStore,
-                       TransactionOptions options,
-                       Map<String, StorageAdapter> adapters,
-                       TransactionMetrics metrics,
-                       MysqlPublicationLedger publicationLedger) {
+    /**
+     * The new account mode is only constructed when authority is consistent on the control side and writes to resolve an commit indent.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param publicationLedger publication ledger
+     */
+    TransactionManager(final TimestampOracle timestampOracle,
+                       final TransactionMetadataStore metadataStore,
+                       final SafePointStore safePointStore,
+                       final TransactionOptions options,
+                       final Map<String, StorageAdapter> adapters,
+                       final TransactionMetrics metrics,
+                       final MysqlPublicationLedger publicationLedger) {
         this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics, publicationLedger, false);
     }
 
-    /** 压测和隔离验证可选择启用有界账本批量决议，默认路径待验收后再切换。 */
-    TransactionManager(TimestampOracle timestampOracle,
-                       TransactionMetadataStore metadataStore,
-                       SafePointStore safePointStore,
-                       TransactionOptions options,
-                       Map<String, StorageAdapter> adapters,
-                       TransactionMetrics metrics,
-                       MysqlPublicationLedger publicationLedger,
-                       boolean batchLedgerCommits) {
+    /**
+     * Verify pressure and isolation can be selected to enable bounded account book batch decision, with the default path to switch after acceptance.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param publicationLedger publication ledger
+     * @param batchLedgerCommits batch ledger commits
+     */
+    TransactionManager(final TimestampOracle timestampOracle,
+                       final TransactionMetadataStore metadataStore,
+                       final SafePointStore safePointStore,
+                       final TransactionOptions options,
+                       final Map<String, StorageAdapter> adapters,
+                       final TransactionMetrics metrics,
+                       final MysqlPublicationLedger publicationLedger,
+                       final boolean batchLedgerCommits) {
         this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
                 publicationLedger, batchLedgerCommits, 2);
     }
 
-    /** 隔离压测可调整批量决议工作线程数，生产入口仍待长稳验收。 */
-    TransactionManager(TimestampOracle timestampOracle,
-                       TransactionMetadataStore metadataStore,
-                       SafePointStore safePointStore,
-                       TransactionOptions options,
-                       Map<String, StorageAdapter> adapters,
-                       TransactionMetrics metrics,
-                       MysqlPublicationLedger publicationLedger,
-                       boolean batchLedgerCommits,
-                       int batchWorkers) {
+    /**
+     * Isolation pressure measures can adjust the batch decision work-lines, and the production entrance is still subject to long and steady acceptance.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param publicationLedger publication ledger
+     * @param batchLedgerCommits batch ledger commits
+     * @param batchWorkers batch workers
+     */
+    TransactionManager(final TimestampOracle timestampOracle,
+                       final TransactionMetadataStore metadataStore,
+                       final SafePointStore safePointStore,
+                       final TransactionOptions options,
+                       final Map<String, StorageAdapter> adapters,
+                       final TransactionMetrics metrics,
+                       final MysqlPublicationLedger publicationLedger,
+                       final boolean batchLedgerCommits,
+                       final int batchWorkers) {
         this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
                 publicationLedger, batchLedgerCommits, batchWorkers, false);
     }
 
-    /** 仅显式启用已验证的单分片本地直接提交，默认保持吞吐较高的 intent 路径。 */
-    TransactionManager(TimestampOracle timestampOracle,
-                       TransactionMetadataStore metadataStore,
-                       SafePointStore safePointStore,
-                       TransactionOptions options,
-                       Map<String, StorageAdapter> adapters,
-                       TransactionMetrics metrics,
-                       MysqlPublicationLedger publicationLedger,
-                       boolean batchLedgerCommits,
-                       int batchWorkers,
-                       boolean ledgerDirectSingleShard) {
+    /**
+     * Only visible enable single shard local direct commit with the default to keep a higher intent path of throughput.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param publicationLedger publication ledger
+     * @param batchLedgerCommits batch ledger commits
+     * @param batchWorkers batch workers
+     * @param ledgerDirectSingleShard ledger direct single shard
+     */
+    TransactionManager(final TimestampOracle timestampOracle,
+                       final TransactionMetadataStore metadataStore,
+                       final SafePointStore safePointStore,
+                       final TransactionOptions options,
+                       final Map<String, StorageAdapter> adapters,
+                       final TransactionMetrics metrics,
+                       final MysqlPublicationLedger publicationLedger,
+                       final boolean batchLedgerCommits,
+                       final int batchWorkers,
+                       final boolean ledgerDirectSingleShard) {
         this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
                 publicationLedger, batchLedgerCommits, batchWorkers, ledgerDirectSingleShard, false, 1);
     }
 
-    /** 批量快照开始仅由显式实验选项启用，默认保持已验证的单笔 begin。 */
-    TransactionManager(TimestampOracle timestampOracle,
-                       TransactionMetadataStore metadataStore,
-                       SafePointStore safePointStore,
-                       TransactionOptions options,
-                       Map<String, StorageAdapter> adapters,
-                       TransactionMetrics metrics,
-                       MysqlPublicationLedger publicationLedger,
-                       boolean batchLedgerCommits,
-                       int batchWorkers,
-                       boolean ledgerDirectSingleShard,
-                       boolean batchLedgerBegins,
-                       int beginWorkers) {
+    /**
+     * Batch snapshot starts only with a visible test option and defaults to keep single begin of verify.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param publicationLedger publication ledger
+     * @param batchLedgerCommits batch ledger commits
+     * @param batchWorkers batch workers
+     * @param ledgerDirectSingleShard ledger direct single shard
+     * @param batchLedgerBegins batch ledger begins
+     * @param beginWorkers begin workers
+     */
+    TransactionManager(final TimestampOracle timestampOracle,
+                       final TransactionMetadataStore metadataStore,
+                       final SafePointStore safePointStore,
+                       final TransactionOptions options,
+                       final Map<String, StorageAdapter> adapters,
+                       final TransactionMetrics metrics,
+                       final MysqlPublicationLedger publicationLedger,
+                       final boolean batchLedgerCommits,
+                       final int batchWorkers,
+                       final boolean ledgerDirectSingleShard,
+                       final boolean batchLedgerBegins,
+                       final int beginWorkers) {
         this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
                 publicationLedger, batchLedgerCommits, batchWorkers, ledgerDirectSingleShard,
                 batchLedgerBegins, beginWorkers, null);
     }
 
-    /** 协调者快照租约仅由显式运行时装配，不能与批量开始同时启用。 */
-    TransactionManager(TimestampOracle timestampOracle,
-                       TransactionMetadataStore metadataStore,
-                       SafePointStore safePointStore,
-                       TransactionOptions options,
-                       Map<String, StorageAdapter> adapters,
-                       TransactionMetrics metrics,
-                       MysqlPublicationLedger publicationLedger,
-                       boolean batchLedgerCommits,
-                       int batchWorkers,
-                       boolean ledgerDirectSingleShard,
-                       boolean batchLedgerBegins,
-                       int beginWorkers,
-                       CoordinatorSnapshotRegistry coordinatorRegistry) {
+    /**
+     * The coordinator snapshot lease is only a visible run-time assembly and cannot be enabled at the same time as batch.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param publicationLedger publication ledger
+     * @param batchLedgerCommits batch ledger commits
+     * @param batchWorkers batch workers
+     * @param ledgerDirectSingleShard ledger direct single shard
+     * @param batchLedgerBegins batch ledger begins
+     * @param beginWorkers begin workers
+     * @param coordinatorRegistry coordinator registry
+     */
+    TransactionManager(final TimestampOracle timestampOracle,
+                       final TransactionMetadataStore metadataStore,
+                       final SafePointStore safePointStore,
+                       final TransactionOptions options,
+                       final Map<String, StorageAdapter> adapters,
+                       final TransactionMetrics metrics,
+                       final MysqlPublicationLedger publicationLedger,
+                       final boolean batchLedgerCommits,
+                       final int batchWorkers,
+                       final boolean ledgerDirectSingleShard,
+                       final boolean batchLedgerBegins,
+                       final int beginWorkers,
+                       final CoordinatorSnapshotRegistry coordinatorRegistry) {
         this(timestampOracle, metadataStore, safePointStore, options, adapters, metrics,
                 publicationLedger, batchLedgerCommits, batchWorkers, ledgerDirectSingleShard,
                 batchLedgerBegins, beginWorkers, coordinatorRegistry, null, null, null, null,
                 false, false, false);
     }
 
-    /** 显式分段模式仅与已激活的新时间线和同库元数据权威装配。 */
-    static TransactionManager forSegment(TimestampOracle timestampOracle,
-                                         TransactionMetadataStore metadataStore,
-                                         TransactionOptions options,
-                                         Map<String, StorageAdapter> adapters,
-                                         TransactionMetrics metrics,
-                                         MysqlSegmentPublicationLedger segmentLedger,
-                                         PublicationSegmentOwnerRegistry segmentOwner,
-                                         SegmentPublicationMaintenanceScheduler segmentScheduler) {
+    /**
+     * Visible segment mode only corresponds to the activated new time line and same database metadata authority.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param segmentLedger segment ledger
+     * @param segmentOwner segment owner
+     * @param segmentScheduler segment scheduler
+     * @return the operation result
+     */
+    static TransactionManager forSegment(final TimestampOracle timestampOracle,
+                                         final TransactionMetadataStore metadataStore,
+                                         final TransactionOptions options,
+                                         final Map<String, StorageAdapter> adapters,
+                                         final TransactionMetrics metrics,
+                                         final MysqlSegmentPublicationLedger segmentLedger,
+                                         final PublicationSegmentOwnerRegistry segmentOwner,
+                                         final SegmentPublicationMaintenanceScheduler segmentScheduler) {
         return forSegment(timestampOracle, metadataStore, options, adapters, metrics,
                 segmentLedger, segmentOwner, segmentScheduler, null);
     }
 
-    /** 允许显式实验运行时提供有界同分段批量决议队列。 */
-    static TransactionManager forSegment(TimestampOracle timestampOracle,
-                                         TransactionMetadataStore metadataStore,
-                                         TransactionOptions options,
-                                         Map<String, StorageAdapter> adapters,
-                                         TransactionMetrics metrics,
-                                         MysqlSegmentPublicationLedger segmentLedger,
-                                         PublicationSegmentOwnerRegistry segmentOwner,
-                                         SegmentPublicationMaintenanceScheduler segmentScheduler,
-                                         PublicationSegmentCommitBatcher segmentCommitBatcher) {
+    /**
+     * Allows bounded row batch decision queues when visible experiments are running.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param segmentLedger segment ledger
+     * @param segmentOwner segment owner
+     * @param segmentScheduler segment scheduler
+     * @param segmentCommitBatcher segment commit batcher
+     * @return the operation result
+     */
+    static TransactionManager forSegment(final TimestampOracle timestampOracle,
+                                         final TransactionMetadataStore metadataStore,
+                                         final TransactionOptions options,
+                                         final Map<String, StorageAdapter> adapters,
+                                         final TransactionMetrics metrics,
+                                         final MysqlSegmentPublicationLedger segmentLedger,
+                                         final PublicationSegmentOwnerRegistry segmentOwner,
+                                         final SegmentPublicationMaintenanceScheduler segmentScheduler,
+                                         final PublicationSegmentCommitBatcher segmentCommitBatcher) {
         return forSegment(timestampOracle, metadataStore, options, adapters, metrics,
                 segmentLedger, segmentOwner, segmentScheduler, segmentCommitBatcher, false);
     }
 
-    /** 分段单分片物理 1PC 仅由已具备本地终态恢复的显式运行时启用。 */
-    static TransactionManager forSegment(TimestampOracle timestampOracle,
-                                         TransactionMetadataStore metadataStore,
-                                         TransactionOptions options,
-                                         Map<String, StorageAdapter> adapters,
-                                         TransactionMetrics metrics,
-                                         MysqlSegmentPublicationLedger segmentLedger,
-                                         PublicationSegmentOwnerRegistry segmentOwner,
-                                         SegmentPublicationMaintenanceScheduler segmentScheduler,
-                                         PublicationSegmentCommitBatcher segmentCommitBatcher,
-                                         boolean segmentDirectSingleShard) {
+    /**
+     * Division shard Physics 1PC is only enabled when a visible run of local terminal state recovery already exists.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param segmentLedger segment ledger
+     * @param segmentOwner segment owner
+     * @param segmentScheduler segment scheduler
+     * @param segmentCommitBatcher segment commit batcher
+     * @param segmentDirectSingleShard segment direct single shard
+     * @return the operation result
+     */
+    static TransactionManager forSegment(final TimestampOracle timestampOracle,
+                                         final TransactionMetadataStore metadataStore,
+                                         final TransactionOptions options,
+                                         final Map<String, StorageAdapter> adapters,
+                                         final TransactionMetrics metrics,
+                                         final MysqlSegmentPublicationLedger segmentLedger,
+                                         final PublicationSegmentOwnerRegistry segmentOwner,
+                                         final SegmentPublicationMaintenanceScheduler segmentScheduler,
+                                         final PublicationSegmentCommitBatcher segmentCommitBatcher,
+                                         final boolean segmentDirectSingleShard) {
         return forSegment(timestampOracle, metadataStore, options, adapters, metrics,
                 segmentLedger, segmentOwner, segmentScheduler, segmentCommitBatcher,
                 segmentDirectSingleShard, false);
     }
 
-    /** 分片物化与全局发布等待仅在并行提交策略下显式重叠。 */
-    static TransactionManager forSegment(TimestampOracle timestampOracle,
-                                         TransactionMetadataStore metadataStore,
-                                         TransactionOptions options,
-                                         Map<String, StorageAdapter> adapters,
-                                         TransactionMetrics metrics,
-                                         MysqlSegmentPublicationLedger segmentLedger,
-                                         PublicationSegmentOwnerRegistry segmentOwner,
-                                         SegmentPublicationMaintenanceScheduler segmentScheduler,
-                                         PublicationSegmentCommitBatcher segmentCommitBatcher,
-                                         boolean segmentDirectSingleShard,
-                                         boolean segmentOverlapMaterialization) {
+    /**
+     * Shard materialization and global release waiting only overtly under the parallel commit policy.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param segmentLedger segment ledger
+     * @param segmentOwner segment owner
+     * @param segmentScheduler segment scheduler
+     * @param segmentCommitBatcher segment commit batcher
+     * @param segmentDirectSingleShard segment direct single shard
+     * @param segmentOverlapMaterialization segment overlap materialization
+     * @return the operation result
+     */
+    static TransactionManager forSegment(final TimestampOracle timestampOracle,
+                                         final TransactionMetadataStore metadataStore,
+                                         final TransactionOptions options,
+                                         final Map<String, StorageAdapter> adapters,
+                                         final TransactionMetrics metrics,
+                                         final MysqlSegmentPublicationLedger segmentLedger,
+                                         final PublicationSegmentOwnerRegistry segmentOwner,
+                                         final SegmentPublicationMaintenanceScheduler segmentScheduler,
+                                         final PublicationSegmentCommitBatcher segmentCommitBatcher,
+                                         final boolean segmentDirectSingleShard,
+                                         final boolean segmentOverlapMaterialization) {
         return forSegment(timestampOracle, metadataStore, options, adapters, metrics,
                 segmentLedger, segmentOwner, segmentScheduler, segmentCommitBatcher,
                 segmentDirectSingleShard, segmentOverlapMaterialization, false);
     }
 
-    /** 分段中心决议凭据只向同步、非批量的 MySQL 参与者开放。 */
-    static TransactionManager forSegment(TimestampOracle timestampOracle,
-                                         TransactionMetadataStore metadataStore,
-                                         TransactionOptions options,
-                                         Map<String, StorageAdapter> adapters,
-                                         TransactionMetrics metrics,
-                                         MysqlSegmentPublicationLedger segmentLedger,
-                                         PublicationSegmentOwnerRegistry segmentOwner,
-                                         SegmentPublicationMaintenanceScheduler segmentScheduler,
-                                         PublicationSegmentCommitBatcher segmentCommitBatcher,
-                                         boolean segmentDirectSingleShard,
-                                         boolean segmentOverlapMaterialization,
-                                         boolean segmentFastMaterialization) {
+    /**
+     * The segment centre decision receipt is open only to MySQL participant which is synchronized and not batch.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param segmentLedger segment ledger
+     * @param segmentOwner segment owner
+     * @param segmentScheduler segment scheduler
+     * @param segmentCommitBatcher segment commit batcher
+     * @param segmentDirectSingleShard segment direct single shard
+     * @param segmentOverlapMaterialization segment overlap materialization
+     * @param segmentFastMaterialization segment fast materialization
+     * @return the operation result
+     */
+    static TransactionManager forSegment(final TimestampOracle timestampOracle,
+                                         final TransactionMetadataStore metadataStore,
+                                         final TransactionOptions options,
+                                         final Map<String, StorageAdapter> adapters,
+                                         final TransactionMetrics metrics,
+                                         final MysqlSegmentPublicationLedger segmentLedger,
+                                         final PublicationSegmentOwnerRegistry segmentOwner,
+                                         final SegmentPublicationMaintenanceScheduler segmentScheduler,
+                                         final PublicationSegmentCommitBatcher segmentCommitBatcher,
+                                         final boolean segmentDirectSingleShard,
+                                         final boolean segmentOverlapMaterialization,
+                                         final boolean segmentFastMaterialization) {
         return new TransactionManager(timestampOracle, metadataStore, NoOpSafePointStore.INSTANCE,
                 options, adapters, metrics, null, false, 1, false, false, 1,
                 null, segmentLedger, segmentOwner, segmentScheduler, segmentCommitBatcher,
                 segmentDirectSingleShard, segmentOverlapMaterialization, segmentFastMaterialization);
     }
 
-    /** 旧账本与分段账本只允许其中一个承担全局读写时间线。 */
-    private TransactionManager(TimestampOracle timestampOracle,
-                               TransactionMetadataStore metadataStore,
-                               SafePointStore safePointStore,
-                               TransactionOptions options,
-                               Map<String, StorageAdapter> adapters,
-                               TransactionMetrics metrics,
-                               MysqlPublicationLedger publicationLedger,
-                               boolean batchLedgerCommits,
-                               int batchWorkers,
-                               boolean ledgerDirectSingleShard,
-                               boolean batchLedgerBegins,
-                               int beginWorkers,
-                               CoordinatorSnapshotRegistry coordinatorRegistry,
-                               MysqlSegmentPublicationLedger segmentLedger,
-                               PublicationSegmentOwnerRegistry segmentOwner,
-                               SegmentPublicationMaintenanceScheduler segmentScheduler,
-                               PublicationSegmentCommitBatcher segmentCommitBatcher,
-                               boolean segmentDirectSingleShard,
-                               boolean segmentOverlapMaterialization,
-                               boolean segmentFastMaterialization) {
+    /**
+     * Only one of the old ledgers and sub-books is allowed to bear global reading and writing time lines.
+     *
+     * @param timestampOracle timestamp oracle
+     * @param metadataStore metadata store
+     * @param safePointStore safe point store
+     * @param options options
+     * @param adapters adapters
+     * @param metrics metrics
+     * @param publicationLedger publication ledger
+     * @param batchLedgerCommits batch ledger commits
+     * @param batchWorkers batch workers
+     * @param ledgerDirectSingleShard ledger direct single shard
+     * @param batchLedgerBegins batch ledger begins
+     * @param beginWorkers begin workers
+     * @param coordinatorRegistry coordinator registry
+     * @param segmentLedger segment ledger
+     * @param segmentOwner segment owner
+     * @param segmentScheduler segment scheduler
+     * @param segmentCommitBatcher segment commit batcher
+     * @param segmentDirectSingleShard segment direct single shard
+     * @param segmentOverlapMaterialization segment overlap materialization
+     * @param segmentFastMaterialization segment fast materialization
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private TransactionManager(final TimestampOracle timestampOracle,
+                               final TransactionMetadataStore metadataStore,
+                               final SafePointStore safePointStore,
+                               final TransactionOptions options,
+                               final Map<String, StorageAdapter> adapters,
+                               final TransactionMetrics metrics,
+                               final MysqlPublicationLedger publicationLedger,
+                               final boolean batchLedgerCommits,
+                               final int batchWorkers,
+                               final boolean ledgerDirectSingleShard,
+                               final boolean batchLedgerBegins,
+                               final int beginWorkers,
+                               final CoordinatorSnapshotRegistry coordinatorRegistry,
+                               final MysqlSegmentPublicationLedger segmentLedger,
+                               final PublicationSegmentOwnerRegistry segmentOwner,
+                               final SegmentPublicationMaintenanceScheduler segmentScheduler,
+                               final PublicationSegmentCommitBatcher segmentCommitBatcher,
+                               final boolean segmentDirectSingleShard,
+                               final boolean segmentOverlapMaterialization,
+                               final boolean segmentFastMaterialization) {
         if (coordinatorRegistry != null && (publicationLedger == null || batchLedgerBegins)) {
             throw new IllegalArgumentException("coordinator snapshots require ledger mode without batch begin");
         }
@@ -359,8 +610,8 @@ public final class TransactionManager implements AutoCloseable {
                 || segmentScheduler == null || !options.lazyBeginMetadata() || !options.bufferWrites()
                 || !segmentLedger.sharesMetadataAuthority(metadataStore))
                 || segmentLedger == null && (segmentOwner != null || segmentScheduler != null
-                || segmentCommitBatcher != null || segmentDirectSingleShard
-                || segmentOverlapMaterialization || segmentFastMaterialization)
+                        || segmentCommitBatcher != null || segmentDirectSingleShard
+                        || segmentOverlapMaterialization || segmentFastMaterialization)
                 || segmentOverlapMaterialization && !options.crossShardCommitPolicy().parallelCommit()) {
             throw new IllegalArgumentException("segmented mode requires one buffered MySQL control authority");
         }
@@ -410,7 +661,7 @@ public final class TransactionManager implements AutoCloseable {
         }
         if (publicationLedger == null && segmentLedger == null
                 && metadataStore instanceof MysqlTransactionMetadataStore mysqlMetadata) {
-            // 旧管理器在构造期拒绝已切换的持久模式，避免每笔 begin 才碰到租约外键栅栏。
+            // The old manager rejected the converted durable mode during the construction period to avoid each begin having encountered lease external key fence.
             mysqlMetadata.assertLegacyProtocolActive();
         }
         this.transactionPermits = new Semaphore(options.limits().maxActiveTransactions());
@@ -451,9 +702,13 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 开启一个新事务。
+     * Begin a new transaction.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    public Transaction begin(IsolationLevel isolationLevel) {
+    public Transaction begin(final IsolationLevel isolationLevel) {
         Objects.requireNonNull(isolationLevel, "isolationLevel");
         ensureOpen();
         expireLocalTransactions();
@@ -464,13 +719,13 @@ public final class TransactionManager implements AutoCloseable {
         try {
             Transaction transaction = segmentLedger != null ? beginFromSegment(isolationLevel)
                     : publicationLedger == null
-                    ? acceleratedBegin(isolationLevel).orElseGet(() -> legacyBegin(isolationLevel))
-                    : beginFromLedger(isolationLevel);
+                            ? acceleratedBegin(isolationLevel).orElseGet(() -> legacyBegin(isolationLevel))
+                            : beginFromLedger(isolationLevel);
             activeTransactions.put(transaction.txId(), transaction);
             registered = transaction;
             ensureOpen();
             return transaction;
-        } catch (RuntimeException | Error ex) {
+        } catch (final RuntimeException | Error ex) {
             if (registered == null || activeTransactions.remove(registered.txId(), registered)) {
                 transactionPermits.release();
             }
@@ -481,22 +736,37 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
-    /** 共享水位快照和新租约必须在同一控制事务中持久化后才创建事务对象。 */
-    private Transaction beginFromLedger(IsolationLevel isolationLevel) {
+    /**
+     * Sharing watermark snapshot and new lease must be in the same control durable storage for transaction before creating transaction objects.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     */
+    private Transaction beginFromLedger(final IsolationLevel isolationLevel) {
         BeginReservation reservation = ledgerBeginStage(isolationLevel);
         return new Transaction(reservation.txId(), reservation.startTs(), isolationLevel,
                 reservation.deadlineMillis(), transactionOwner);
     }
 
-    /** 分段模式的开始快照与逐事务租约同事务持久化后才暴露事务对象。 */
-    private Transaction beginFromSegment(IsolationLevel isolationLevel) {
+    /**
+     * The start of the segment mode snapshot and transaction lease will not be exposed until transaction durable storage.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     */
+    private Transaction beginFromSegment(final IsolationLevel isolationLevel) {
         BeginReservation reservation = segmentBeginStage(isolationLevel);
         return new Transaction(reservation.txId(), reservation.startTs(), isolationLevel,
                 reservation.deadlineMillis(), transactionOwner);
     }
 
-    /** 仅在时间戳和元数据确定共享一个控制面权威时启用合并发布。 */
-    private Optional<Transaction> acceleratedBegin(IsolationLevel isolationLevel) {
+    /**
+     * Only the concurrent sheet is enabled when timestamp and metadata determine to share a control side authority.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     */
+    private Optional<Transaction> acceleratedBegin(final IsolationLevel isolationLevel) {
         if (!(metadataStore instanceof FastTransactionBegin fastBegin)) {
             return Optional.empty();
         }
@@ -511,15 +781,20 @@ public final class TransactionManager implements AutoCloseable {
         });
     }
 
-    /** 非 MySQL 或不同控制面权威继续使用原有发布协议。 */
-    private Transaction legacyBegin(IsolationLevel isolationLevel) {
+    /**
+     * Not MySQL or different control authority continues to use the original release protocol.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     */
+    private Transaction legacyBegin(final IsolationLevel isolationLevel) {
         return metadataStore.withPublicationLock(() -> {
             ensureOpen();
             metadataStore.assertNoPendingPublications();
             long txId = nextTimestamp(TransactionStage.BEGIN_TSO);
             Transaction created = new Transaction(txId, txId, isolationLevel,
                     metadataStore.currentTimeMillis() + options.limits().timeoutMillis(), transactionOwner);
-            // 独立快照登记保护 lazy 只读事务，不能依赖是否写入事务元数据。
+            // An independent snapshot registration protection lazy read-only transaction cannot rely on writing to transaction metadata.
             metadataStore.registerSnapshot(txId, txId, created.deadlineMillis());
             if (!options.lazyBeginMetadata()) {
                 createBeginMetadata(txId, txId, isolationLevel);
@@ -530,14 +805,27 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 读取指定键或事务的当前可见数据。
+     * Read the currently visible data for the key or transaction.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @return the operation result
      */
-    public Optional<byte[]> get(Transaction tx, String shardId, String key) {
+    public Optional<byte[]> get(final Transaction tx, final String shardId, final String key) {
         return get(tx, shardId, key, beginReadStatement(tx));
     }
 
-    /** 在同一条 SQL 的固定快照下执行点读。 */
-    public Optional<byte[]> get(Transaction tx, String shardId, String key, StatementReadSnapshot snapshot) {
+    /**
+     * Execute a reading point under the fixed snapshot of the same SQL.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param snapshot snapshot
+     * @return the operation result
+     */
+    public Optional<byte[]> get(final Transaction tx, final String shardId, final String key, final StatementReadSnapshot snapshot) {
         validateStatement(tx, snapshot);
         StorageAdapter adapter = adapter(shardId);
         Optional<byte[]> bufferedValue = bufferedRead(tx, shardId, key);
@@ -546,8 +834,7 @@ public final class TransactionManager implements AutoCloseable {
         }
         Optional<VersionedValue> result = withShardPermit(shardId, () -> adapter.get(
                 new ReadContext(tx.txId(), snapshot.readTs(), tx.isolationLevel()),
-                key
-        ));
+                key));
         ensureLeaseValid(tx);
         if (result.isEmpty() || result.get().deleted()) {
             return Optional.empty();
@@ -556,16 +843,25 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 按键范围扫描当前快照可见的数据。
+     * Scan the key range using the current snapshot.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param startKeyInclusive start key inclusive
+     * @param endKeyExclusive end key exclusive
+     * @return the operation result
      */
-    public List<VersionedValue> scan(Transaction tx, String shardId, String startKeyInclusive, String endKeyExclusive) {
+    public List<VersionedValue> scan(final Transaction tx, final String shardId, final String startKeyInclusive, final String endKeyExclusive) {
         return scan(tx, shardId, startKeyInclusive, endKeyExclusive, beginReadStatement(tx));
     }
 
     /**
-     * 创建绑定当前事务的语句级读取快照。
+     * Create statement-level reading snapshot for binding the current transaction.
+     *
+     * @param tx transaction context
+     * @return the operation result
      */
-    public StatementReadSnapshot beginReadStatement(Transaction tx) {
+    public StatementReadSnapshot beginReadStatement(final Transaction tx) {
         ensureActive(tx);
         if (publicationLedger != null || segmentLedger != null) {
             ensureLeaseValid(tx);
@@ -582,19 +878,32 @@ public final class TransactionManager implements AutoCloseable {
         });
     }
 
-    /** SQL 完成排序或聚合后验证原语句仍在租约内，不分配新的 RC 时间戳。 */
-    public void validateReadStatement(Transaction tx, StatementReadSnapshot snapshot) {
+    /**
+     * The original verify statement after SQL has finished sorting or aggregating is still in lease and no new RC timestamp is allocated.
+     *
+     * @param tx transaction context
+     * @param snapshot snapshot
+     */
+    public void validateReadStatement(final Transaction tx, final StatementReadSnapshot snapshot) {
         validateStatement(tx, snapshot);
     }
 
     /**
-     * 使用指定语句级快照扫描键范围，供一次 SQL 内的多表或多分片扫描复用同一可见边界。
+     * Use the specified statement-level snapshot scanning key range to reuse the same visible boundary once with multiple tables or more shard scans in SQL.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param startKeyInclusive start key inclusive
+     * @param endKeyExclusive end key exclusive
+     * @param snapshot snapshot
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    public List<VersionedValue> scan(Transaction tx,
-                                     String shardId,
-                                     String startKeyInclusive,
-                                     String endKeyExclusive,
-                                     StatementReadSnapshot snapshot) {
+    public List<VersionedValue> scan(final Transaction tx,
+                                     final String shardId,
+                                     final String startKeyInclusive,
+                                     final String endKeyExclusive,
+                                     final StatementReadSnapshot snapshot) {
         List<VersionedValue> result = new ArrayList<>();
         String after = null;
         long bytes = 0;
@@ -615,9 +924,22 @@ public final class TransactionManager implements AutoCloseable {
         return List.copyOf(result);
     }
 
-    /** 按二进制键序合并一页存储结果和自身缓冲变更，空页也可带继续位置。 */
-    public ScanPage scanPage(Transaction tx, String shardId, String startKeyInclusive, String endKeyExclusive,
-                             StatementReadSnapshot snapshot, String afterKeyExclusive, int limit) {
+    /**
+     * By binary key, consolidates a page storage result and your own buffer change. Empty pages can also continue in position.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param startKeyInclusive start key inclusive
+     * @param endKeyExclusive end key exclusive
+     * @param snapshot snapshot
+     * @param afterKeyExclusive after key exclusive
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    public ScanPage scanPage(final Transaction tx, final String shardId, final String startKeyInclusive, final String endKeyExclusive,
+                             final StatementReadSnapshot snapshot, final String afterKeyExclusive, final int limit) {
         validateStatement(tx, snapshot);
         if (limit < 1 || limit > 4096) {
             throw new IllegalArgumentException("page limit must be between 1 and 4096");
@@ -678,24 +1000,38 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 在事务中写入键值数据。
+     * Write a key-value pair in the transaction.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @param value value to write
      */
-    public void put(Transaction tx, String shardId, String key, byte[] value) {
+    public void put(final Transaction tx, final String shardId, final String key, final byte[] value) {
         Objects.requireNonNull(value, "value");
         write(tx, shardId, Mutation.put(key, value));
     }
 
     /**
-     * 在事务中删除键值数据。
+     * Delete the key in the transaction.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param key business key
      */
-    public void delete(Transaction tx, String shardId, String key) {
+    public void delete(final Transaction tx, final String shardId, final String key) {
         write(tx, shardId, Mutation.delete(key));
     }
 
     /**
-     * 在事务模板中执行回调并按策略重试。
+     * Execute a callback in the transaction template and follow policy retry.
+     *
+     * @param <T> value type
+     * @param isolationLevel global transaction isolation level
+     * @param callback callback
+     * @return the operation result
      */
-    public <T> T execute(IsolationLevel isolationLevel, TransactionCallback<T> callback) {
+    public <T> T execute(final IsolationLevel isolationLevel, final TransactionCallback<T> callback) {
         MvccException lastRetryable = null;
         for (int attempt = 1; attempt <= options.retryPolicy().maxAttempts(); attempt++) {
             Transaction tx = begin(isolationLevel);
@@ -703,7 +1039,7 @@ public final class TransactionManager implements AutoCloseable {
                 T result = callback.doInTransaction(tx);
                 commit(tx);
                 return result;
-            } catch (MvccException ex) {
+            } catch (final MvccException ex) {
                 safeRollback(tx);
                 if (tx.decisionStarted() || tx.status() == TxStatus.COMMITTED) {
                     throw ex.errorCode() == ErrorCode.TRANSACTION_STATUS_UNKNOWN ? ex : unknownCommit(tx, ex);
@@ -713,7 +1049,7 @@ public final class TransactionManager implements AutoCloseable {
                 }
                 lastRetryable = ex;
                 sleepQuietly(options.retryPolicy().nextDelayMillis(attempt - 1));
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 safeRollback(tx);
                 throw ex;
             }
@@ -724,9 +1060,13 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 提交事务意向并生成已提交版本。
+     * Finalize transaction intents as committed versions.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    public TransactionCommitResult commit(Transaction tx) {
+    public TransactionCommitResult commit(final Transaction tx) {
         ensureActive(tx);
         TransactionClassification classification = transactionClassifier.classifyForCommit(tx, options);
         try {
@@ -735,9 +1075,9 @@ public final class TransactionManager implements AutoCloseable {
                     case READ_ONLY_SNAPSHOT -> commitReadOnly(tx);
                     case SINGLE_SHARD_1PC -> segmentDirectSingleShard
                             && adapter(classification.participants().iterator().next())
-                            .supportsAtomicDirectCommit()
-                            ? commitSegmentSingleShardDirect(tx, classification.participants().iterator().next())
-                            : commitSegmentWrite(tx);
+                                    .supportsAtomicDirectCommit()
+                                            ? commitSegmentSingleShardDirect(tx, classification.participants().iterator().next())
+                                            : commitSegmentWrite(tx);
                     case CROSS_SHARD_ASYNC_COMMIT, CROSS_SHARD_SYNC_2PC -> commitSegmentWrite(tx);
                     default -> throw new MvccException(ErrorCode.ILLEGAL_STATE,
                             "unsupported segmented transaction protocol: " + classification.protocolType(),
@@ -749,9 +1089,9 @@ public final class TransactionManager implements AutoCloseable {
                     case READ_ONLY_SNAPSHOT -> commitReadOnly(tx);
                     case SINGLE_SHARD_1PC -> ledgerDirectSingleShard
                             && adapter(classification.participants().iterator().next())
-                            .supportsAtomicDirectCommit()
-                            ? commitLedgerSingleShardDirect(tx, classification.participants().iterator().next())
-                            : commitLedgerWrite(tx);
+                                    .supportsAtomicDirectCommit()
+                                            ? commitLedgerSingleShardDirect(tx, classification.participants().iterator().next())
+                                            : commitLedgerWrite(tx);
                     case CROSS_SHARD_ASYNC_COMMIT, CROSS_SHARD_SYNC_2PC -> commitLedgerWrite(tx);
                     default -> throw new MvccException(ErrorCode.ILLEGAL_STATE,
                             "unsupported ledger transaction protocol: " + classification.protocolType(),
@@ -765,7 +1105,7 @@ public final class TransactionManager implements AutoCloseable {
                 default -> throw new MvccException(ErrorCode.ILLEGAL_STATE,
                         "unsupported transaction protocol: " + classification.protocolType(), false, tx.txId());
             };
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             if (tx.decisionStarted()) {
                 if (tx.status() == TxStatus.COMMITTED) {
                     releaseTransaction(tx);
@@ -780,9 +1120,12 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 提交只读事务。
+     * Commit read-only transaction.
+     *
+     * @param tx transaction context
+     * @return the operation result
      */
-    private TransactionCommitResult commitReadOnly(Transaction tx) {
+    private TransactionCommitResult commitReadOnly(final Transaction tx) {
         if (publicationLedger != null || segmentLedger != null) {
             ensureLeaseValid(tx);
             tx.status(TxStatus.COMMITTED);
@@ -798,7 +1141,7 @@ public final class TransactionManager implements AutoCloseable {
             tx.decisionStarted(true);
             try {
                 metadataStore.markCommitted(tx.txId(), timestamp);
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 throw unknownCommit(tx, ex);
             }
             return timestamp;
@@ -807,8 +1150,13 @@ public final class TransactionManager implements AutoCloseable {
         return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
     }
 
-    /** 全部写事务先落参与者意向，再用持久分段槽提交中心决议并等待发布。 */
-    private TransactionCommitResult commitSegmentWrite(Transaction tx) {
+    /**
+     * Write transaction first, participant intent, then durable slot commit Center decision and wait for release.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     */
+    private TransactionCommitResult commitSegmentWrite(final Transaction tx) {
         registerWriteParticipants(tx);
         prewriteBufferedMutationsStage(tx);
         boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
@@ -841,7 +1189,7 @@ public final class TransactionManager implements AutoCloseable {
                 }
             },
                     options.crossShardCommitPolicy().parallelCommit());
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             completeTransaction(tx, false);
             throw unknownCommit(tx, ex);
         }
@@ -849,27 +1197,34 @@ public final class TransactionManager implements AutoCloseable {
         return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.TWO_PHASE_COMMIT);
     }
 
-    /** 中心决议已持久化后并行物化分片与发布前缀，返回前仍等待两者成功。 */
-    private TransactionCommitResult commitSegmentOverlapped(Transaction tx, long commitTs) {
+    /**
+     * Center decision is after durable storage parallel materialization shard with a prefix, and both are still waiting to succeed before returning.
+     *
+     * @param tx transaction context
+     * @param commitTs durable commit timestamp
+     * @return the operation result
+     */
+    private TransactionCommitResult commitSegmentOverlapped(final Transaction tx, final long commitTs) {
         CompletableFuture<Void> participants;
         try {
-            // 发布前版本仍受 commitTs 水位约束；发布后未物化分片由读路径解析已提交意向。
+            // Version is still bound by committeeTs watermark before release; materialization shard has not been corrected by read path after release commit intent.
             participants = CompletableFuture.runAsync(() -> runAcrossParticipants(tx.participants(),
                     participant -> commitParticipantStage(TransactionStage.PRIMARY_PARTICIPANT_COMMIT,
-                            tx, participant, commitTs), true), participantExecutor);
-        } catch (RuntimeException ex) {
+                            tx, participant, commitTs),
+                    true), participantExecutor);
+        } catch (final RuntimeException ex) {
             throw unknownCommit(tx, ex);
         }
         RuntimeException publicationFailure = null;
         try {
             segmentAwaitStage(tx, commitTs);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             publicationFailure = ex;
         }
         Throwable participantFailure = null;
         try {
             participants.join();
-        } catch (CompletionException ex) {
+        } catch (final CompletionException ex) {
             participantFailure = ex.getCause();
         }
         if (publicationFailure != null) {
@@ -884,14 +1239,21 @@ public final class TransactionManager implements AutoCloseable {
                 throw error;
             }
             throw unknownCommit(tx, participantFailure instanceof RuntimeException runtime
-                    ? runtime : new CompletionException(participantFailure));
+                    ? runtime
+                    : new CompletionException(participantFailure));
         }
         completeTransaction(tx, true);
         return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.TWO_PHASE_COMMIT);
     }
 
-    /** 单分片先持久化候选槽，再由本地一次事务直接落版本与参与者终态。 */
-    private TransactionCommitResult commitSegmentSingleShardDirect(Transaction tx, String participant) {
+    /**
+     * Single shard First durable storage candidate slot, then local transaction directly down version and participant terminal state.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @return the operation result
+     */
+    private TransactionCommitResult commitSegmentSingleShardDirect(final Transaction tx, final String participant) {
         registerWriteParticipants(tx);
         ensureLeaseValid(tx);
         PublicationSegmentOwnerRegistry.Assignment slot = segmentReserveStage(tx);
@@ -899,28 +1261,35 @@ public final class TransactionManager implements AutoCloseable {
         segmentClaimLocalStage(tx, slot, participant);
         try {
             directCommitSingleShardParticipantStage(tx, participant, slot.commitTs());
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             return resolveSegmentDirectOutcome(tx, participant, slot, ex);
         }
-        // directCommit 正常返回意味着本地事务已提交；仅响应未知时再读持久证明。
+        // DirectCommit's normal return means local transaction already commit; read durable only when responding to unknown.
         return finishSegmentDirectCommit(tx, participant, slot,
                 new ParticipantRecord(tx.txId(), tx.startTs(), TxStatus.COMMITTED, slot.commitTs()));
     }
 
-    /** 本地响应未知时先 fencing 分片，再按持久终态补中心提交或中止。 */
-    private TransactionCommitResult resolveSegmentDirectOutcome(Transaction tx, String participant,
-                                                                PublicationSegmentOwnerRegistry.Assignment slot,
-                                                                RuntimeException original) {
+    /**
+     * Local Responds to unknown first by fending shard and then pressing durable terminal state patch centre commit or aborting.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @param slot slot
+     * @param original original
+     * @return the operation result
+     */
+    private TransactionCommitResult resolveSegmentDirectOutcome(final Transaction tx, final String participant,
+                                                                final PublicationSegmentOwnerRegistry.Assignment slot,
+                                                                final RuntimeException original) {
         ParticipantRecord local;
         try {
             withShardPermit(participant, () -> {
                 adapter(participant).abort(tx.txId());
                 return null;
             });
-            local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() ->
-                    new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                            "segmented direct participant lacks durable terminal proof", false, tx.txId()));
-        } catch (RuntimeException ex) {
+            local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() -> new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                    "segmented direct participant lacks durable terminal proof", false, tx.txId()));
+        } catch (final RuntimeException ex) {
             throw unknownCommit(tx, ex);
         }
         if (local.status() == TxStatus.COMMITTED) {
@@ -932,7 +1301,7 @@ public final class TransactionManager implements AutoCloseable {
         }
         try {
             segmentCompleteLocalStage(slot, local, participant, false);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             throw unknownCommit(tx, ex);
         }
         tx.status(TxStatus.ABORTED);
@@ -940,10 +1309,18 @@ public final class TransactionManager implements AutoCloseable {
         throw original;
     }
 
-    /** 真实本地 COMMITTED 证明补齐中心决议并等待全局已发布水位。 */
-    private TransactionCommitResult finishSegmentDirectCommit(Transaction tx, String participant,
-                                                              PublicationSegmentOwnerRegistry.Assignment slot,
-                                                              ParticipantRecord local) {
+    /**
+     * The real local COMMITTED certificate patches the center decision and waits for global already published watermark.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @param slot slot
+     * @param local local
+     * @return the operation result
+     */
+    private TransactionCommitResult finishSegmentDirectCommit(final Transaction tx, final String participant,
+                                                              final PublicationSegmentOwnerRegistry.Assignment slot,
+                                                              final ParticipantRecord local) {
         if (local.status() != TxStatus.COMMITTED || local.startTs() != tx.startTs()
                 || local.commitTs() == null || local.commitTs() != slot.commitTs()) {
             throw unknownCommit(tx, new IllegalStateException(
@@ -957,8 +1334,14 @@ public final class TransactionManager implements AutoCloseable {
                 TransactionCommitMode.SINGLE_SHARD_FAST_PATH);
     }
 
-    /** 只把已由独立后台发布器持久推进的水位作为提交确认边界。 */
-    private void awaitSegmentPublication(Transaction tx, long commitTs) {
+    /**
+     * Only watermark that has been driven by an independent background launcher durable can be identified as commit.
+     *
+     * @param tx transaction context
+     * @param commitTs durable commit timestamp
+     * @throws MvccException if the operation cannot complete
+     */
+    private void awaitSegmentPublication(final Transaction tx, final long commitTs) {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(options.limits().timeoutMillis());
         if (segmentScheduler.publishedWatermark() < commitTs) {
             segmentScheduler.requestPublication();
@@ -976,8 +1359,13 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
-    /** 新协议所有写事务先持久化参与者，再发布中心决议与连续水位。 */
-    private TransactionCommitResult commitLedgerWrite(Transaction tx) {
+    /**
+     * New protocol all transaction scripts start with durable storage participant, then release centre decision and continuous watermark.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     */
+    private TransactionCommitResult commitLedgerWrite(final Transaction tx) {
         registerWriteParticipants(tx);
         prewriteBufferedMutationsStage(tx);
         boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
@@ -1003,7 +1391,7 @@ public final class TransactionManager implements AutoCloseable {
             runAcrossParticipants(tx.participants(), participant -> commitParticipantStage(
                     TransactionStage.PRIMARY_PARTICIPANT_COMMIT, tx, participant, commitTs),
                     options.crossShardCommitPolicy().parallelCommit());
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             completeTransaction(tx, false);
             throw unknownCommit(tx, ex);
         }
@@ -1011,33 +1399,47 @@ public final class TransactionManager implements AutoCloseable {
         return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.TWO_PHASE_COMMIT);
     }
 
-    /** 单分片先留下可恢复的 PENDING 候选，再一次本地事务直接落版本与终态。 */
-    private TransactionCommitResult commitLedgerSingleShardDirect(Transaction tx, String participant) {
+    /**
+     * Single shard leaves a candidate for PENDING that can be recovery and once again local transaction goes directly to version and terminal state.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @return the operation result
+     */
+    private TransactionCommitResult commitLedgerSingleShardDirect(final Transaction tx, final String participant) {
         registerWriteParticipants(tx);
         ensureLeaseValid(tx);
         tx.decisionStarted(true);
         long commitTs = ledgerLocalReserveStage(tx, participant);
         try {
             directCommitSingleShardParticipantStage(tx, participant, commitTs);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             return resolveLedgerDirectOutcome(tx, participant, commitTs, ex);
         }
         return finishLedgerDirectCommit(tx, participant, commitTs);
     }
 
-    /** 本地响应丢失时先 fencing，再按真实终态补中心决议或安全回滚。 */
-    private TransactionCommitResult resolveLedgerDirectOutcome(Transaction tx, String participant,
-                                                               long commitTs, RuntimeException original) {
+    /**
+     * Local Responds to loss by pressing the real terminal state patch centre decision or rollback safe.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @param commitTs durable commit timestamp
+     * @param original original
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private TransactionCommitResult resolveLedgerDirectOutcome(final Transaction tx, final String participant,
+                                                               final long commitTs, final RuntimeException original) {
         ParticipantRecord local;
         try {
             withShardPermit(participant, () -> {
                 adapter(participant).abort(tx.txId());
                 return null;
             });
-            local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() ->
-                    new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                            "direct participant has no durable terminal record", false, tx.txId()));
-        } catch (RuntimeException ex) {
+            local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() -> new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                    "direct participant has no durable terminal record", false, tx.txId()));
+        } catch (final RuntimeException ex) {
             throw unknownCommit(tx, ex);
         }
         if (local.status() == TxStatus.COMMITTED) {
@@ -1053,10 +1455,10 @@ public final class TransactionManager implements AutoCloseable {
             publicationLedger.decideAbortedAfterFencing(tx.txId(), commitTs);
             try {
                 ledgerPublishStage();
-            } catch (RuntimeException publicationFailure) {
+            } catch (final RuntimeException publicationFailure) {
                 backgroundFailures.increment();
             }
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             throw unknownCommit(tx, ex);
         }
         tx.status(TxStatus.ABORTED);
@@ -1064,11 +1466,17 @@ public final class TransactionManager implements AutoCloseable {
         throw original;
     }
 
-    /** 核对本地提交证明后补齐中心和账本决议，再等待全局发布。 */
-    private TransactionCommitResult finishLedgerDirectCommit(Transaction tx, String participant, long commitTs) {
-        ParticipantRecord local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() ->
-                new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                        "direct participant committed without durable local proof", false, tx.txId()));
+    /**
+     * Reconcile local commit proof to complete the centre and book decision and wait until global is released.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @param commitTs durable commit timestamp
+     * @return the operation result
+     */
+    private TransactionCommitResult finishLedgerDirectCommit(final Transaction tx, final String participant, final long commitTs) {
+        ParticipantRecord local = adapter(participant).participantRecord(tx.txId()).orElseThrow(() -> new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                "direct participant committed without durable local proof", false, tx.txId()));
         if (local.status() != TxStatus.COMMITTED || local.startTs() != tx.startTs()
                 || local.commitTs() == null || local.commitTs() != commitTs) {
             throw unknownCommit(tx, new IllegalStateException("direct participant proof differs from reserved commit"));
@@ -1084,9 +1492,14 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 提交单分片事务。
+     * Commit single shard transaction.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private TransactionCommitResult commitSingleShard(Transaction tx, String participant) {
+    private TransactionCommitResult commitSingleShard(final Transaction tx, final String participant) {
         registerWriteParticipants(tx);
         boolean atomicDirect = options.bufferWrites() && adapter(participant).supportsAtomicDirectCommit();
         if (!atomicDirect && !adapter(participant).supportsCommittedIntentResolution()) {
@@ -1102,7 +1515,7 @@ public final class TransactionManager implements AutoCloseable {
             tx.decisionStarted(true);
             try {
                 if (atomicDirect) {
-                    // 本地版本和事务记录先原子提交，中心决议丢失时由参与者记录恢复。
+                    // Local version and transaction records first atomic commit and centre decision records recovery when lost.
                     metadataStore.markLocalCommitPending(tx.txId(), timestamp);
                     directCommitSingleShardParticipantStage(tx, participant, timestamp);
                 }
@@ -1113,7 +1526,7 @@ public final class TransactionManager implements AutoCloseable {
                             tx, participant, timestamp);
                 }
                 return timestamp;
-            } catch (MvccException ex) {
+            } catch (final MvccException ex) {
                 if (atomicDirect && !tx.status().equals(TxStatus.COMMITTED)
                         && (ex.errorCode() == ErrorCode.WRITE_CONFLICT || ex.errorCode() == ErrorCode.LOCK_CONFLICT)) {
                     tx.decisionStarted(false);
@@ -1122,7 +1535,7 @@ public final class TransactionManager implements AutoCloseable {
                     throw ex;
                 }
                 throw unknownCommit(tx, ex);
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 throw unknownCommit(tx, ex);
             }
         });
@@ -1131,9 +1544,13 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 提交跨分片事务。
+     * Commit cross-shard transaction.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private TransactionCommitResult commitCrossShard(Transaction tx) {
+    private TransactionCommitResult commitCrossShard(final Transaction tx) {
         for (String participant : tx.participants()) {
             if (!adapter(participant).supportsCommittedIntentResolution()) {
                 throw new MvccException(ErrorCode.ILLEGAL_STATE,
@@ -1148,7 +1565,7 @@ public final class TransactionManager implements AutoCloseable {
             prewriteBufferedMutations(tx);
         }
 
-        // 多分片事务先持久化可恢复状态，再提交各参与分片，保证异常后可以恢复。
+        // Multi shard transaction first durable storage but recovery states, then commit participates in shard each to ensure recovery after the anomaly.
         boolean explicitPrepareRequired = requiresExplicitPreparePhase(tx.participants());
         if (explicitPrepareRequired) {
             persistPreparingMetadata(tx);
@@ -1160,11 +1577,11 @@ public final class TransactionManager implements AutoCloseable {
         try {
             if (options.crossShardCommitPolicy().asyncCommit()) {
                 scheduleAsyncParticipantCommit(tx, commitTs, tx.participants());
-                // 元数据决议已持久化；租约由异步物化线程在完成标记之后释放。
+                // Metadata decision has been durable storage; lease is released by aniso materialization thread after the markup has been completed.
                 releaseLocalTransaction(tx);
                 return new TransactionCommitResult(tx.txId(), commitTs, TransactionCommitMode.ASYNC_PRIMARY_COMMIT);
             }
-            // 同步提交模式先提交主参与者，再提交其余参与者，保留状态未知异常边界。
+            // Sync commit mode first commit main participant and then commit with the rest of participant, keeping an unknown abnormal border.
             commitParticipantStage(TransactionStage.PRIMARY_PARTICIPANT_COMMIT, tx, primaryParticipant, commitTs);
             Set<String> secondaryParticipants = secondaryParticipants(tx.participants(), primaryParticipant);
             runAcrossParticipants(
@@ -1173,11 +1590,9 @@ public final class TransactionManager implements AutoCloseable {
                             TransactionStage.SECONDARY_PARTICIPANT_COMMIT,
                             tx,
                             participant,
-                            commitTs
-                    ),
-                    options.crossShardCommitPolicy().parallelCommit()
-            );
-        } catch (RuntimeException ex) {
+                            commitTs),
+                    options.crossShardCommitPolicy().parallelCommit());
+        } catch (final RuntimeException ex) {
             completeTransaction(tx, false);
             throw unknownCommit(tx, ex);
         }
@@ -1188,12 +1603,17 @@ public final class TransactionManager implements AutoCloseable {
                 commitTs,
                 options.crossShardCommitPolicy().asyncCommit()
                         ? TransactionCommitMode.ASYNC_PRIMARY_COMMIT
-                        : TransactionCommitMode.TWO_PHASE_COMMIT
-        );
+                        : TransactionCommitMode.TWO_PHASE_COMMIT);
     }
 
-    /** 优先在同一 MySQL 权威内合并发号和决议；其余实现保留原协议。 */
-    private long publishCrossShardDecision(Transaction tx, boolean explicitPrepareRequired) {
+    /**
+     * Priority is given to merging concurrent and decision in the same MySQL authority; the rest achieves retention of the original agreement.
+     *
+     * @param tx transaction context
+     * @param explicitPrepareRequired explicit prepare required
+     * @return the operation result
+     */
+    private long publishCrossShardDecision(final Transaction tx, final boolean explicitPrepareRequired) {
         if (metadataStore instanceof FastTransactionCommit fastCommit) {
             Supplier<OptionalLong> fastAction = () -> fastCommit.tryCommit(timestampOracle, tx.txId(),
                     tx.participants(), () -> {
@@ -1213,14 +1633,14 @@ public final class TransactionManager implements AutoCloseable {
                 persistCommittedMetadataStage(tx, timestamp, explicitPrepareRequired);
                 tx.status(TxStatus.COMMITTED);
                 return timestamp;
-            } catch (RuntimeException ex) {
+            } catch (final RuntimeException ex) {
                 throw unknownCommit(tx, ex);
             }
         });
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
      */
     @Override
     public void close() {
@@ -1249,10 +1669,10 @@ public final class TransactionManager implements AutoCloseable {
             segmentCommitBatcher.close(Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())));
         }
         shutdownExecutor(asyncCommitExecutor, deadline);
-        // async commit 可能继续提交 intent cleanup 任务，必须先 drain async 再关闭 cleanup。
+        // Async committee may continue the commit inent cleanup mission, which must first draw async before turning off the cleanup.
         shutdownExecutor(intentCleanupExecutor, deadline);
         shutdownExecutor(participantExecutor, deadline);
-        // 未完成的回滚保留持久化租约及恢复记录，仅释放关闭管理器的本地写缓冲。
+        // Unfinished rollback keeps durable storage lease and recovery records, only local writing buffer releases the closed manager.
         activeTransactions.forEach((txId, tx) -> {
             if (activeTransactions.remove(txId, tx)) {
                 transactionPermits.release();
@@ -1267,9 +1687,13 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 调度异步参与者提交任务。
+     * Schedule a step participant commit task.
+     *
+     * @param tx transaction context
+     * @param commitTs durable commit timestamp
+     * @param participants participants
      */
-    private void scheduleAsyncParticipantCommit(Transaction tx, long commitTs, Set<String> participants) {
+    private void scheduleAsyncParticipantCommit(final Transaction tx, final long commitTs, final Set<String> participants) {
         if (participants.isEmpty()) {
             return;
         }
@@ -1279,7 +1703,7 @@ public final class TransactionManager implements AutoCloseable {
             for (String participant : stableParticipants) {
                 try {
                     commitParticipantStage(TransactionStage.ASYNC_PARTICIPANT_COMMIT, tx, participant, commitTs);
-                } catch (RuntimeException ex) {
+                } catch (final RuntimeException ex) {
                     backgroundFailures.increment();
                     succeeded = false;
                 }
@@ -1288,8 +1712,13 @@ public final class TransactionManager implements AutoCloseable {
         });
     }
 
-    /** 异步物化结束后记录完成结果并释放快照；失败决议仍由恢复任务补齐。 */
-    private void finishAsyncCommit(Transaction tx, boolean finalized) {
+    /**
+     * After the step materialization, record completion and release snapshot; failed decision is still completed by an recovery task.
+     *
+     * @param tx transaction context
+     * @param finalized finalized
+     */
+    private void finishAsyncCommit(final Transaction tx, final boolean finalized) {
         try {
             if (finalized && tx.metadataPersisted() && !options.deferIntentCleanup()) {
                 metadataStore.markFinalized(tx.txId());
@@ -1301,15 +1730,17 @@ public final class TransactionManager implements AutoCloseable {
             } else {
                 publicationLedger.releaseSnapshot(tx.txId());
             }
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             backgroundFailures.increment();
         }
     }
 
     /**
-     * 持久化跨分片事务准备中元数据。
+     * Durable storage cross-shard transaction Readys medium metadata.
+     *
+     * @param tx transaction context
      */
-    private void persistPreparingMetadata(Transaction tx) {
+    private void persistPreparingMetadata(final Transaction tx) {
         if (tx.metadataPersisted()) {
             metadataStore.persistPreparing(tx.txId(), tx.participants());
         } else if (options.lazyBeginMetadata()) {
@@ -1322,9 +1753,13 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 持久化跨分片事务已提交元数据。
+     * Durable storage cross-shard transaction has commit metadata.
+     *
+     * @param tx transaction context
+     * @param commitTs durable commit timestamp
+     * @param explicitPrepareRequired explicit prepare required
      */
-    private void persistCommittedMetadata(Transaction tx, long commitTs, boolean explicitPrepareRequired) {
+    private void persistCommittedMetadata(final Transaction tx, final long commitTs, final boolean explicitPrepareRequired) {
         if (explicitPrepareRequired) {
             metadataStore.persistCommitted(tx.txId(), commitTs);
         } else if (tx.metadataPersisted()) {
@@ -1339,9 +1774,12 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 选择跨分片事务的主参与者。
+     * Select the main cross-shard transaction participant.
+     *
+     * @param participants participants
+     * @return the operation result
      */
-    private String primaryParticipant(Set<String> participants) {
+    private String primaryParticipant(final Set<String> participants) {
         return participants.stream()
                 .sorted()
                 .findFirst()
@@ -1349,18 +1787,24 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 计算除主参与者之外的从参与者集合。
+     * Calculates a collection from participant other than the main participant.
+     *
+     * @param participants participants
+     * @param primaryParticipant primary participant
+     * @return the operation result
      */
-    private Set<String> secondaryParticipants(Set<String> participants, String primaryParticipant) {
+    private Set<String> secondaryParticipants(final Set<String> participants, final String primaryParticipant) {
         return participants.stream()
                 .filter(participant -> !participant.equals(primaryParticipant))
                 .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
     }
 
     /**
-     * 回滚事务。
+     * Rollback transaction.
+     *
+     * @param tx transaction context
      */
-    public void rollback(Transaction tx) {
+    public void rollback(final Transaction tx) {
         ensureOwned(tx);
         if (segmentLedger != null) {
             rollbackSegment(tx);
@@ -1381,8 +1825,12 @@ public final class TransactionManager implements AutoCloseable {
         releaseTransaction(tx);
     }
 
-    /** 分段决议已开始但缺少终态槽时保持结果未知，避免盲目覆盖在途提交。 */
-    private void rollbackSegment(Transaction tx) {
+    /**
+     * Division decision maintains the unknown outcome when it has started but is missing the terminal state slot, avoiding blind coverage of the commit in transit.
+     *
+     * @param tx transaction context
+     */
+    private void rollbackSegment(final Transaction tx) {
         PublicationEntry entry = segmentLedger.findByTxId(tx.txId()).orElse(null);
         if (tx.status() == TxStatus.COMMITTED
                 || entry != null && entry.status() == PublicationEntryStatus.COMMITTED) {
@@ -1394,8 +1842,7 @@ public final class TransactionManager implements AutoCloseable {
             throw unknownCommit(tx, new IllegalStateException("segmented decision has no durable terminal identity"));
         }
         if (entry != null && entry.status() == PublicationEntryStatus.PENDING) {
-            TxRecord current = metadataStore.get(tx.txId()).orElseThrow(() ->
-                    unknownCommit(tx, new IllegalStateException("claimed segment slot has no metadata")));
+            TxRecord current = metadataStore.get(tx.txId()).orElseThrow(() -> unknownCommit(tx, new IllegalStateException("claimed segment slot has no metadata")));
             if (current.commitTs() != null) {
                 throw unknownCommit(tx, new IllegalStateException(
                         "segmented local candidate requires durable participant proof"));
@@ -1404,8 +1851,7 @@ public final class TransactionManager implements AutoCloseable {
         if (tx.metadataPersisted()) {
             TxRecord decided = metadataStore.markAborted(tx.txId());
             if (decided.status() == TxStatus.COMMITTED) {
-                PublicationEntry committed = segmentLedger.findByTxId(tx.txId()).orElseThrow(() ->
-                        unknownCommit(tx, new IllegalStateException("committed metadata lost segmented slot")));
+                PublicationEntry committed = segmentLedger.findByTxId(tx.txId()).orElseThrow(() -> unknownCommit(tx, new IllegalStateException("committed metadata lost segmented slot")));
                 if (committed.status() != PublicationEntryStatus.COMMITTED) {
                     throw unknownCommit(tx, new IllegalStateException("segmented rollback raced different terminal slot"));
                 }
@@ -1423,8 +1869,12 @@ public final class TransactionManager implements AutoCloseable {
         releaseTransaction(tx);
     }
 
-    /** 新协议先确认中心终态，再幂等 fencing 参与者并解除账本水位阻塞。 */
-    private void rollbackLedger(Transaction tx) {
+    /**
+     * The new protocol first confirms the centre terminal state, then idempotent fincing participant and unblocks the account book watermark.
+     *
+     * @param tx transaction context
+     */
+    private void rollbackLedger(final Transaction tx) {
         PublicationEntry entry = publicationLedger.findByTxId(tx.txId()).orElse(null);
         if (tx.status() == TxStatus.COMMITTED || entry != null && entry.status() == PublicationEntryStatus.COMMITTED) {
             tx.status(TxStatus.COMMITTED);
@@ -1432,8 +1882,7 @@ public final class TransactionManager implements AutoCloseable {
             return;
         }
         if (entry != null && entry.status() == PublicationEntryStatus.PENDING) {
-            TxRecord current = metadataStore.get(tx.txId()).orElseThrow(() ->
-                    unknownCommit(tx, new IllegalStateException("pending publication has no metadata")));
+            TxRecord current = metadataStore.get(tx.txId()).orElseThrow(() -> unknownCommit(tx, new IllegalStateException("pending publication has no metadata")));
             if (current.commitTs() != null) {
                 throw unknownCommit(tx, new IllegalStateException("local pending publication needs participant proof"));
             }
@@ -1452,7 +1901,7 @@ public final class TransactionManager implements AutoCloseable {
                 return null;
             }), options.crossShardCommitPolicy().parallelRollback());
         }
-        // 预留提交的响应可能丢失；中心 ABORTED 行锁会等待在途预留后，再读取真实账本。
+        // The response to preset commit may be lost; the central ABORTED line lock will wait until it is set aside and then read the true book.
         PublicationEntry afterFence = publicationLedger.findByTxId(tx.txId()).orElse(null);
         if (afterFence != null && afterFence.status() == PublicationEntryStatus.PENDING) {
             publicationLedger.decideAbortedAfterFencing(tx.txId(), afterFence.commitTs());
@@ -1466,22 +1915,29 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 读取事务元数据记录。
+     * Read transaction metadata records.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
      */
-    public Optional<TxRecord> getRecord(long txId) {
+    public Optional<TxRecord> getRecord(final long txId) {
         return metadataStore.get(txId);
     }
 
     /**
-     * 向事务写集合追加一次变更。
+     * Add a change to transaction write set.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param mutation mutation
      */
-    private void write(Transaction tx, String shardId, Mutation mutation) {
+    private void write(final Transaction tx, final String shardId, Mutation mutation) {
         ensureActive(tx);
         ensureLeaseValid(tx);
         adapter(shardId);
         com.flyingzc.azir.storage.Utf8KeyOrder.encode(mutation.key());
         tx.reserveWrite(shardId, mutation, options.limits().maxWriteKeys(), options.limits().maxWriteBytes());
-        // 复制值避免调用方修改数组影响已计费、已预写或后台提交的写集合。
+        // Copy value avoids the caller changing arrays to influence write set already billed, prewrite or background commit.
         mutation = new Mutation(mutation.key(), mutation.type(), mutation.value() == null ? null : mutation.value().clone());
         if (options.bufferWrites()) {
             tx.bufferMutation(shardId, mutation);
@@ -1492,16 +1948,22 @@ public final class TransactionManager implements AutoCloseable {
         try {
             registerWriteParticipants(tx);
             prewriteEagerMutationStage(tx, shardId, mutation, adapter);
-        } catch (RuntimeException | Error ex) {
+        } catch (final RuntimeException | Error ex) {
             tx.markRollbackOnly();
             throw ex;
         }
     }
 
     /**
-     * 带冲突等待策略地预写入非缓冲单条变更。
+     * Prewrite with conflict awaiting strategy entry of non- buffer single changes.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param mutation mutation
+     * @param adapter adapter
+     * @throws MvccException if the operation cannot complete
      */
-    private void prewriteEagerMutation(Transaction tx, String shardId, Mutation mutation, StorageAdapter adapter) {
+    private void prewriteEagerMutation(final Transaction tx, final String shardId, final Mutation mutation, final StorageAdapter adapter) {
         LockWaitPolicy lockWaitPolicy = options.lockWaitPolicy();
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lockWaitPolicy.lockWaitTimeoutMs());
         int attempt = 0;
@@ -1513,7 +1975,7 @@ public final class TransactionManager implements AutoCloseable {
                     return null;
                 });
                 return;
-            } catch (MvccException ex) {
+            } catch (final MvccException ex) {
                 if (!shouldWaitOnConflict(ex, lockWaitPolicy)) {
                     throw ex;
                 }
@@ -1523,22 +1985,23 @@ public final class TransactionManager implements AutoCloseable {
                             "lock wait timeout on key " + mutation.key() + ", tx=" + tx.txId() + ", shard=" + shardId,
                             true,
                             tx.txId(),
-                            ex
-                    );
+                            ex);
                 }
                 long delayMillis = Math.min(
                         lockWaitPolicy.nextDelayMillis(attempt++),
-                        remainingMillis(deadlineNanos)
-                );
+                        remainingMillis(deadlineNanos));
                 sleepQuietly(delayMillis);
             }
         }
     }
 
     /**
-     * 确认事务仍处于可操作状态。
+     * Require the transaction to remain usable.
+     *
+     * @param tx transaction context
+     * @throws MvccException if the operation cannot complete
      */
-    private void ensureActive(Transaction tx) {
+    private void ensureActive(final Transaction tx) {
         ensureOpen();
         ensureOwned(tx);
         if (activeTransactions.get(tx.txId()) != tx) {
@@ -1550,37 +2013,48 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 计算事务读取使用的快照时间戳。
+     * Calculates the transaction -reading snapshot timestamp.
+     *
+     * @param tx transaction context
+     * @return the operation result
      */
-    private long readTs(Transaction tx) {
+    private long readTs(final Transaction tx) {
         return tx.isolationLevel() == IsolationLevel.REPEATABLE_READ
                 ? tx.startTs()
                 : segmentLedger != null ? segmentLedger.currentPublished()
-                : publicationLedger == null ? nextTimestamp(TransactionStage.READ_TSO)
-                        : publicationLedger.currentPublished();
+                        : publicationLedger == null ? nextTimestamp(TransactionStage.READ_TSO)
+                                : publicationLedger.currentPublished();
     }
 
     /**
-     * 校验读取快照尚未被安全点回收。
+     * Validate Read snapshot not yet safe point collection.
+     *
+     * @param readTs snapshot read timestamp
+     * @param txId transaction identifier
+     * @throws MvccException if the operation cannot complete
      */
-    private void ensureSnapshotVisible(long readTs, long txId) {
+    private void ensureSnapshotVisible(final long readTs, final long txId) {
         long safePoint = segmentLedger != null ? segmentLedger.currentSafePoint()
                 : publicationLedger == null
-                ? safePointStore.currentSafePoint() : publicationLedger.currentSafePoint();
+                        ? safePointStore.currentSafePoint()
+                        : publicationLedger.currentSafePoint();
         if (readTs < safePoint) {
             throw new MvccException(
                     ErrorCode.SNAPSHOT_TOO_OLD,
                     "snapshot too old, readTs=" + readTs + ", safePoint=" + safePoint,
                     false,
-                    txId
-            );
+                    txId);
         }
     }
 
     /**
-     * 获取指定分片的存储适配器。
+     * Gets the specified shard storage adapter.
+     *
+     * @param shardId logical shard identifier
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private StorageAdapter adapter(String shardId) {
+    private StorageAdapter adapter(final String shardId) {
         StorageAdapter adapter = adapters.get(shardId);
         if (adapter == null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "unknown shard: " + shardId, false, null);
@@ -1589,9 +2063,12 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 判断参与分片是否需要显式 prepare 阶段。
+     * Determine whether participants require an explicit prepare phase.
+     *
+     * @param participants participants
+     * @return the operation result
      */
-    private boolean requiresExplicitPreparePhase(Set<String> participants) {
+    private boolean requiresExplicitPreparePhase(final Set<String> participants) {
         for (String participant : participants) {
             if (adapter(participant).requiresExplicitPreparePhase()) {
                 return true;
@@ -1601,17 +2078,24 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 判断遇到冲突后是否需要等待重试。
+     * Determines whether to wait for retry in post-conflict situations.
+     *
+     * @param ex ex
+     * @param lockWaitPolicy lock wait policy
+     * @return the operation result
      */
-    private boolean shouldWaitOnConflict(MvccException ex, LockWaitPolicy lockWaitPolicy) {
+    private boolean shouldWaitOnConflict(final MvccException ex, final LockWaitPolicy lockWaitPolicy) {
         return lockWaitPolicy.conflictMode() == ConflictMode.WAIT
                 && TransientStorageConflictDetector.isTransientConflict(ex);
     }
 
     /**
-     * 计算距离截止时间的剩余毫秒数。
+     * Calculates the number of milliseconds remaining from the deadline.
+     *
+     * @param deadlineNanos deadline nanos
+     * @return the operation result
      */
-    private long remainingMillis(long deadlineNanos) {
+    private long remainingMillis(final long deadlineNanos) {
         long remainingNanos = deadlineNanos - System.nanoTime();
         if (remainingNanos <= 0L) {
             return 0L;
@@ -1620,19 +2104,26 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 安全回滚事务并吞掉回滚异常。
+     * Rollback transaction safe and swallow rollback abnormal.
+     *
+     * @param tx transaction context
      */
-    private void safeRollback(Transaction tx) {
+    private void safeRollback(final Transaction tx) {
         try {
             rollback(tx);
-        } catch (RuntimeException ignored) {
+        } catch (final RuntimeException ignored) {
         }
     }
 
     /**
-     * 在多个参与分片上执行操作。
+     * Execute the operation across participating shards.
+     *
+     * @param participants participants
+     * @param operation operation
+     * @param parallel parallel
+     * @throws CompletionException if the operation cannot complete
      */
-    private void runAcrossParticipants(Set<String> participants, Consumer<String> operation, boolean parallel) {
+    private void runAcrossParticipants(final Set<String> participants, final Consumer<String> operation, final boolean parallel) {
         if (!parallel || participants.size() <= 1) {
             for (String participant : participants) {
                 operation.accept(participant);
@@ -1645,8 +2136,8 @@ public final class TransactionManager implements AutoCloseable {
                 .map(participant -> CompletableFuture.runAsync(() -> {
                     try {
                         operation.accept(participant);
-                    } catch (Throwable ex) {
-                        // 并行参与者抛出的 Error 也必须回传给调用方，避免提交路径误判成功。
+                    } catch (final Throwable ex) {
+                        // The parallel participant thrown Error must also be passed back to the caller to avoid miscalculation of the commit path.
                         failures.add(ex);
                         throw ex;
                     }
@@ -1655,7 +2146,7 @@ public final class TransactionManager implements AutoCloseable {
 
         try {
             CompletableFuture.allOf(futures).join();
-        } catch (CompletionException ignored) {
+        } catch (final CompletionException ignored) {
         }
 
         Throwable failure = failures.peek();
@@ -1671,24 +2162,29 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 安静等待指定毫秒数。
+     * Quietly wait for the specified milliseconds.
+     *
+     * @param delayMillis delay millis
+     * @throws MvccException if the operation cannot complete
      */
-    private void sleepQuietly(long delayMillis) {
+    private void sleepQuietly(final long delayMillis) {
         if (delayMillis <= 0L) {
             return;
         }
         try {
             Thread.sleep(delayMillis);
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "interrupted while waiting for retry", true, null, ex);
         }
     }
 
     /**
-     * 将事务缓冲写集合预写入各分片。
+     * Insert transaction buffered write set to prewrite in each shard.
+     *
+     * @param tx transaction context
      */
-    private void prewriteBufferedMutations(Transaction tx) {
+    private void prewriteBufferedMutations(final Transaction tx) {
         if (!options.bufferWrites()) {
             return;
         }
@@ -1700,14 +2196,18 @@ public final class TransactionManager implements AutoCloseable {
                         prewriteMutations(tx, shardId, mutations);
                     }
                 },
-                options.crossShardCommitPolicy().parallelPrewrite()
-        );
+                options.crossShardCommitPolicy().parallelPrewrite());
     }
 
     /**
-     * 带冲突等待策略地预写入指定分片变更。
+     * Waiting for a conflict with the prewrite to specify an shard change.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param mutations transaction write set
+     * @throws MvccException if the operation cannot complete
      */
-    private void prewriteMutations(Transaction tx, String shardId, List<Mutation> mutations) {
+    private void prewriteMutations(final Transaction tx, final String shardId, final List<Mutation> mutations) {
         LockWaitPolicy lockWaitPolicy = options.lockWaitPolicy();
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lockWaitPolicy.lockWaitTimeoutMs());
         int attempt = 0;
@@ -1719,7 +2219,7 @@ public final class TransactionManager implements AutoCloseable {
                     return null;
                 });
                 return;
-            } catch (MvccException ex) {
+            } catch (final MvccException ex) {
                 if (!shouldWaitOnConflict(ex, lockWaitPolicy)) {
                     throw ex;
                 }
@@ -1729,10 +2229,9 @@ public final class TransactionManager implements AutoCloseable {
                             "lock wait timeout on shard " + shardId + ", tx=" + tx.txId(),
                             true,
                             tx.txId(),
-                            ex
-                    );
+                            ex);
                 }
-                // 等待型锁策略只对瞬时冲突退避重试，避免对永久错误做无意义重试。
+                // The waiting-type lock strategy will only eject retry in an instant conflict and avoid making meaningless retry for a permanent error.
                 long delayMillis = Math.min(lockWaitPolicy.nextDelayMillis(attempt++), remainingMillis(deadlineNanos));
                 sleepQuietly(delayMillis);
             }
@@ -1740,9 +2239,14 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 从事务本地写缓冲读取最新变更。
+     * Read the latest changes from transaction local Write buffer.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param key business key
+     * @return the operation result
      */
-    private Optional<byte[]> bufferedRead(Transaction tx, String shardId, String key) {
+    private Optional<byte[]> bufferedRead(final Transaction tx, final String shardId, final String key) {
         if (!options.bufferWrites()) {
             return null;
         }
@@ -1756,9 +2260,12 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 判断提交策略是否需要并行执行器。
+     * Determines whether the commit policy needs a parallel implementer.
+     *
+     * @param policy policy
+     * @return the operation result
      */
-    private boolean requiresParallelExecutor(CrossShardCommitPolicy policy) {
+    private boolean requiresParallelExecutor(final CrossShardCommitPolicy policy) {
         return policy.parallelPrewrite()
                 || policy.parallelPrepare()
                 || policy.parallelCommit()
@@ -1767,28 +2274,34 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 关闭并行执行器。
+     * Turn off the parallel implementer.
+     *
+     * @param executor executor
+     * @param deadlineNanos deadline nanos
      */
-    private void shutdownExecutor(ExecutorService executor, long deadlineNanos) {
+    private void shutdownExecutor(final ExecutorService executor, final long deadlineNanos) {
         if (executor == null) {
             return;
         }
         executor.shutdown();
         try {
             if (!executor.awaitTermination(Math.max(0L, deadlineNanos - System.nanoTime()), TimeUnit.NANOSECONDS)) {
-                // 未完成物化由持久化决议恢复，不能阻止关闭无限等待。
+                // Unfinished materialization by durable storage decision recovery cannot prevent the closing of an infinite waiting period.
                 executor.shutdownNow();
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             executor.shutdownNow();
         }
     }
 
     /**
-     * 创建带名称前缀的后台线程工厂。
+     * Creates a background linear factory with a prefix name.
+     *
+     * @param prefix prefix
+     * @return the operation result
      */
-    private ThreadFactory namedFactory(String prefix) {
+    private ThreadFactory namedFactory(final String prefix) {
         return Thread.ofPlatform()
                 .daemon(true)
                 .name(prefix, 0)
@@ -1796,9 +2309,13 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 提交指定参与分片。
+     * Commit specifies participation in shard.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param commitTs durable commit timestamp
      */
-    private void commitParticipant(Transaction tx, String shardId, long commitTs) {
+    private void commitParticipant(final Transaction tx, final String shardId, final long commitTs) {
         List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
         if (options.bufferWrites() && !bufferedMutations.isEmpty()) {
             boolean cleanupIntents = !options.deferIntentCleanup() || asyncCommitExecutor == null;
@@ -1810,7 +2327,7 @@ public final class TransactionManager implements AutoCloseable {
                 submitOrRun(intentCleanupExecutor, () -> {
                     try {
                         cleanupIntentsStage(tx, shardId);
-                    } catch (RuntimeException ex) {
+                    } catch (final RuntimeException ex) {
                         backgroundFailures.increment();
                     }
                 });
@@ -1824,9 +2341,13 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 直接提交单分片参与者。
+     * Direct commit single shard participant.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param commitTs durable commit timestamp
      */
-    private void directCommitSingleShardParticipant(Transaction tx, String shardId, long commitTs) {
+    private void directCommitSingleShardParticipant(final Transaction tx, final String shardId, final long commitTs) {
         List<Mutation> bufferedMutations = tx.bufferedMutations(shardId);
         if (options.bufferWrites() && !bufferedMutations.isEmpty()) {
             withShardPermit(shardId, () -> {
@@ -1838,37 +2359,65 @@ public final class TransactionManager implements AutoCloseable {
         commitParticipant(tx, shardId, commitTs);
     }
 
-    /** 返回调用方可导出到监控系统的有界执行统计。 */
+    /**
+     * Returns the bounded execution statistics that you can call to export to the monitoring system.
+     *
+     * @return the operation result
+     */
     public TransactionRuntimeStats runtimeStats() {
         return new TransactionRuntimeStats(activeTransactions.size(), queuedTasks(asyncCommitExecutor),
                 queuedTasks(intentCleanupExecutor), synchronousFallbacks.sum(), backgroundFailures.sum());
     }
 
-    /** 创建具备固定线程数和有界等待队列的后台执行器。 */
-    private ThreadPoolExecutor boundedExecutor(String prefix) {
+    /**
+     * Creates an background implementer with fixed threads and bounded waiting queues.
+     *
+     * @param prefix prefix
+     * @return the operation result
+     */
+    private ThreadPoolExecutor boundedExecutor(final String prefix) {
         int workers = options.crossShardCommitPolicy().asyncCommitWorkers();
         return new ThreadPoolExecutor(workers, workers, 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(options.limits().asyncQueueCapacity()), namedFactory(prefix),
                 new ThreadPoolExecutor.AbortPolicy());
     }
 
-    /** 队列满或正在关闭时由当前线程完成已决议工作，不丢弃补提交。 */
-    private void submitOrRun(ExecutorService executor, Runnable action) {
+    /**
+     * Decision jobs are completed by the current line when queue is full or closing, without discarding commit.
+     *
+     * @param executor executor
+     * @param action action
+     */
+    private void submitOrRun(final ExecutorService executor, final Runnable action) {
         try {
             executor.execute(action);
-        } catch (RejectedExecutionException ex) {
+        } catch (final RejectedExecutionException ex) {
             synchronousFallbacks.increment();
             action.run();
         }
     }
 
-    /** 返回后台执行器等待队列长度。 */
-    private int queuedTasks(ExecutorService executor) {
+    /**
+     * Returns the background implementer waiting for queue length.
+     *
+     * @param executor executor
+     * @return the operation result
+     */
+    private int queuedTasks(final ExecutorService executor) {
         return executor instanceof ThreadPoolExecutor pool ? pool.getQueue().size() : 0;
     }
 
-    /** 限制每个分片的在途操作，等待预算耗尽时明确失败。 */
-    private <T> T withShardPermit(String shardId, Supplier<T> action) {
+    /**
+     * Limits the in-transit operation of each shard to an explicit failure when budget is exhausted.
+     *
+     * @param <T> value type
+     * @param shardId logical shard identifier
+     * @param action action
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    private <T> T withShardPermit(final String shardId, final Supplier<T> action) {
         Semaphore permits = shardPermits.get(shardId);
         if (permits == null) {
             adapter(shardId);
@@ -1882,7 +2431,7 @@ public final class TransactionManager implements AutoCloseable {
                         true, null);
             }
             return action.get();
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE, "interrupted while waiting for shard budget",
                     false, null, ex);
@@ -1893,12 +2442,17 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
-    /** 在首个持久化写入之前登记完整参与者，保证进程崩溃后可以定位所有 intent。 */
-    private void registerWriteParticipants(Transaction tx) {
+    /**
+     * Register full participant before the first durable storage writing to ensure that all inents can be located after the process crashes.
+     *
+     * @param tx transaction context
+     * @throws MvccException if the operation cannot complete
+     */
+    private void registerWriteParticipants(final Transaction tx) {
         ensureLeaseValid(tx);
         TxRecord record;
         if (!tx.metadataPersisted()) {
-            // 租约先于此记录持久化；预写仍在登记完成后执行。
+            // Lease precedes this record durable storage; prewrite is still being executed after registration has been completed.
             if (coordinatorRegistry != null && tx.txId() < 0) {
                 record = coordinatorRegistry.promoteAndRegister(tx, tx.participants());
             } else {
@@ -1918,8 +2472,14 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
-    /** 校验事务与语句归属，保持 RR 和跨分片 SQL 的固定快照。 */
-    private void validateStatement(Transaction tx, StatementReadSnapshot snapshot) {
+    /**
+     * Validate transaction with statement ownership, keep fixed snapshot for RR and cross-shard SQL.
+     *
+     * @param tx transaction context
+     * @param snapshot snapshot
+     * @throws MvccException if the operation cannot complete
+     */
+    private void validateStatement(final Transaction tx, final StatementReadSnapshot snapshot) {
         ensureActive(tx);
         ensureLeaseValid(tx);
         Objects.requireNonNull(snapshot, "snapshot");
@@ -1931,8 +2491,13 @@ public final class TransactionManager implements AutoCloseable {
         ensureSnapshotVisible(snapshot.readTs(), tx.txId());
     }
 
-    /** 拒绝租约过期的事务；查询完成后也必须检查，避免返回过期 GC 期间读取的结果。 */
-    private void ensureLeaseValid(Transaction tx) {
+    /**
+     * Reject lease expired transaction; once the query is completed, it must also be checked to avoid returning the result read during the expired GC.
+     *
+     * @param tx transaction context
+     * @throws MvccException if the operation cannot complete
+     */
+    private void ensureLeaseValid(final Transaction tx) {
         if (segmentLedger != null) {
             OptionalLong expiry = segmentLedger.snapshotExpiry(tx.txId());
             if (expiry.isEmpty() || expiry.getAsLong() != tx.deadlineMillis()
@@ -1959,22 +2524,33 @@ public final class TransactionManager implements AutoCloseable {
         }
     }
 
-    /** 管理器关闭后拒绝接收新事务及新业务操作。 */
+    /**
+     * The manager refuses to accept new transaction and new operations after closing.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     private void ensureOpen() {
         if (closed.get()) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction manager closed", false, null);
         }
     }
 
-    /** 包括回滚在内的事务操作都必须来自创建该事务的管理器。 */
-    private void ensureOwned(Transaction tx) {
+    /**
+     * Transaction operations, including rollback, must come from the manager that created this transaction.
+     *
+     * @param tx transaction context
+     * @throws MvccException if the operation cannot complete
+     */
+    private void ensureOwned(final Transaction tx) {
         Objects.requireNonNull(tx, "tx");
         if (!tx.ownedBy(transactionOwner)) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction belongs to another manager", false, tx.txId());
         }
     }
 
-    /** 释放到期事务的本地名额，持久化租约及事务由恢复任务处理。 */
+    /**
+     * Release local slots, durable storage lease and transaction due transaction, processed by the recovery task.
+     */
     private void expireLocalTransactions() {
         long now = metadataStore.currentTimeMillis();
         activeTransactions.forEach((txId, tx) -> {
@@ -1987,8 +2563,13 @@ public final class TransactionManager implements AutoCloseable {
         });
     }
 
-    /** 将已决议事务标记为完成，并按物化结果记录恢复进度。 */
-    private void completeTransaction(Transaction tx, boolean finalized) {
+    /**
+     * Mark decision transaction as complete and record recovery progress by materialization.
+     *
+     * @param tx transaction context
+     * @param finalized finalized
+     */
+    private void completeTransaction(final Transaction tx, final boolean finalized) {
         tx.status(TxStatus.COMMITTED);
         if (finalized) {
             markFinalizedQuietly(tx);
@@ -1996,8 +2577,12 @@ public final class TransactionManager implements AutoCloseable {
         releaseTransaction(tx);
     }
 
-    /** 释放快照和本地资源；释放失败时租约到期仍可回收。 */
-    private void releaseTransaction(Transaction tx) {
+    /**
+     * Release snapshot and local resources; lease expires collection when release failed.
+     *
+     * @param tx transaction context
+     */
+    private void releaseTransaction(final Transaction tx) {
         try {
             if (segmentLedger != null) {
                 segmentLedger.releaseSnapshot(tx.txId());
@@ -2007,34 +2592,48 @@ public final class TransactionManager implements AutoCloseable {
                     || !coordinatorRegistry.release(tx.txId())) {
                 publicationLedger.releaseSnapshot(tx.txId());
             }
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             backgroundFailures.increment();
         } finally {
             releaseLocalTransaction(tx);
         }
     }
 
-    /** 只释放本实例的事务名额，不修改持久化租约或决议。 */
-    private void releaseLocalTransaction(Transaction tx) {
+    /**
+     * Only the transaction slot of this instance is released without changes to durable storage lease or decision.
+     *
+     * @param tx transaction context
+     */
+    private void releaseLocalTransaction(final Transaction tx) {
         if (activeTransactions.remove(tx.txId(), tx)) {
             transactionPermits.release();
         }
     }
 
-    /** 记录已完成物化；失败时留给恢复重放，不能将成功提交改判为业务失败。 */
-    private void markFinalizedQuietly(Transaction tx) {
+    /**
+     * Record materialization completed; recovery replay left when failed cannot be converted to business failure.
+     *
+     * @param tx transaction context
+     */
+    private void markFinalizedQuietly(final Transaction tx) {
         if (!tx.metadataPersisted() || (options.deferIntentCleanup() && tx.status() == TxStatus.COMMITTED)) {
             return;
         }
         try {
             metadataStore.markFinalized(tx.txId());
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             backgroundFailures.increment();
         }
     }
 
-    /** 构造不可直接重跑业务的提交结果未知异常。 */
-    private MvccException unknownCommit(Transaction tx, RuntimeException cause) {
+    /**
+     * Construct an unknown-commit-outcome exception that forbids blindly rerunning the business transaction.
+     *
+     * @param tx transaction context
+     * @param cause cause
+     * @return the operation result
+     */
+    private MvccException unknownCommit(final Transaction tx, final RuntimeException cause) {
         if (tx.status() != TxStatus.COMMITTED) {
             tx.status(TxStatus.PREPARING);
         }
@@ -2042,21 +2641,37 @@ public final class TransactionManager implements AutoCloseable {
                 "resolve transaction decision before retrying business: " + tx.txId(), false, tx.txId(), cause);
     }
 
-    /** 按 MySQL VARBINARY 使用的 UTF-8 无符号字节顺序比较键。 */
-    private static int compareKeys(String left, String right) {
+    /**
+     * Press the UTF-8 without symbol byte order used by MySQL Varbinary.
+     *
+     * @param left left
+     * @param right right
+     * @return the operation result
+     */
+    private static int compareKeys(final String left, final String right) {
         return com.flyingzc.azir.storage.Utf8KeyOrder.compare(left, right);
     }
 
-    /** 在分片预算内执行已提交 intent 清理。 */
-    private void cleanupParticipantIntents(Transaction tx, String shardId) {
+    /**
+     * Execute commit indent cleanup in shard budget.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     */
+    private void cleanupParticipantIntents(final Transaction tx, final String shardId) {
         withShardPermit(shardId, () -> {
             adapter(shardId).cleanupIntents(tx.txId());
             return null;
         });
     }
 
-    /** 显式准备也使用同一分片并发预算，不能绕过前台流量限制。 */
-    private void prepareParticipant(Transaction tx, String shardId) {
+    /**
+     * Visible preparation also uses the same shard concurrent budget and cannot bypass foreground flow limits.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     */
+    private void prepareParticipant(final Transaction tx, final String shardId) {
         withShardPermit(shardId, () -> {
             ensureLeaseValid(tx);
             adapter(shardId).prepare(tx.txId());
@@ -2064,13 +2679,22 @@ public final class TransactionManager implements AutoCloseable {
         });
     }
 
-    /** 判断当前是否启用事务阶段指标。 */
+    /**
+     * Determines whether the transaction stage indicator is currently enabled.
+     *
+     * @return the operation result
+     */
     private boolean metricsEnabled() {
         return metrics != NoOpTransactionMetrics.INSTANCE;
     }
 
-    /** 默认指标关闭时直接取得分段快照，避免业务入口分配计量包装。 */
-    private BeginReservation segmentBeginStage(IsolationLevel isolationLevel) {
+    /**
+     * The default indicator is closed with a direct access to the snapshot and avoids the business entry allocation of metering packages.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     */
+    private BeginReservation segmentBeginStage(final IsolationLevel isolationLevel) {
         if (!metricsEnabled()) {
             return segmentLedger.begin(isolationLevel, options.limits().timeoutMillis(), false);
         }
@@ -2078,8 +2702,13 @@ public final class TransactionManager implements AutoCloseable {
                 () -> segmentLedger.begin(isolationLevel, options.limits().timeoutMillis(), false));
     }
 
-    /** 默认指标关闭时直接从本地持久分段取得提交槽。 */
-    private PublicationSegmentOwnerRegistry.Assignment segmentReserveStage(Transaction tx) {
+    /**
+     * The commit slot is obtained directly from the local durable segment when the default indicator closes.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     */
+    private PublicationSegmentOwnerRegistry.Assignment segmentReserveStage(final Transaction tx) {
         if (!metricsEnabled()) {
             return segmentOwner.allocate(tx.startTs());
         }
@@ -2087,9 +2716,15 @@ public final class TransactionManager implements AutoCloseable {
                 () -> segmentOwner.allocate(tx.startTs()));
     }
 
-    /** 分别计量单分片物理提交的中心候选认领与终态补齐。 */
-    private void segmentClaimLocalStage(Transaction tx, PublicationSegmentOwnerRegistry.Assignment slot,
-                                        String participant) {
+    /**
+     * Center candidate for shard Physical commit and terminal state complement, respectively.
+     *
+     * @param tx transaction context
+     * @param slot slot
+     * @param participant participant
+     */
+    private void segmentClaimLocalStage(final Transaction tx, final PublicationSegmentOwnerRegistry.Assignment slot,
+                                        final String participant) {
         if (!metricsEnabled()) {
             segmentOwner.claimLocal(slot, tx.txId(), tx.deadlineMillis(), participant);
             return;
@@ -2100,9 +2735,16 @@ public final class TransactionManager implements AutoCloseable {
         });
     }
 
-    /** 成功及异常恢复都记录本地终态证明对应的中心事务耗时。 */
-    private void segmentCompleteLocalStage(PublicationSegmentOwnerRegistry.Assignment slot,
-                                           ParticipantRecord local, String participant, boolean committed) {
+    /**
+     * Success and anomaly recovery records the time-consuming transaction centre for local terminal proof.
+     *
+     * @param slot slot
+     * @param local local
+     * @param participant participant
+     * @param committed committed
+     */
+    private void segmentCompleteLocalStage(final PublicationSegmentOwnerRegistry.Assignment slot,
+                                           final ParticipantRecord local, final String participant, final boolean committed) {
         if (!metricsEnabled()) {
             if (committed) {
                 segmentOwner.completeLocalCommit(slot, local, participant);
@@ -2121,8 +2763,14 @@ public final class TransactionManager implements AutoCloseable {
         });
     }
 
-    /** 默认指标关闭时直接把中心与分段槽决议原子落盘。 */
-    private long segmentDecisionStage(Transaction tx, PublicationSegmentOwnerRegistry.Assignment slot) {
+    /**
+     * When the default indicator is closed, the centre and slot decision atomic will be entered directly.
+     *
+     * @param tx transaction context
+     * @param slot slot
+     * @return the operation result
+     */
+    private long segmentDecisionStage(final Transaction tx, final PublicationSegmentOwnerRegistry.Assignment slot) {
         Supplier<Long> action = segmentCommitBatcher == null
                 ? () -> segmentOwner.decide(slot, tx.txId(), tx.deadlineMillis(), tx.participants())
                 : () -> segmentCommitBatcher.commit(slot, tx.txId(), tx.deadlineMillis(), tx.participants());
@@ -2132,9 +2780,15 @@ public final class TransactionManager implements AutoCloseable {
         return recordMeasuredStage(TransactionStage.SEGMENT_DECISION, action);
     }
 
-    /** 单槽中心决议成功后把不可伪造的已提交凭据传给同步物化阶段。 */
-    private CommittedProof segmentDecisionProofStage(Transaction tx,
-                                                     PublicationSegmentOwnerRegistry.Assignment slot) {
+    /**
+     * The single slot centre decision successfully transfers a non-false commit receipt to the sync materialization phase.
+     *
+     * @param tx transaction context
+     * @param slot slot
+     * @return the operation result
+     */
+    private CommittedProof segmentDecisionProofStage(final Transaction tx,
+                                                     final PublicationSegmentOwnerRegistry.Assignment slot) {
         Supplier<CommittedProof> action = () -> segmentOwner.decideWithProof(slot, tx.txId(),
                 tx.startTs(), tx.deadlineMillis(), tx.participants());
         if (!metricsEnabled()) {
@@ -2143,13 +2797,22 @@ public final class TransactionManager implements AutoCloseable {
         return recordMeasuredStage(TransactionStage.SEGMENT_DECISION, action);
     }
 
-    /** 返回可选分段批量决议的累计分组形态。 */
+    /**
+     * Returns the cumulative group form of an optional subparagraph batch decision.
+     *
+     * @return the operation result
+     */
     PublicationSegmentCommitBatcher.Stats segmentBatchStats() {
         return segmentCommitBatcher == null ? null : segmentCommitBatcher.stats();
     }
 
-    /** 默认指标关闭时直接等待已持久发布水位覆盖本事务时间戳。 */
-    private void segmentAwaitStage(Transaction tx, long commitTs) {
+    /**
+     * By default, wait directly for durable to release watermark overwrite transaction timestamp when the indicator closes.
+     *
+     * @param tx transaction context
+     * @param commitTs durable commit timestamp
+     */
+    private void segmentAwaitStage(final Transaction tx, final long commitTs) {
         if (!metricsEnabled()) {
             awaitSegmentPublication(tx, commitTs);
             return;
@@ -2158,26 +2821,40 @@ public final class TransactionManager implements AutoCloseable {
                 () -> awaitSegmentPublication(tx, commitTs));
     }
 
-    /** no-op 指标下直接获取新协议的持久化开始快照。 */
-    private BeginReservation ledgerBeginStage(IsolationLevel isolationLevel) {
+    /**
+     * Durable storage to get the new protocol directly under no-op indicator Start snapshot.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @return the operation result
+     */
+    private BeginReservation ledgerBeginStage(final IsolationLevel isolationLevel) {
         Supplier<BeginReservation> action = coordinatorRegistry != null
                 ? () -> coordinatorRegistry.begin(isolationLevel)
                 : beginBatcher == null
-                ? () -> publicationLedger.begin(isolationLevel, options.limits().timeoutMillis(), false)
-                : () -> beginBatcher.begin(isolationLevel);
+                        ? () -> publicationLedger.begin(isolationLevel, options.limits().timeoutMillis(), false)
+                        : () -> beginBatcher.begin(isolationLevel);
         if (!metricsEnabled()) {
             return action.get();
         }
         return recordMeasuredStage(TransactionStage.LEDGER_BEGIN, action);
     }
 
-    /** 返回实验性批量开始的累计批次规模。 */
+    /**
+     * Returns the cumulative batch size of an experimental batch start.
+     *
+     * @return the operation result
+     */
     PublicationBeginBatcher.Stats ledgerBeginBatchStats() {
         return beginBatcher == null ? null : beginBatcher.stats();
     }
 
-    /** no-op 指标下直接预留持久化提交时间戳。 */
-    private long ledgerReserveStage(Transaction tx) {
+    /**
+     * Direct preset durable storage commit timestamp under no-op indicator.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     */
+    private long ledgerReserveStage(final Transaction tx) {
         if (!metricsEnabled()) {
             return publicationLedger.reserveCommit(tx.txId(), tx.deadlineMillis());
         }
@@ -2185,8 +2862,14 @@ public final class TransactionManager implements AutoCloseable {
                 () -> publicationLedger.reserveCommit(tx.txId(), tx.deadlineMillis()));
     }
 
-    /** 单分片候选时间与中心 PREPARING 状态同账本槽原子预留。 */
-    private long ledgerLocalReserveStage(Transaction tx, String participant) {
+    /**
+     * Single shard candidate time and centre PREPARING status equal to account slot atomic reservation.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @return the operation result
+     */
+    private long ledgerLocalReserveStage(final Transaction tx, final String participant) {
         Supplier<Long> action = localReserveBatcher == null
                 ? () -> publicationLedger.reserveLocalCommit(tx.txId(), tx.deadlineMillis(), participant)
                 : () -> localReserveBatcher.reserve(tx.txId(), tx.deadlineMillis(), participant);
@@ -2196,18 +2879,33 @@ public final class TransactionManager implements AutoCloseable {
         return recordMeasuredStage(TransactionStage.LEDGER_RESERVE, action);
     }
 
-    /** 返回实验性本地预留批次的累计聚合形态。 */
+    /**
+     * Returns an experimental local preset cumulative aggregate form for batch.
+     *
+     * @return the operation result
+     */
     PublicationLocalReserveBatcher.Stats ledgerLocalReserveStats() {
         return localReserveBatcher == null ? null : localReserveBatcher.stats();
     }
 
-    /** 返回实验性本地补决议批次的累计聚合形态。 */
+    /**
+     * Returns the cumulative aggregate polymer form of experimental local plus decision batch.
+     *
+     * @return the operation result
+     */
     PublicationLocalCompletionBatcher.Stats ledgerLocalCompletionStats() {
         return localCompletionBatcher == null ? null : localCompletionBatcher.stats();
     }
 
-    /** 本地已提交证明满足候选时间后补齐中心与账本的相同决议。 */
-    private boolean ledgerLocalDecisionStage(ParticipantRecord local, long commitTs, String participant) {
+    /**
+     * Local Completes the centre with the same decision as the book after commit proof has satisfied the candidate time.
+     *
+     * @param local local
+     * @param commitTs durable commit timestamp
+     * @param participant participant
+     * @return the operation result
+     */
+    private boolean ledgerLocalDecisionStage(final ParticipantRecord local, final long commitTs, final String participant) {
         Supplier<Boolean> action = localCompletionBatcher == null
                 ? () -> publicationLedger.completeLocalCommitAfterFencing(local, commitTs, participant)
                 : () -> localCompletionBatcher.complete(local, commitTs, participant);
@@ -2217,8 +2915,13 @@ public final class TransactionManager implements AutoCloseable {
         return recordMeasuredStage(TransactionStage.LEDGER_DECISION, action);
     }
 
-    /** no-op 指标下直接持久化中心与账本的原子决议。 */
-    private void ledgerDecisionStage(Transaction tx, long commitTs) {
+    /**
+     * Atomic decision under no-op indicator directly from durable storage centre and account book.
+     *
+     * @param tx transaction context
+     * @param commitTs durable commit timestamp
+     */
+    private void ledgerDecisionStage(final Transaction tx, final long commitTs) {
         if (!metricsEnabled()) {
             publicationLedger.decideCommitted(tx.txId(), commitTs, tx.participants());
             return;
@@ -2227,8 +2930,13 @@ public final class TransactionManager implements AutoCloseable {
                 () -> publicationLedger.decideCommitted(tx.txId(), commitTs, tx.participants()));
     }
 
-    /** intent 写集合已持久化时在一个控制事务中分配时间戳并提交决议。 */
-    private PublicationCommitResult ledgerAtomicCommitStage(Transaction tx) {
+    /**
+     * Inent write set allocates timestamp and commit decision in a control transaction at durable storage.
+     *
+     * @param tx transaction context
+     * @return the operation result
+     */
+    private PublicationCommitResult ledgerAtomicCommitStage(final Transaction tx) {
         Supplier<PublicationCommitResult> action = publicationCommitBatcher == null
                 ? () -> publicationLedger.commitPreparedIntents(tx.txId(), tx.deadlineMillis(), tx.participants())
                 : () -> publicationCommitBatcher.commit(tx.txId(), tx.deadlineMillis(), tx.participants());
@@ -2238,17 +2946,29 @@ public final class TransactionManager implements AutoCloseable {
         return recordMeasuredStage(TransactionStage.LEDGER_ATOMIC_COMMIT, action);
     }
 
-    /** 返回可选账本批量决议的累计形态，非批量模式没有统计。 */
+    /**
+     * Returns the cumulative form of an optional book batch decision, which is not accounted for in the non- batch mode.
+     *
+     * @return the operation result
+     */
     PublicationCommitBatcher.Stats ledgerBatchStats() {
         return publicationCommitBatcher == null ? null : publicationCommitBatcher.stats();
     }
 
-    /** 返回当前事务管理器所用账本实例的批量控制事务阶段耗时。 */
+    /**
+     * Returns the time-consuming batch control transaction phase of the current account book example used by the transaction manager.
+     *
+     * @return the operation result
+     */
     MysqlPublicationLedger.BatchTiming ledgerBatchTiming() {
         return publicationLedger == null ? null : publicationLedger.batchTiming();
     }
 
-    /** no-op 指标下直接推进已决议账本的连续水位。 */
+    /**
+     * Directly advance the continuous watermark account book under no-op indicator.
+     *
+     * @return the operation result
+     */
     private long ledgerPublishStage() {
         if (!metricsEnabled()) {
             return publicationLedger.advancePublished(256);
@@ -2257,8 +2977,13 @@ public final class TransactionManager implements AutoCloseable {
                 () -> publicationLedger.advancePublished(256));
     }
 
-    /** no-op 指标下直接等待自身提交被全局水位覆盖。 */
-    private void ledgerAwaitStage(Transaction tx, long commitTs) {
+    /**
+     * No-op indicator directly waits for its own commit to be covered by global watermark.
+     *
+     * @param tx transaction context
+     * @param commitTs durable commit timestamp
+     */
+    private void ledgerAwaitStage(final Transaction tx, final long commitTs) {
         if (!metricsEnabled()) {
             publicationLedger.awaitPublished(tx.txId(), commitTs, options.limits().timeoutMillis());
             return;
@@ -2267,16 +2992,26 @@ public final class TransactionManager implements AutoCloseable {
                 () -> publicationLedger.awaitPublished(tx.txId(), commitTs, options.limits().timeoutMillis()));
     }
 
-    /** no-op 指标下直接执行服务器端 begin，避免计量包装分配。 */
-    private Optional<BeginReservation> acceleratedBeginStage(Supplier<Optional<BeginReservation>> action) {
+    /**
+     * Directly execute server endside under no-op indicator to avoid measurement of package distribution.
+     *
+     * @param action action
+     * @return the operation result
+     */
+    private Optional<BeginReservation> acceleratedBeginStage(final Supplier<Optional<BeginReservation>> action) {
         if (!metricsEnabled()) {
             return action.get();
         }
         return recordMeasuredStage(TransactionStage.BEGIN_PUBLICATION, action);
     }
 
-    /** no-op 指标下直接执行服务器端提交决议。 */
-    private OptionalLong acceleratedCommitStage(Supplier<OptionalLong> action) {
+    /**
+     * Directly execute the server commit decision under no-op indicator.
+     *
+     * @param action action
+     * @return the operation result
+     */
+    private OptionalLong acceleratedCommitStage(final Supplier<OptionalLong> action) {
         if (!metricsEnabled()) {
             return action.get();
         }
@@ -2284,9 +3019,12 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 按需记录时间戳分配阶段。
+     * Record the timestamp distribution phase as required.
+     *
+     * @param stage stage
+     * @return the operation result
      */
-    private long nextTimestamp(TransactionStage stage) {
+    private long nextTimestamp(final TransactionStage stage) {
         if (!metricsEnabled()) {
             return timestampOracle.nextTimestamp();
         }
@@ -2294,9 +3032,13 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 按需记录 begin metadata 创建阶段。
+     * Record the creation phase of begin metadata on demand.
+     *
+     * @param txId transaction identifier
+     * @param startTs transaction start timestamp
+     * @param isolationLevel global transaction isolation level
      */
-    private void createBeginMetadata(long txId, long startTs, IsolationLevel isolationLevel) {
+    private void createBeginMetadata(final long txId, final long startTs, final IsolationLevel isolationLevel) {
         if (!metricsEnabled()) {
             metadataStore.create(txId, startTs, isolationLevel);
             return;
@@ -2305,23 +3047,28 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 按需记录单分片 metadata 提交阶段。
+     * The shard mettadata commit phase of the required loglist.
+     *
+     * @param tx transaction context
+     * @param participant participant
+     * @param commitTs durable commit timestamp
      */
-    private void markSingleShardCommittedStage(Transaction tx, String participant, long commitTs) {
+    private void markSingleShardCommittedStage(final Transaction tx, final String participant, final long commitTs) {
         if (!metricsEnabled()) {
             metadataStore.persistSingleShardCommitted(tx.txId(), participant, commitTs);
             return;
         }
         recordMeasuredStage(
                 TransactionStage.SINGLE_SHARD_METADATA_COMMIT,
-                () -> metadataStore.persistSingleShardCommitted(tx.txId(), participant, commitTs)
-        );
+                () -> metadataStore.persistSingleShardCommitted(tx.txId(), participant, commitTs));
     }
 
     /**
-     * 按需记录缓冲写预写阶段。
+     * Record buffer writing phase prewrite as required.
+     *
+     * @param tx transaction context
      */
-    private void prewriteBufferedMutationsStage(Transaction tx) {
+    private void prewriteBufferedMutationsStage(final Transaction tx) {
         if (!metricsEnabled()) {
             prewriteBufferedMutations(tx);
             return;
@@ -2330,9 +3077,14 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 按需记录非缓冲预写阶段。
+     * Recording non- buffer prewrite stages on demand.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param mutation mutation
+     * @param adapter adapter
      */
-    private void prewriteEagerMutationStage(Transaction tx, String shardId, Mutation mutation, StorageAdapter adapter) {
+    private void prewriteEagerMutationStage(final Transaction tx, final String shardId, final Mutation mutation, final StorageAdapter adapter) {
         if (!metricsEnabled()) {
             prewriteEagerMutation(tx, shardId, mutation, adapter);
             return;
@@ -2341,15 +3093,16 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 按需记录显式 prepare 阶段。
+     * Record the visible prepare phase as needed.
+     *
+     * @param tx transaction context
      */
-    private void prepareParticipantsStage(Transaction tx) {
+    private void prepareParticipantsStage(final Transaction tx) {
         if (!metricsEnabled()) {
             runAcrossParticipants(
                     tx.participants(),
                     participant -> prepareParticipant(tx, participant),
-                    options.crossShardCommitPolicy().parallelPrepare()
-            );
+                    options.crossShardCommitPolicy().parallelPrepare());
             return;
         }
         recordMeasuredStage(
@@ -2357,29 +3110,35 @@ public final class TransactionManager implements AutoCloseable {
                 () -> runAcrossParticipants(
                         tx.participants(),
                         participant -> prepareParticipant(tx, participant),
-                        options.crossShardCommitPolicy().parallelPrepare()
-                )
-        );
+                        options.crossShardCommitPolicy().parallelPrepare()));
     }
 
     /**
-     * 按需记录跨分片 metadata 提交阶段。
+     * Record cross-shard metadata commit phase as required.
+     *
+     * @param tx transaction context
+     * @param commitTs durable commit timestamp
+     * @param explicitPrepareRequired explicit prepare required
      */
-    private void persistCommittedMetadataStage(Transaction tx, long commitTs, boolean explicitPrepareRequired) {
+    private void persistCommittedMetadataStage(final Transaction tx, final long commitTs, final boolean explicitPrepareRequired) {
         if (!metricsEnabled()) {
             persistCommittedMetadata(tx, commitTs, explicitPrepareRequired);
             return;
         }
         recordMeasuredStage(
                 TransactionStage.CROSS_SHARD_METADATA_COMMIT,
-                () -> persistCommittedMetadata(tx, commitTs, explicitPrepareRequired)
-        );
+                () -> persistCommittedMetadata(tx, commitTs, explicitPrepareRequired));
     }
 
     /**
-     * 按需记录参与者提交阶段。
+     * Record the participant commit phase as required.
+     *
+     * @param stage stage
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param commitTs durable commit timestamp
      */
-    private void commitParticipantStage(TransactionStage stage, Transaction tx, String shardId, long commitTs) {
+    private void commitParticipantStage(final TransactionStage stage, final Transaction tx, final String shardId, final long commitTs) {
         if (!metricsEnabled()) {
             commitParticipant(tx, shardId, commitTs);
             return;
@@ -2387,8 +3146,14 @@ public final class TransactionManager implements AutoCloseable {
         recordMeasuredStage(stage, () -> commitParticipant(tx, shardId, commitTs));
     }
 
-    /** 中心已确认后传递持久决议凭据，分片仍自行校验完整意向和本地终态。 */
-    private void commitDecidedParticipantStage(Transaction tx, String shardId, CommittedProof proof) {
+    /**
+     * Center confirmed durable decision receipt, shard still has validate complete intent and local terminal state.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param proof proof
+     */
+    private void commitDecidedParticipantStage(final Transaction tx, final String shardId, final CommittedProof proof) {
         Runnable action = () -> withShardPermit(shardId, () -> {
             ((MysqlStorageAdapter) adapter(shardId)).commitDecided(proof,
                     tx.bufferedMutations(shardId), true);
@@ -2402,23 +3167,28 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 按需记录单分片直接提交阶段。
+     * Record the shard direct commit phase as required.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
+     * @param commitTs durable commit timestamp
      */
-    private void directCommitSingleShardParticipantStage(Transaction tx, String shardId, long commitTs) {
+    private void directCommitSingleShardParticipantStage(final Transaction tx, final String shardId, final long commitTs) {
         if (!metricsEnabled()) {
             directCommitSingleShardParticipant(tx, shardId, commitTs);
             return;
         }
         recordMeasuredStage(
                 TransactionStage.SINGLE_SHARD_PARTICIPANT_COMMIT,
-                () -> directCommitSingleShardParticipant(tx, shardId, commitTs)
-        );
+                () -> directCommitSingleShardParticipant(tx, shardId, commitTs));
     }
 
     /**
-     * 按需记录回滚阶段。
+     * Record the rollback phase as required.
+     *
+     * @param tx transaction context
      */
-    private void rollbackStage(Transaction tx) {
+    private void rollbackStage(final Transaction tx) {
         if (!metricsEnabled()) {
             rollbackInternal(tx);
             return;
@@ -2427,22 +3197,23 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 执行事务回滚的实际动作。
+     * Execute the actual action for transaction rollback.
+     *
+     * @param tx transaction context
      */
-    private void rollbackInternal(Transaction tx) {
+    private void rollbackInternal(final Transaction tx) {
         TxStatus decision = metadataStore.withPublicationLock(() -> {
             if (!tx.metadataPersisted()) {
                 return TxStatus.ABORTED;
             }
-            TxRecord record = metadataStore.get(tx.txId()).orElseThrow(() ->
-                    unknownCommit(tx, new IllegalStateException("transaction metadata missing")));
+            TxRecord record = metadataStore.get(tx.txId()).orElseThrow(() -> unknownCommit(tx, new IllegalStateException("transaction metadata missing")));
             if (record.status() == TxStatus.COMMITTED) {
                 return TxStatus.COMMITTED;
             }
             if (tx.decisionStarted() && tx.participants().size() == 1
                     && adapter(tx.participants().iterator().next()).supportsAtomicDirectCommit()) {
                 String shardId = tx.participants().iterator().next();
-                // 先在参与者侧隔离可能迟到的本地提交，再根据实际本地终态更新中心。
+                // First isolate the local commit that may be late on the participant side, then update the centre based on actual local terminal state.
                 var local = withShardPermit(shardId, () -> {
                     adapter(shardId).abort(tx.txId());
                     return adapter(shardId).participantRecord(tx.txId());
@@ -2459,7 +3230,7 @@ public final class TransactionManager implements AutoCloseable {
                     return TxStatus.COMMITTED;
                 }
             }
-            // markAborted 返回的终态才是权威，不能根据调用前读到的状态删除 intent。
+            // The markAborted returned terminal state is authority and cannot delete incent according to the status read before call.
             return metadataStore.markAborted(tx.txId()).status();
         });
         tx.status(decision);
@@ -2473,15 +3244,17 @@ public final class TransactionManager implements AutoCloseable {
                     adapter(participant).abort(tx.txId());
                     return null;
                 }),
-                options.crossShardCommitPolicy().parallelRollback()
-        );
+                options.crossShardCommitPolicy().parallelRollback());
         markFinalizedQuietly(tx);
     }
 
     /**
-     * 按需记录 intent 清理阶段。
+     * Record the intent cleanup phase as required.
+     *
+     * @param tx transaction context
+     * @param shardId logical shard identifier
      */
-    private void cleanupIntentsStage(Transaction tx, String shardId) {
+    private void cleanupIntentsStage(final Transaction tx, final String shardId) {
         if (!metricsEnabled()) {
             cleanupParticipantIntents(tx, shardId);
             return;
@@ -2490,51 +3263,65 @@ public final class TransactionManager implements AutoCloseable {
     }
 
     /**
-     * 记录带返回值的计量阶段执行结果。
+     * Records the results of the measurement phase of return values.
+     *
+     * @param <T> value type
+     * @param stage stage
+     * @param action action
+     * @return the operation result
      */
-    private <T> T recordMeasuredStage(TransactionStage stage, Supplier<T> action) {
+    private <T> T recordMeasuredStage(final TransactionStage stage, final Supplier<T> action) {
         long startNanos = System.nanoTime();
         try {
             T result = action.get();
             recordMetricSuccess(stage, System.nanoTime() - startNanos);
             return result;
-        } catch (RuntimeException | Error ex) {
+        } catch (final RuntimeException | Error ex) {
             recordMetricFailure(stage, System.nanoTime() - startNanos);
             throw ex;
         }
     }
 
     /**
-     * 记录无返回值的计量阶段执行结果。
+     * The results of the measurement phase, which has no return value, are recorded.
+     *
+     * @param stage stage
+     * @param action action
      */
-    private void recordMeasuredStage(TransactionStage stage, Runnable action) {
+    private void recordMeasuredStage(final TransactionStage stage, final Runnable action) {
         long startNanos = System.nanoTime();
         try {
             action.run();
             recordMetricSuccess(stage, System.nanoTime() - startNanos);
-        } catch (RuntimeException | Error ex) {
+        } catch (final RuntimeException | Error ex) {
             recordMetricFailure(stage, System.nanoTime() - startNanos);
             throw ex;
         }
     }
 
     /**
-     * 尽力记录成功指标，避免指标实现异常反向影响事务语义。
+     * Every effort is made to document success indicators and avoid the achievement of an abnormal reverse impact in transaction semantics.
+     *
+     * @param stage stage
+     * @param elapsedNanos elapsed nanos
      */
-    private void recordMetricSuccess(TransactionStage stage, long elapsedNanos) {
+    private void recordMetricSuccess(final TransactionStage stage, final long elapsedNanos) {
         try {
             metrics.recordSuccess(stage, elapsedNanos);
-        } catch (RuntimeException | Error ignored) {
+        } catch (final RuntimeException | Error ignored) {
         }
     }
 
     /**
-     * 尽力记录失败指标，避免遮蔽原始业务异常。
+     * Every effort is made to record the failure indicators and avoid covering up the original business anomalies.
+     *
+     * @param stage stage
+     * @param elapsedNanos elapsed nanos
      */
-    private void recordMetricFailure(TransactionStage stage, long elapsedNanos) {
+    private void recordMetricFailure(final TransactionStage stage, final long elapsedNanos) {
         try {
             metrics.recordFailure(stage, elapsedNanos);
-        } catch (RuntimeException | Error ignored) {
+        } catch (final RuntimeException | Error ignored) {
         }
     }
 }

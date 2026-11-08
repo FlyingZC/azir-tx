@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.BackgroundTaskStats;
@@ -19,52 +35,102 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 持租约发布者驱动安全向量推进及本地、跨片旧版本有界回收的后台运行时。 */
+/**
+ * Lease launcher-driven security vector propulsion and background running time for local, cross-shard old version bounded collection.
+ */
 final class MysqlVectorLocalGcScheduler implements AutoCloseable {
+
     private final MysqlVectorCutLeaderRuntime publisher;
+
     private final MysqlVectorSnapshotLeaseStore protection;
+
     private final Map<String, MysqlVectorLocalGarbageCollector> collectors;
+
     private final Map<String, MysqlVectorCrossGarbageCollector> crossCollectors;
+
     private final int batchLimit;
+
     private final int crossBatchLimit;
+
     private final int localEveryRounds;
+
     private final long intervalMillis;
+
     private final ScheduledExecutorService worker;
+
     private final BackgroundTaskStats stats = new BackgroundTaskStats();
+
     private final LongAdder totalReclaimed = new LongAdder();
+
     private final LongAdder crossReclaimed = new LongAdder();
+
     private final LongAdder localCollectNanos = new LongAdder();
+
     private final LongAdder crossCollectNanos = new LongAdder();
+
     private final AtomicReference<RuntimeException> lastFailure = new AtomicReference<>();
+
     private final AtomicBoolean started = new AtomicBoolean();
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private final AtomicLong rounds = new AtomicLong();
 
-    /** 后台分片连接池由调用方独立提供，每轮只处理有界行数。 */
-    MysqlVectorLocalGcScheduler(MysqlVectorCutLeaderRuntime publisher,
-                                MysqlVectorSnapshotLeaseStore protection,
-                                Map<String, MysqlVectorLocalGarbageCollector> collectors,
-                                int batchLimit, long intervalMillis) {
+    /**
+     * Background shard connection pool is provided independently by the caller and only bounded lines per round.
+     *
+     * @param publisher publisher
+     * @param protection protection
+     * @param collectors collectors
+     * @param batchLimit batch limit
+     * @param intervalMillis interval millis
+     */
+    MysqlVectorLocalGcScheduler(final MysqlVectorCutLeaderRuntime publisher,
+                                final MysqlVectorSnapshotLeaseStore protection,
+                                final Map<String, MysqlVectorLocalGarbageCollector> collectors,
+                                final int batchLimit, final long intervalMillis) {
         this(publisher, protection, collectors, Map.of(), batchLimit, 0, intervalMillis);
     }
 
-    /** 可选跨片回收在同一可信安全向量推进后运行，并拥有独立候选预算。 */
-    MysqlVectorLocalGcScheduler(MysqlVectorCutLeaderRuntime publisher,
-                                MysqlVectorSnapshotLeaseStore protection,
-                                Map<String, MysqlVectorLocalGarbageCollector> collectors,
-                                Map<String, MysqlVectorCrossGarbageCollector> crossCollectors,
-                                int batchLimit, int crossBatchLimit, long intervalMillis) {
+    /**
+     * Optional cross-shard collection runs after advancing with the same credible security vector and has an independent candidate budget.
+     *
+     * @param publisher publisher
+     * @param protection protection
+     * @param collectors collectors
+     * @param crossCollectors cross collectors
+     * @param batchLimit batch limit
+     * @param crossBatchLimit cross batch limit
+     * @param intervalMillis interval millis
+     */
+    MysqlVectorLocalGcScheduler(final MysqlVectorCutLeaderRuntime publisher,
+                                final MysqlVectorSnapshotLeaseStore protection,
+                                final Map<String, MysqlVectorLocalGarbageCollector> collectors,
+                                final Map<String, MysqlVectorCrossGarbageCollector> crossCollectors,
+                                final int batchLimit, final int crossBatchLimit, final long intervalMillis) {
         this(publisher, protection, collectors, crossCollectors,
                 batchLimit, crossBatchLimit, 1, intervalMillis);
     }
 
-    /** 跨片主导负载可降低无收益的本地扫描频率，安全下界仍每轮推进。 */
-    MysqlVectorLocalGcScheduler(MysqlVectorCutLeaderRuntime publisher,
-                                MysqlVectorSnapshotLeaseStore protection,
-                                Map<String, MysqlVectorLocalGarbageCollector> collectors,
-                                Map<String, MysqlVectorCrossGarbageCollector> crossCollectors,
-                                int batchLimit, int crossBatchLimit,
-                                int localEveryRounds, long intervalMillis) {
+    /**
+     * The cross-shard lead load reduces the non-receivable local scanning frequency, and the lower secure boundary is still per round.
+     *
+     * @param publisher publisher
+     * @param protection protection
+     * @param collectors collectors
+     * @param crossCollectors cross collectors
+     * @param batchLimit batch limit
+     * @param crossBatchLimit cross batch limit
+     * @param localEveryRounds local every rounds
+     * @param intervalMillis interval millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    MysqlVectorLocalGcScheduler(final MysqlVectorCutLeaderRuntime publisher,
+                                final MysqlVectorSnapshotLeaseStore protection,
+                                final Map<String, MysqlVectorLocalGarbageCollector> collectors,
+                                final Map<String, MysqlVectorCrossGarbageCollector> crossCollectors,
+                                final int batchLimit, final int crossBatchLimit,
+                                final int localEveryRounds, final long intervalMillis) {
         this.publisher = Objects.requireNonNull(publisher, "publisher");
         this.protection = Objects.requireNonNull(protection, "protection");
         this.collectors = Map.copyOf(collectors);
@@ -82,18 +148,21 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
         this.crossBatchLimit = crossBatchLimit;
         this.localEveryRounds = localEveryRounds;
         this.intervalMillis = intervalMillis;
-        this.worker = Executors.newSingleThreadScheduledExecutor(task ->
-                Thread.ofPlatform().daemon().name("azir-vector-local-gc").unstarted(task));
+        this.worker = Executors.newSingleThreadScheduledExecutor(task -> Thread.ofPlatform().daemon().name("azir-vector-local-gc").unstarted(task));
     }
 
-    /** 启动前按真实 MySQL 库身份核对控制、分片、布局及独立后台连接预算。 */
+    /**
+     * Check control, shard, layout and independent background connection budget for real MySQL library identity before startup.
+     *
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
     private void requireMatchingAuthorities() {
         if (!publisher.productMode()
                 || !publisher.layoutHash().equals(protection.layoutHash())
                 || !collectors.keySet().equals(publisher.shardSources().keySet())
                 || publisher.centerDataSource() == protection.centerDataSource()
                 || !MysqlVectorDatabaseIdentity.read(publisher.centerDataSource())
-                .equals(MysqlVectorDatabaseIdentity.read(protection.centerDataSource()))) {
+                        .equals(MysqlVectorDatabaseIdentity.read(protection.centerDataSource()))) {
             throw new IllegalArgumentException("vector GC center authority or route layout differs from publisher");
         }
         for (String route : collectors.keySet()) {
@@ -103,7 +172,7 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
                     || collector.stripeCount() != publisher.stripeCount()
                     || foreground == collector.dataSource()
                     || !MysqlVectorDatabaseIdentity.read(foreground)
-                    .equals(MysqlVectorDatabaseIdentity.read(collector.dataSource()))) {
+                            .equals(MysqlVectorDatabaseIdentity.read(collector.dataSource()))) {
                 throw new IllegalArgumentException("vector GC background shard authority differs: " + route);
             }
         }
@@ -117,13 +186,17 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
                     || collector.stripeCount() != publisher.stripeCount()
                     || foreground == collector.dataSource()
                     || !MysqlVectorDatabaseIdentity.read(foreground)
-                    .equals(MysqlVectorDatabaseIdentity.read(collector.dataSource()))) {
+                            .equals(MysqlVectorDatabaseIdentity.read(collector.dataSource()))) {
                 throw new IllegalArgumentException("vector cross GC background shard authority differs: " + route);
             }
         }
     }
 
-    /** 只有正式发布者已经持租约服务时才能启动周期回收。 */
+    /**
+     * The cycle collection can only be started if the official publisher already has an lease service.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     void start() {
         if (closed.get() || !publisher.isServing()) {
             throw new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
@@ -135,7 +208,11 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
         }
     }
 
-    /** 单轮先采可信切面推进安全下界，再按固定路由逐片有界删除。 */
+    /**
+     * A single round of a credible cut-off advancees the lower security boundary and is then removed by a fixed route by block bounded.
+     *
+     * @return the operation result
+     */
     int runOnce() {
         requireMatchingAuthorities();
         MysqlVectorCutLeaderRuntime.PublishedView view = publisher.currentView();
@@ -151,10 +228,11 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
             for (CompletableFuture<Integer> task : tasks) {
                 try {
                     reclaimed += task.join();
-                } catch (CompletionException ex) {
+                } catch (final CompletionException ex) {
                     if (firstFailure == null) {
                         firstFailure = ex.getCause() instanceof RuntimeException runtime
-                                ? runtime : new IllegalStateException("vector shard GC failed", ex.getCause());
+                                ? runtime
+                                : new IllegalStateException("vector shard GC failed", ex.getCause());
                     }
                 }
             }
@@ -165,9 +243,15 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
         }
     }
 
-    /** 每片独立连接池并行工作；任一失败结束本轮后停止下轮物理删除。 */
-    private int collectShard(String route, boolean scanLocal) {
-        // 发布者失联时即使持久下界仍安全，也不继续开启新的删除事务。
+    /**
+     * Each piece of independent connection pool parallel work; the next physical removal is stopped after any failure has ended the current round.
+     *
+     * @param route route
+     * @param scanLocal scan local
+     * @return the operation result
+     */
+    private int collectShard(final String route, final boolean scanLocal) {
+        // When the publisher fails to connect, even if the lower durable border is secure, the new transaction will not be opened.
         publisher.currentView();
         int reclaimed = 0;
         if (scanLocal) {
@@ -189,7 +273,9 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
         return reclaimed;
     }
 
-    /** 任一后台异常都停止后续物理删除，运维须检查并重建该调度器。 */
+    /**
+     * Any background anomaly ceases the subsequent physical removal and must be checked and re-established.
+     */
     private void runSafely() {
         if (closed.get()) {
             return;
@@ -197,44 +283,72 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
         try {
             int reclaimed = runOnce();
             stats.recordSuccess(reclaimed);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             stats.recordFailure();
             lastFailure.compareAndSet(null, ex);
             worker.shutdown();
         }
     }
 
-    /** 返回完整成功轮次及失败次数，不用线程存活推断 GC 正常。 */
+    /**
+     * Returns complete successful rotations and number of failures, without linear survival extrapolation GC normal.
+     *
+     * @return the operation result
+     */
     BackgroundTaskStats stats() {
         return stats;
     }
 
-    /** 返回本调度器生命周期内已确认删除的本地及跨片版本数量。 */
+    /**
+     * Returns the number of local and cross-shard version confirmed deleted in this scheduler 's life cycle.
+     *
+     * @return the operation result
+     */
     long totalReclaimed() {
         return totalReclaimed.sum();
     }
 
-    /** 单独暴露已确认退役的跨片大载荷版本数量。 */
+    /**
+     * Separately exposes the confirmed quantity of cross-shard large payload version.
+     *
+     * @return the operation result
+     */
     long crossReclaimed() {
         return crossReclaimed.sum();
     }
 
-    /** 返回本地 GC 在两片上累积的实际执行时间。 */
+    /**
+     * Returns the actual implementation time accumulated on two pieces of local GC.
+     *
+     * @return the operation result
+     */
     long localCollectNanos() {
         return localCollectNanos.sum();
     }
 
-    /** 返回跨片 GC 在两片上累积的实际执行时间。 */
+    /**
+     * Returns the actual implementation time accumulated on two pieces of cross-shard GC.
+     *
+     * @return the operation result
+     */
     long crossCollectNanos() {
         return crossCollectNanos.sum();
     }
 
-    /** 返回第一条后台失败，保留发布者失联或数据库错误的原始异常链。 */
+    /**
+     * Failed to return the first background, saves the original abnormal chain of the publisher's failure or database error.
+     *
+     * @return the operation result
+     */
     RuntimeException lastFailure() {
         return lastFailure.get();
     }
 
-    /** 停止新轮次并等待已经开始的有界回收退出。 */
+    /**
+     * Stops new rounds and waits for the bounded collection exit that has already started.
+     *
+     * @throws MvccException if the operation cannot complete
+     */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -247,7 +361,7 @@ final class MysqlVectorLocalGcScheduler implements AutoCloseable {
                 throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,
                         "vector local GC did not stop within timeout", true, null);
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             worker.shutdownNow();
             Thread.currentThread().interrupt();
             throw new MvccException(ErrorCode.RESOURCE_EXHAUSTED,

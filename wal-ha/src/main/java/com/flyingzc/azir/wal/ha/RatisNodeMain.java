@@ -1,15 +1,41 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal.ha;
 
 import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
 
-/** 专属进程入口，不修改原有 Azir 装配，也不把健康端口当成事务写入端口。 */
+/**
+ * Unique process entry without modifying the original Azir assembly or using a health port as an transaction for writing.
+ */
 public final class RatisNodeMain {
-    /** 入口类不创建实例。 */
-    private RatisNodeMain() { }
 
-    /** 前台运行供进程管理器托管；启动失败必须退出所属 JVM，不能在原目录原地重开。 */
-    public static void main(String[] args) {
+    /**
+     * The entry class does not create examples.
+     */
+    private RatisNodeMain() {
+    }
+
+    /**
+     * Foreground Runs for process manager hosting; startup failure must exit the JVM to which it belongs and cannot be restarted in the original directory.
+     *
+     * @param args args
+     */
+    public static void main(final String[] args) {
         if (args.length != 2 || !args[0].equals("--config")) {
             System.err.println("usage: azir-wal-node --config /absolute/path/node.properties");
             System.exit(2);
@@ -22,19 +48,24 @@ public final class RatisNodeMain {
             host.start();
             System.out.println("WAL node started; use local /ready and /writable probes for cached status");
             new CountDownLatch(1).await();
-        } catch (Exception | Error failure) {
-            // 连接器和插件异常可能携带密码或业务参数，不打印消息、堆栈或原因链。
+        } catch (final Exception | Error failure) {
+            // Anomalous connection devices and plug-ins may carry passwords or business parameters without printing messages, stacks or cause chains.
             String phase = failure instanceof RatisNodeConfiguration.ConfigurationException invalid ? "; phase=" + invalid.phase() : "";
             System.err.println("WAL node startup/run failed; type=" + failure.getClass().getSimpleName() + phase);
-            // 只交由关闭钩子清理，避免当前线程失败清理后重复等待并占用两份关闭预算。
+            // Only close hooks will be cleared to avoid repeat waiting and taking two shut-down budget after the current line has failed.
             System.exit(1);
         }
     }
 
-    /** 关闭失败明确报错，由进程管理器的停止期限处理，不中断在途 WAL 来伪装成功。 */
-    private static void close(RatisNodeHost host) {
-        try { host.close(); }
-        catch (Exception | Error failure) {
+    /**
+     * The shutdown failed to make a clear error, processed by the process manager's stop period and without interruption in transiting WAL to disguise success.
+     *
+     * @param host host
+     */
+    private static void close(final RatisNodeHost host) {
+        try {
+            host.close();
+        } catch (final Exception | Error failure) {
             System.err.println("WAL node cleanup incomplete; terminate process before restart; type=" + failure.getClass().getSimpleName());
         }
     }

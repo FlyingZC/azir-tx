@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -15,32 +31,42 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
-/** 只读远端切面客户端，缓存当前端点并校验中心代数与响应路由。 */
+/**
+ * Read-only remote cut-off client, cache current endpoint and validate centre algebra and response route.
+ */
 final class MysqlVectorCutRemoteClient {
+
     private final MysqlVectorCutLeaderLease leases;
+
     private final List<String> routes;
+
     private final int stripes;
+
     private final HttpClient client = HttpClient.newBuilder()
             .connectTimeout(Duration.ofMillis(500)).build();
+
     private volatile Endpoint cached;
 
-    /** 缓存期限早于中心租约结束，过期或请求失败再重新发现。 */
-    private record Endpoint(String ownerId, long generation, long validUntilNanos) {
-        /** 已过期端点不得被后续新事务复用。 */
-        boolean valid() {
-            return validUntilNanos - System.nanoTime() > 0;
-        }
-    }
-
-    /** 使用同一布局配置构造发现器，读响应中的分片顺序必须完全一致。 */
-    MysqlVectorCutRemoteClient(DataSource center, Map<String, DataSource> shards, int stripes) {
+    /**
+     * Using the same layout to configure a detector, the order of shard in the reading response must be fully consistent.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     */
+    MysqlVectorCutRemoteClient(final DataSource center, final Map<String, DataSource> shards, final int stripes) {
         Objects.requireNonNull(shards, "shards");
         this.leases = new MysqlVectorCutLeaderLease(center, shards, stripes);
         this.routes = shards.keySet().stream().sorted().toList();
         this.stripes = stripes;
     }
 
-    /** 一次 RC 语句取得远端当前切面；旧端点失效时重新发现一次。 */
+    /**
+     * A RC statement takes the current edge of a remote cut; it is rediscovered once the old end point has failed.
+     *
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
     MysqlVectorCutLeaderRuntime.PublishedView currentView() {
         for (int attempt = 0; attempt < 2; attempt++) {
             Endpoint endpoint = resolve();
@@ -55,11 +81,11 @@ final class MysqlVectorCutRemoteClient {
                     }
                 }
                 invalidate(endpoint);
-            } catch (InterruptedException ex) {
+            } catch (final InterruptedException ex) {
                 Thread.currentThread().interrupt();
                 throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                         "remote vector cut read interrupted", true, null, ex);
-            } catch (IOException | IllegalArgumentException ex) {
+            } catch (final IOException | IllegalArgumentException ex) {
                 invalidate(endpoint);
             }
         }
@@ -67,16 +93,20 @@ final class MysqlVectorCutRemoteClient {
                 "no current vector cut leader answered with the expected generation", true, null);
     }
 
-    /** 端点缓存只覆盖租约的保守前段，避免每条 RC 都读控制库。 */
+    /**
+     * Endpoint caches cover only the conservative front-end of lease, avoiding reading control libraries for each RC.
+     *
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
+     */
     private synchronized Endpoint resolve() {
         Endpoint current = cached;
         if (current != null && current.valid()) {
             return current;
         }
         long started = System.nanoTime();
-        var leader = leases.discover().orElseThrow(() ->
-                new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
-                        "vector cut has no active leader", true, null));
+        var leader = leases.discover().orElseThrow(() -> new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
+                "vector cut has no active leader", true, null));
         requireLoopbackEndpoint(leader.ownerId());
         long margin = Math.max(25, leader.remainingMillis() / 5);
         if (leader.remainingMillis() <= margin) {
@@ -89,8 +119,13 @@ final class MysqlVectorCutRemoteClient {
         return current;
     }
 
-    /** 回环实验只允许数字 IPv4 回环地址和有效端口，避免错误租约指向外部服务。 */
-    private static void requireLoopbackEndpoint(String ownerId) {
+    /**
+     * The return cycle experiment allows only a digital IPv4 return ring address and valid port to avoid error lease pointing at an external service.
+     *
+     * @param ownerId owner id
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static void requireLoopbackEndpoint(final String ownerId) {
         if (!ownerId.startsWith("127.0.0.1:")) {
             throw new IllegalArgumentException("vector cut owner is not a loopback endpoint");
         }
@@ -100,15 +135,38 @@ final class MysqlVectorCutRemoteClient {
             if (port < 1 || port > 65535) {
                 throw new IllegalArgumentException("vector cut owner port is invalid");
             }
-        } catch (NumberFormatException ex) {
+        } catch (final NumberFormatException ex) {
             throw new IllegalArgumentException("vector cut owner port is invalid", ex);
         }
     }
 
-    /** 只清理本次失败的旧端点，保留其他线程刚刷新的新领导者。 */
-    private synchronized void invalidate(Endpoint endpoint) {
+    /**
+     * Just clean up the old endpoint of this failure and keep other threads that have just refreshed new leaders.
+     *
+     * @param endpoint endpoint
+     */
+    private synchronized void invalidate(final Endpoint endpoint) {
         if (cached == endpoint) {
             cached = null;
+        }
+    }
+
+    /**
+     * Cache period is earlier than centre lease, expired or failed to be rediscovered.
+     *
+     * @param ownerId owner id
+     * @param generation generation
+     * @param validUntilNanos valid until nanos
+     */
+    private record Endpoint(String ownerId, long generation, long validUntilNanos) {
+
+        /**
+         * Expired endpoints should not be reused for subsequent transaction.
+         *
+         * @return the operation result
+         */
+        boolean valid() {
+            return validUntilNanos - System.nanoTime() > 0;
         }
     }
 }

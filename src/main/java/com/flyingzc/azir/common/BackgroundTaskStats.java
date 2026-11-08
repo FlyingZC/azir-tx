@@ -1,22 +1,45 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.common;
 
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 后台任务运行统计信息。
+ * Background Task running statistical information.
  */
 public final class BackgroundTaskStats {
+
     private final AtomicLong lastRunAtMillis = new AtomicLong();
+
     private final AtomicLong lastSuccessAtMillis = new AtomicLong();
+
     private final AtomicInteger runCount = new AtomicInteger();
+
     private final AtomicInteger failureCount = new AtomicInteger();
+
     private final AtomicLong lastProcessedCount = new AtomicLong();
 
     /**
-     * 记录一次后台任务成功执行。
+     * Record one successful background mission.
+     *
+     * @param processedCount processed count
      */
-    public void recordSuccess(long processedCount) {
+    public void recordSuccess(final long processedCount) {
         long now = System.currentTimeMillis();
         lastRunAtMillis.set(now);
         lastSuccessAtMillis.set(now);
@@ -25,7 +48,7 @@ public final class BackgroundTaskStats {
     }
 
     /**
-     * 记录一次后台任务失败。
+     * Failed to record an background job.
      */
     public void recordFailure() {
         lastRunAtMillis.set(System.currentTimeMillis());
@@ -34,35 +57,45 @@ public final class BackgroundTaskStats {
     }
 
     /**
-     * 返回最近一次运行时间。
+     * Returns the last run time.
+     *
+     * @return the operation result
      */
     public long lastRunAtMillis() {
         return lastRunAtMillis.get();
     }
 
     /**
-     * 返回最近一次成功时间。
+     * Returns the last successful time.
+     *
+     * @return the operation result
      */
     public long lastSuccessAtMillis() {
         return lastSuccessAtMillis.get();
     }
 
     /**
-     * 返回运行次数。
+     * Returns the number of times you run.
+     *
+     * @return the operation result
      */
     public int runCount() {
         return runCount.get();
     }
 
     /**
-     * 返回失败次数。
+     * Returns the number of failures.
+     *
+     * @return the operation result
      */
     public int failureCount() {
         return failureCount.get();
     }
 
     /**
-     * 返回最近一次处理的数据量。
+     * Returns the amount of last processed data.
+     *
+     * @return the operation result
      */
     public long lastProcessedCount() {
         return lastProcessedCount.get();

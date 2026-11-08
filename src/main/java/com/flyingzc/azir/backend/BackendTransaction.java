@@ -1,24 +1,86 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.backend;
 
-/** 可插拔事务内核会话，SQL 不解释原生协议的中间状态。 */
+/**
+ * Transaction kernel session, SQL does not explain the middle state of the original protocol.
+ */
 public interface BackendTransaction extends AutoCloseable {
-    /** 业务可观测的会话状态，UNKNOWN 不允许假回滚。 */
-    enum State { ACTIVE, COMMITTED, ABORTED, UNKNOWN }
-    /** 返回完整原事务身份。 */
+
+    /**
+     * Returns full transaction identity.
+     *
+     * @return the operation result
+     */
     BackendId id();
-    /** 返回当前会话状态。 */
+
+    /**
+     * Return the current session state.
+     *
+     * @return the operation result
+     */
     State state();
-    /** 创建单条 SQL 使用的固定语句视图。 */
+
+    /**
+     * Creates a fixed statement view for a single SQL.
+     *
+     * @return the operation result
+     */
     BackendReadView statement();
-    /** 在当前业务事务写入非空值。 */
+
+    /**
+     * Writing non-empty values for current business transaction.
+     *
+     * @param shard logical shard identifier
+     * @param key business key
+     * @param value value to write
+     */
     void put(String shard, String key, byte[] value);
-    /** 在当前业务事务写入删除墓碑。 */
+
+    /**
+     * Write a deletion tombstone in the current business transaction.
+     *
+     * @param shard logical shard identifier
+     * @param key business key
+     */
     void delete(String shard, String key);
-    /** 经原生核心确认持久提交，重复成功返回同一凭据。 */
+
+    /**
+     * Durable commit confirmed with original core and returned the same receipt successfully.
+     *
+     * @return the operation result
+     */
     BackendCommit commit();
-    /** 仅对尚未提交的原事务作明确回滚。 */
+
+    /**
+     * Only the original transaction which is not yet commit is specified rollback.
+     */
     void rollback();
-    /** 关闭活动事务，保留 UNKNOWN 的原始身份与决议。 */
+
+    /**
+     * Close active transaction, keep the original identity and decision of UNKNOWN.
+     */
     @Override
     void close();
+
+    /**
+     * Operationally detectable session state, UNKNOWN does not allow fake rollback.
+     */
+    enum State {
+        ACTIVE, COMMITTED, ABORTED, UNKNOWN
+    }
 }

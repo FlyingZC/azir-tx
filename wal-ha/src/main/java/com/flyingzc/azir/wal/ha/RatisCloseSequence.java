@@ -1,19 +1,50 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal.ha;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 
-/** 按依赖顺序释放资源，失败保留当前阶段，成功阶段不会在重试时重复执行。 */
+/**
+ * Closes resources in dependency order, retaining unfinished cleanup stages for retry.
+ */
 final class RatisCloseSequence implements Closeable {
+
     private final List<Closeable> steps;
+
     private int next;
 
-    /** 调用方明确安排先停生产者、再排空消费者、最后释放存储和保护登记。 */
-    RatisCloseSequence(Closeable... steps) { this.steps = List.of(steps); }
+    /**
+     * Callers have clear arrangements to stop first producers, then empty consumers, final release storage and protection registration.
+     *
+     * @param steps steps
+     */
+    RatisCloseSequence(final Closeable... steps) {
+        this.steps = List.of(steps);
+    }
 
-    /** 任一步失败就停止，不提前释放仍可能被前一阶段使用的资源。 */
-    @Override public synchronized void close() throws IOException {
+    /**
+     * Any failure would stop, and resources that could still be used at a previous stage would not be released early.
+     *
+     * @throws IOException if the operation cannot complete
+     */
+    @Override
+    public synchronized void close() throws IOException {
         while (next < steps.size()) {
             steps.get(next).close();
             next++;

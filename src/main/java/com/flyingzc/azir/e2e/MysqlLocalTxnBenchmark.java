@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.flyingzc.azir.storage.mysql.MysqlDataSourceFactory;
@@ -15,19 +31,23 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * MySQL 本地事务基准测试入口。
+ * MySQL local transaction benchmark test entrance.
  */
 public final class MysqlLocalTxnBenchmark {
+
     /**
-     * 构造 MysqlLocalTxnBenchmark 实例。
+     * Construct a MysqlLocalTxnBenchmark instance.
      */
     private MysqlLocalTxnBenchmark() {
     }
 
     /**
-     * 程序入口方法。
+     * Run the application entry point.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
      */
-    public static void main(String[] args) throws Exception {
+    public static void main(final String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource dataSource = MysqlDataSourceFactory.create(config.jdbcUrl(), config.username(), config.password());
         try {
@@ -47,11 +67,15 @@ public final class MysqlLocalTxnBenchmark {
     }
 
     /**
-     * 初始化所需的数据库表结构或运行环境。
+     * Initialize the required database tables or runtime environment.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void initialize(DataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement()) {
+    private static void initialize(final DataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement()) {
             statement.execute("""
                     create table if not exists bench_single_a (
                       k varchar(128) not null primary key,
@@ -68,29 +92,37 @@ public final class MysqlLocalTxnBenchmark {
     }
 
     /**
-     * 重置基准测试表数据。
+     * Reset the benchmark tables.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void reset(DataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             Statement statement = connection.createStatement()) {
+    private static void reset(final DataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement()) {
             statement.execute("delete from bench_single_a");
             statement.execute("delete from bench_single_b");
         }
     }
 
     /**
-     * 写入热点行初始数据。
+     * Insert initial hot-row data.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void seedHotRows(DataSource dataSource) throws Exception {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement insertA = connection.prepareStatement("""
-                     insert into bench_single_a(k, v) values (?, ?)
-                     on duplicate key update v = values(v)
-                     """);
-             PreparedStatement insertB = connection.prepareStatement("""
-                     insert into bench_single_b(k, v) values (?, ?)
-                     on duplicate key update v = values(v)
-                     """)) {
+    private static void seedHotRows(final DataSource dataSource) throws Exception {
+        try (
+                Connection connection = dataSource.getConnection();
+                PreparedStatement insertA = connection.prepareStatement("""
+                        insert into bench_single_a(k, v) values (?, ?)
+                        on duplicate key update v = values(v)
+                        """);
+                PreparedStatement insertB = connection.prepareStatement("""
+                        insert into bench_single_b(k, v) values (?, ?)
+                        on duplicate key update v = values(v)
+                        """)) {
             insertA.setString(1, "hot");
             insertA.setString(2, "v");
             insertA.executeUpdate();
@@ -101,9 +133,14 @@ public final class MysqlLocalTxnBenchmark {
     }
 
     /**
-     * 执行基准测试并返回统计结果。
+     * Run the benchmark and return its statistics.
+     *
+     * @param dataSource database connection source
+     * @param config config
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
-    private static BenchmarkResult runBenchmark(DataSource dataSource, Config config) throws Exception {
+    private static BenchmarkResult runBenchmark(final DataSource dataSource, final Config config) throws Exception {
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
         LongAdder conflicts = new LongAdder();
@@ -132,7 +169,7 @@ public final class MysqlLocalTxnBenchmark {
                                 }
                                 connection.commit();
                                 committed.increment();
-                            } catch (SQLException ex) {
+                            } catch (final SQLException ex) {
                                 connection.rollback();
                                 if (isConflict(ex)) {
                                     conflicts.increment();
@@ -142,11 +179,11 @@ public final class MysqlLocalTxnBenchmark {
                             } finally {
                                 connection.setAutoCommit(true);
                             }
-                        } catch (SQLException ex) {
+                        } catch (final SQLException ex) {
                             failures.increment();
                         }
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 } finally {
                     finishLatch.countDown();
@@ -164,17 +201,22 @@ public final class MysqlLocalTxnBenchmark {
     }
 
     /**
-     * 执行无冲突的本地事务。
+     * Execute conflict-free local transaction.
+     *
+     * @param connection connection
+     * @param id id
+     * @throws SQLException if the operation cannot complete
      */
-    private static void executeNoConflictTxn(Connection connection, long id) throws SQLException {
-        try (PreparedStatement writeA = connection.prepareStatement("""
-                insert into bench_single_a(k, v) values (?, ?)
-                on duplicate key update v = values(v)
-                """);
-             PreparedStatement writeB = connection.prepareStatement("""
-                insert into bench_single_b(k, v) values (?, ?)
-                on duplicate key update v = values(v)
-                """)) {
+    private static void executeNoConflictTxn(final Connection connection, final long id) throws SQLException {
+        try (
+                PreparedStatement writeA = connection.prepareStatement("""
+                        insert into bench_single_a(k, v) values (?, ?)
+                        on duplicate key update v = values(v)
+                        """);
+                PreparedStatement writeB = connection.prepareStatement("""
+                        insert into bench_single_b(k, v) values (?, ?)
+                        on duplicate key update v = values(v)
+                        """)) {
             writeA.setString(1, "bench:a:" + id);
             writeA.setString(2, "v" + id);
             writeA.executeUpdate();
@@ -186,15 +228,19 @@ public final class MysqlLocalTxnBenchmark {
     }
 
     /**
-     * 执行会竞争热点行的本地事务。
+     * Enforcement competes for local transaction lines.
+     *
+     * @param connection connection
+     * @throws SQLException if the operation cannot complete
      */
-    private static void executeConflictTxn(Connection connection) throws SQLException {
-        try (PreparedStatement updateA = connection.prepareStatement("""
-                update bench_single_a set v = ? where k = 'hot'
-                """);
-             PreparedStatement updateB = connection.prepareStatement("""
-                update bench_single_b set v = ? where k = 'hot'
-                """)) {
+    private static void executeConflictTxn(final Connection connection) throws SQLException {
+        try (
+                PreparedStatement updateA = connection.prepareStatement("""
+                        update bench_single_a set v = ? where k = 'hot'
+                        """);
+                PreparedStatement updateB = connection.prepareStatement("""
+                        update bench_single_b set v = ? where k = 'hot'
+                        """)) {
             String value = Long.toString(System.nanoTime());
             updateA.setString(1, value);
             updateA.executeUpdate();
@@ -204,35 +250,64 @@ public final class MysqlLocalTxnBenchmark {
     }
 
     /**
-     * 判断 SQL 异常是否为事务冲突。
+     * Determine whether the SQL failure represents a transaction conflict.
+     *
+     * @param ex ex
+     * @return the operation result
      */
-    private static boolean isConflict(SQLException ex) {
+    private static boolean isConflict(final SQLException ex) {
         return ex instanceof SQLTransactionRollbackException
                 || "40001".equals(ex.getSQLState())
                 || "41000".equals(ex.getSQLState());
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void close(DataSource dataSource) throws Exception {
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
     /**
-     * 基准测试配置对象。
+     * Read a string-valued environment variable.
+     *
+     * @param key business key
+     * @param defaultValue default value
+     * @return the operation result
+     */
+    private static String env(final String key, final String defaultValue) {
+        String value = System.getenv(key);
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    /**
+     * Benchmark configuration.
+     *
+     * @param jdbcUrl jdbc url
+     * @param username username
+     * @param password password
+     * @param resetTables reset tables
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param conflictMode conflict mode
      */
     private record Config(String jdbcUrl,
-                          String username,
-                          String password,
-                          boolean resetTables,
-                          int concurrency,
-                          int durationSeconds,
-                          boolean conflictMode) {
+            String username,
+            String password,
+            boolean resetTables,
+            int concurrency,
+            int durationSeconds,
+            boolean conflictMode) {
+
         /**
-         * 从环境变量读取配置对象。
+         * Read configuration from environment variables.
+         *
+         * @return the operation result
          */
         private static Config fromEnv() {
             return new Config(
@@ -242,23 +317,32 @@ public final class MysqlLocalTxnBenchmark {
                     Boolean.parseBoolean(env("AZIR_TX_RESET", "true")),
                     Integer.parseInt(env("AZIR_TX_BENCH_CONCURRENCY", "50")),
                     Integer.parseInt(env("AZIR_TX_BENCH_DURATION_SECONDS", "10")),
-                    Boolean.parseBoolean(env("AZIR_TX_BENCH_CONFLICT", "false"))
-            );
+                    Boolean.parseBoolean(env("AZIR_TX_BENCH_CONFLICT", "false")));
         }
     }
 
     /**
-     * 基准测试结果对象。
+     * Benchmark results.
+     *
+     * @param elapsedSeconds elapsed seconds
+     * @param attempts attempts
+     * @param committed committed
+     * @param conflicts conflicts
+     * @param failures failures
      */
     private record BenchmarkResult(double elapsedSeconds,
-                                   long attempts,
-                                   long committed,
-                                   long conflicts,
-                                   long failures) {
+            long attempts,
+            long committed,
+            long conflicts,
+            long failures) {
+
         /**
-         * 将基准测试结果格式化为一行文本。
+         * Format benchmark results as a single line.
+         *
+         * @param config config
+         * @return the operation result
          */
-        private String toLine(Config config) {
+        private String toLine(final Config config) {
             double attemptTps = attempts / elapsedSeconds;
             double commitTps = committed / elapsedSeconds;
             double conflictTps = conflicts / elapsedSeconds;
@@ -274,13 +358,5 @@ public final class MysqlLocalTxnBenchmark {
                     + " commit_tps=" + String.format("%.2f", commitTps)
                     + " conflict_tps=" + String.format("%.2f", conflictTps);
         }
-    }
-
-    /**
-     * 读取字符串环境变量配置。
-     */
-    private static String env(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value == null || value.isBlank() ? defaultValue : value;
     }
 }

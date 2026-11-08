@@ -1,4 +1,25 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.gc;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import org.junit.jupiter.api.Assertions;
 
 import com.flyingzc.azir.common.IsolationLevel;
 import com.flyingzc.azir.metadata.InMemoryTransactionMetadataStore;
@@ -15,63 +36,92 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.jupiter.api.Assertions.*;
-
-/** 使用可控单调时钟验证小预算下分片和元数据回收的最低进展。 */
+/**
+ * Minimum progress using controlled monotonic clock verify small budget shard and metadata collection.
+ */
 class GcProgressBudgetTest {
-    /** 控制阶段和每个工作单元均超过一毫秒，轮转仍覆盖所有分片及元数据。 */
+
+    /**
+     * The control phase and each work unit exceed one millisecond and the rotation still covers all shard and metadata.
+     */
     @Test
     void oneMillisecondBudgetStillRotatesThroughAllWork() {
         var fixture = new Fixture();
         fixture.records.createCommitted(1, 1, IsolationLevel.REPEATABLE_READ, Set.of(), 2);
         fixture.records.markFinalized(1);
         var gc = fixture.manager(Map.of("a", fixture.adapter("a", false), "b", fixture.adapter("b", false)));
-        assertEquals(1, gc.gcOnce(1));
-        assertEquals(1, gc.gcOnce(1));
-        assertEquals(0, gc.gcOnce(1));
-        assertEquals(List.of("a", "b", "metadata"), fixture.work);
+        Assertions.assertEquals(1, gc.gcOnce(1));
+        Assertions.assertEquals(1, gc.gcOnce(1));
+        Assertions.assertEquals(0, gc.gcOnce(1));
+        Assertions.assertEquals(List.of("a", "b", "metadata"), fixture.work);
         assertTrue(fixture.records.get(1).isEmpty());
-        assertEquals(1, gc.gcOnce(1));
-        assertEquals(List.of("a", "b", "metadata", "a"), fixture.work);
+        Assertions.assertEquals(1, gc.gcOnce(1));
+        Assertions.assertEquals(List.of("a", "b", "metadata", "a"), fixture.work);
     }
 
-    /** 某分片持续失败时游标也必须前移，不能饿死其他分片或元数据清理。 */
+    /**
+     * Cursor must also move forward when an shard continues to fail and cannot starve to another shard or metadata cleanup.
+     */
     @Test
     void failingShardDoesNotKeepTheNextRoundOnTheSameWork() {
         var fixture = new Fixture();
         var gc = fixture.manager(Map.of("a", fixture.adapter("a", true), "b", fixture.adapter("b", false)));
         assertThrows(IllegalStateException.class, () -> gc.gcOnce(1));
-        assertEquals(1, gc.gcOnce(1));
-        assertEquals(0, gc.gcOnce(1));
-        assertEquals(List.of("a", "b", "metadata"), fixture.work);
+        Assertions.assertEquals(1, gc.gcOnce(1));
+        Assertions.assertEquals(0, gc.gcOnce(1));
+        Assertions.assertEquals(List.of("a", "b", "metadata"), fixture.work);
     }
 
-    /** 没有参与分片时，长控制阶段后仍必须执行一个元数据清理批次。 */
+    /**
+     * If shard is not involved, a metadata cleanup batch must be performed after the long control phase.
+     */
     @Test
     void metadataOnlyGcAlwaysAttemptsItsWorkUnit() {
         var fixture = new Fixture();
         var gc = fixture.manager(Map.of());
-        assertEquals(0, gc.gcOnce(1));
-        assertEquals(List.of("metadata"), fixture.work);
+        Assertions.assertEquals(0, gc.gcOnce(1));
+        Assertions.assertEquals(List.of("metadata"), fixture.work);
     }
 
-    /** 通过调用行为推进虚拟时间，不依赖休眠、线程调度或真实数据库。 */
+    /**
+     * Advancing virtual time by calling behaviour, does not depend on hibernation, linear movement or real database.
+     */
     private static final class Fixture {
+
         private final AtomicLong nanos = new AtomicLong();
+
         private final InMemoryTransactionMetadataStore records = new InMemoryTransactionMetadataStore();
+
         private final List<String> work = new ArrayList<>();
 
-        /** 构造一毫秒预算的 GC，控制阶段固定消耗十毫秒。 */
-        private GcManager manager(Map<String, StorageAdapter> adapters) {
+        /**
+         * Construct the GC of one millisecond budget, with a fixed consumption of 10 milliseconds during the control phase.
+         *
+         * @param adapters adapters
+         * @return the operation result
+         */
+        private GcManager manager(final Map<String, StorageAdapter> adapters) {
             var watermark = new InMemorySafePointStore(0);
             SafePointStore slowControl = new SafePointStore() {
-                /** 返回真实测试水位。 */
-                @Override
-                public long currentSafePoint() { return watermark.currentSafePoint(); }
 
-                /** 模拟慢控制面，但不消耗真实时间。 */
+                /**
+                 * Returns real test watermark.
+                 *
+                 * @return the operation result
+                 */
                 @Override
-                public long advanceTo(long candidate) {
+                public long currentSafePoint() {
+                    return watermark.currentSafePoint();
+                }
+
+                /**
+                 * Simulates slow control surface, but does not consume real time.
+                 *
+                 * @param candidate candidate
+                 * @return the operation result
+                 */
+                @Override
+                public long advanceTo(final long candidate) {
                     nanos.addAndGet(10_000_000);
                     return watermark.advanceTo(candidate);
                 }
@@ -79,7 +129,11 @@ class GcProgressBudgetTest {
             return new GcManager(metadata(), new AtomicTimestampOracle(100), slowControl, adapters, 1, 0, 1, nanos::get);
         }
 
-        /** 保留真实元数据行为，只记录清理工作并提供固定未来墙钟。 */
+        /**
+         * Maintenance of real metadata behaviour, only recording clean-up and providing fixed future wall clocks.
+         *
+         * @return the operation result
+         */
         private TransactionMetadataStore metadata() {
             return (TransactionMetadataStore) Proxy.newProxyInstance(TransactionMetadataStore.class.getClassLoader(),
                     new Class<?>[]{TransactionMetadataStore.class}, (proxy, method, args) -> {
@@ -92,14 +146,20 @@ class GcProgressBudgetTest {
                         }
                         try {
                             return method.invoke(records, args);
-                        } catch (InvocationTargetException ex) {
+                        } catch (final InvocationTargetException ex) {
                             throw ex.getCause();
                         }
                     });
         }
 
-        /** 模拟一个必定耗尽本轮剩余预算的分片工作单元。 */
-        private StorageAdapter adapter(String shardId, boolean fail) {
+        /**
+         * Simulates an shard work unit that is bound to exhaust the remaining budget in this round.
+         *
+         * @param shardId logical shard identifier
+         * @param fail fail
+         * @return the operation result
+         */
+        private StorageAdapter adapter(final String shardId, final boolean fail) {
             return (StorageAdapter) Proxy.newProxyInstance(StorageAdapter.class.getClassLoader(), new Class<?>[]{StorageAdapter.class},
                     (proxy, method, args) -> {
                         if (method.getName().equals("shardId")) {

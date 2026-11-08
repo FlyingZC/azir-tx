@@ -1,3 +1,21 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.flyingzc.azir.e2e;
+
 import com.flyingzc.azir.common.IsolationLevel;
 import com.flyingzc.azir.metadata.mysql.MysqlTransactionMetadataStore;
 import com.flyingzc.azir.storage.mysql.MysqlDataSourceFactory;
@@ -11,20 +29,31 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.util.Map;
 
-/** 在隔离 MySQL 上记录一笔完整事务的控制 SQL；general log 仅用于计数，不用于吞吐测量。 */
+/**
+ * A complete transaction control SQL;general log is recorded on MySQL for count only and not for throughput measurements.
+ */
 public final class ControlSqlTrace {
-    /** 工具类不允许实例化。 */
+
+    /**
+     * Prevent instantiation of this utility class.
+     */
     private ControlSqlTrace() {
     }
 
-    /** 初始化专用库后记录单片或跨片事务，退出前关闭本次启用的 general log。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * Document single or cross-shard transaction after initializing the special library, close this enabled general log before you quit.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         boolean cross = args.length > 0 && args[0].equals("cross");
         String base = System.getenv("AZIR_TRACE_JDBC_BASE");
         String password = System.getenv("AZIR_TX_PASSWORD");
-        try (var control = (HikariDataSource) MysqlDataSourceFactory.create(base + "trace_control", "root", password);
-             var first = (HikariDataSource) MysqlDataSourceFactory.create(base + "trace_shard_a", "root", password);
-             var second = (HikariDataSource) MysqlDataSourceFactory.create(base + "trace_shard_b", "root", password)) {
+        try (
+                var control = (HikariDataSource) MysqlDataSourceFactory.create(base + "trace_control", "root", password);
+                var first = (HikariDataSource) MysqlDataSourceFactory.create(base + "trace_shard_a", "root", password);
+                var second = (HikariDataSource) MysqlDataSourceFactory.create(base + "trace_shard_b", "root", password)) {
             var metadata = new MysqlTransactionMetadataStore(control);
             var tso = new MysqlTimestampOracle(control);
             var a = new MysqlStorageAdapter("a", first, metadata);
@@ -33,10 +62,11 @@ public final class ControlSqlTrace {
             metadata.initialize();
             a.initialize();
             b.initialize();
-            try (var manager = new TransactionManager(tso, metadata, TransactionOptions.defaults(),
-                    Map.of("a", a, "b", b));
-                 Connection admin = control.getConnection();
-                 var statement = admin.createStatement()) {
+            try (
+                    var manager = new TransactionManager(tso, metadata, TransactionOptions.defaults(),
+                            Map.of("a", a, "b", b));
+                    Connection admin = control.getConnection();
+                    var statement = admin.createStatement()) {
                 statement.execute("set global log_output = 'TABLE'");
                 statement.execute("truncate table mysql.general_log");
                 statement.execute("set global general_log = 'ON'");

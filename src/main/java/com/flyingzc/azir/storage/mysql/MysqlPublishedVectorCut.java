@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -24,57 +40,105 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 import java.util.HexFormat;
 
-/** 按批发布持久跨分片向量切面，写入确认必须等待自身序号进入切面。 */
+/**
+ * Releases durable cross-shard vector tangent by batch, writing confirmation must wait for your own serial number to enter the quadrant.
+ */
 final class MysqlPublishedVectorCut implements AutoCloseable {
+
     private final DataSource center;
+
     private final MysqlStripedSnapshotOracle oracle;
+
     private final LongSupplier decisionEpoch;
+
     private final List<String> routes;
+
     private final int stripes;
+
     private final String layoutHash;
+
     private final boolean volatileExperiment;
+
     private final boolean productState;
+
     private final String cutTable;
+
     private final MysqlVectorCutLeaderLease.LeaseGuard leaseGuard;
+
     private final ReentrantLock waitLock = new ReentrantLock();
+
     private final Condition changed = waitLock.newCondition();
+
     private final LongAdder sampleNanos = new LongAdder();
+
     private final LongAdder centerNanos = new LongAdder();
+
     private final LongAdder samples = new LongAdder();
+
     private final LongAdder centerWrites = new LongAdder();
+
     private volatile Cut cached;
 
-    /** 持久行同时保存中心决议、各分条上界和单调发布代数。 */
-    private record Cut(MysqlStripedSnapshotOracle.Snapshot snapshot, long generation) {
-    }
-
-    /** 发布器必须绑定固定路由集合和分条数，防止故障切换后误解码旧切面。 */
-    MysqlPublishedVectorCut(DataSource center, Map<String, DataSource> shards, int stripes,
-                            LongSupplier decisionEpoch) {
+    /**
+     * The publisher shall bind the fixed route by a set and bar count to prevent any misunderstanding of the old cut-off after failover.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     */
+    MysqlPublishedVectorCut(final DataSource center, final Map<String, DataSource> shards, final int stripes,
+                            final LongSupplier decisionEpoch) {
         this(center, shards, stripes, decisionEpoch, false, null, false);
     }
 
-    /** 正式分片水位使用独立持久切面表，不读取容量探针数据。 */
-    static MysqlPublishedVectorCut productDurable(DataSource center,
-                                                   Map<String, DataSource> shards, int stripes,
-                                                   LongSupplier decisionEpoch) {
+    /**
+     * Formal shard watermark uses a stand-alone durable surface table without reading the capacity probe data.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     * @return the operation result
+     */
+    static MysqlPublishedVectorCut productDurable(final DataSource center,
+                                                  final Map<String, DataSource> shards, final int stripes,
+                                                  final LongSupplier decisionEpoch) {
         return new MysqlPublishedVectorCut(center, shards, stripes, decisionEpoch,
                 false, null, true);
     }
 
-    /** 纯内存模式只用于验证无每批 fsync 的容量上界，生产调用方不得选择它。 */
-    static MysqlPublishedVectorCut experimentalVolatile(DataSource center,
-                                                         Map<String, DataSource> shards, int stripes,
-                                                         LongSupplier decisionEpoch) {
+    /**
+     * Pure memory mode is used only for the upper limit of verify without each fsync and cannot be selected by the producer caller.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     * @return the operation result
+     */
+    static MysqlPublishedVectorCut experimentalVolatile(final DataSource center,
+                                                        final Map<String, DataSource> shards, final int stripes,
+                                                        final LongSupplier decisionEpoch) {
         return new MysqlPublishedVectorCut(center, shards, stripes, decisionEpoch,
                 true, null, false);
     }
 
-    /** 领导者模式要求先取得持久租约，旧代数到期后不再服务客户端。 */
-    static MysqlPublishedVectorCut leasedVolatile(DataSource center,
-                                                   Map<String, DataSource> shards, int stripes,
-                                                   LongSupplier decisionEpoch,
-                                                   MysqlVectorCutLeaderLease.LeaseGuard guard) {
+    /**
+     * The leader mode requires durable lease first, and no longer serves the client after the old algebra expires.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     * @param guard guard
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    static MysqlPublishedVectorCut leasedVolatile(final DataSource center,
+                                                  final Map<String, DataSource> shards, final int stripes,
+                                                  final LongSupplier decisionEpoch,
+                                                  final MysqlVectorCutLeaderLease.LeaseGuard guard) {
         Objects.requireNonNull(guard, "guard").requireActive();
         if (guard.productMode()) {
             throw new IllegalArgumentException("benchmark cut cannot use product vector lease");
@@ -87,11 +151,21 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
                 true, guard, false);
     }
 
-    /** 正式参与者的持租约快切面从真实水位表重建，不写每批中心单例行。 */
-    static MysqlPublishedVectorCut leasedProduct(DataSource center,
-                                                  Map<String, DataSource> shards, int stripes,
-                                                  LongSupplier decisionEpoch,
-                                                  MysqlVectorCutLeaderLease.LeaseGuard guard) {
+    /**
+     * The official participant hold lease Quick-Tanger is rebuilt from the real watermark table and does not write a routine for each batch.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     * @param guard guard
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    static MysqlPublishedVectorCut leasedProduct(final DataSource center,
+                                                 final Map<String, DataSource> shards, final int stripes,
+                                                 final LongSupplier decisionEpoch,
+                                                 final MysqlVectorCutLeaderLease.LeaseGuard guard) {
         Objects.requireNonNull(guard, "guard").requireActive();
         if (!guard.productMode()) {
             throw new IllegalArgumentException("product cut requires product vector lease");
@@ -104,11 +178,21 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
                 true, guard, true);
     }
 
-    /** 固定是否执行明确标记的非持久容量实验。 */
-    private MysqlPublishedVectorCut(DataSource center, Map<String, DataSource> shards, int stripes,
-                                    LongSupplier decisionEpoch, boolean volatileExperiment,
-                                    MysqlVectorCutLeaderLease.LeaseGuard leaseGuard,
-                                    boolean productState) {
+    /**
+     * Fixed whether or not to perform clearly marked non- durable capacity experiments.
+     *
+     * @param center center
+     * @param shards shards
+     * @param stripes stripes
+     * @param decisionEpoch decision epoch
+     * @param volatileExperiment volatile experiment
+     * @param leaseGuard lease guard
+     * @param productState product state
+     */
+    private MysqlPublishedVectorCut(final DataSource center, final Map<String, DataSource> shards, final int stripes,
+                                    final LongSupplier decisionEpoch, final boolean volatileExperiment,
+                                    final MysqlVectorCutLeaderLease.LeaseGuard leaseGuard,
+                                    final boolean productState) {
         this.center = Objects.requireNonNull(center, "center");
         this.decisionEpoch = Objects.requireNonNull(decisionEpoch, "decisionEpoch");
         this.oracle = productState
@@ -123,7 +207,12 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         this.cutTable = productState ? "mvcc_vector_published_cut_v1" : "bench_striped_published_cut";
     }
 
-    /** 只在显式隔离控制库重建实验表，初始切面先读决议再读分片。 */
+    /**
+     * Rebuild test forms only for visible isolation control libraries, with decision read first on the initial cut-off and then shard.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
     void initializeIsolated() {
         if (volatileExperiment || productState) {
             throw new IllegalStateException("isolated benchmark cut cannot initialize this state source");
@@ -154,12 +243,17 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
                 }
             }
             installCache(new Cut(new MysqlStripedSnapshotOracle.Snapshot(epoch, vector), 1));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("initialize published vector cut failed", ex);
         }
     }
 
-    /** 正式控制库只创建或验证切面，不清空先前已确认的持久向量。 */
+    /**
+     * The official control library creates only or verify tangents and is not clear about emptying previously confirmed durable vectors.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
     void initializeProduct() {
         if (!productState || volatileExperiment) {
             throw new IllegalStateException("product durable cut requires product state source");
@@ -199,12 +293,16 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
                 }
             }
             installCache(persisted);
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("initialize product vector cut failed", ex);
         }
     }
 
-    /** 崩溃重启从持久分片和中心决议重建切面；仅验证单领导者实验上界。 */
+    /**
+     * Collapse restarts re-rehabilitation from durable shard and Centre decision; only verify single leader experiment upper bounds.
+     *
+     * @throws IllegalStateException if the operation cannot complete
+     */
     void initializeVolatile() {
         if (!volatileExperiment) {
             throw new IllegalStateException("durable cut must initialize its center table");
@@ -217,7 +315,12 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
                 epoch, vector), 1));
     }
 
-    /** 单轮先采中心决议再采各分片，控制库一次事务发布完整单调切面。 */
+    /**
+     * The single-wheel first extraction centre decision and then each shard and the control library transaction release a complete monotangular dimension.
+     *
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
     MysqlStripedSnapshotOracle.Snapshot publishOnce() {
         requireLeader();
         long epoch = decisionEpoch.getAsLong();
@@ -271,15 +374,20 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
             }
             centerNanos.add(System.nanoTime() - centerStarted);
             centerWrites.increment();
-            // JDBC 自动提交成功后再唤醒等待者；响应未知绝不提前确认。
+            // JDBC autocommit wakes up the waiter after success; response to unknown is never confirmed in advance.
             installCache(new Cut(next, old.generation() + 1));
             return next;
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("publish vector cut failed", ex);
         }
     }
 
-    /** RC 每条语句读取持久最新切面；RR 调用方保存第一次返回的不可变结果。 */
+    /**
+     * RC Each statement reads the latest durable tangent; RR caller saves the first returned immutable result.
+     *
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
     MysqlStripedSnapshotOracle.Snapshot currentCut() {
         if (volatileExperiment) {
             requireLeader();
@@ -291,12 +399,14 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         }
         try (Connection connection = center.getConnection()) {
             return readCut(connection, false).snapshot();
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("read published vector cut failed", ex);
         }
     }
 
-    /** 多进程协调器可按批刷新本地确认缓存，而无需每笔写入查询中心。 */
+    /**
+     * Multi-process coordinator can update the local cache by batch, without each writing to a query centre.
+     */
     void refresh() {
         if (volatileExperiment) {
             publishOnce();
@@ -304,25 +414,43 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         }
         try (Connection connection = center.getConnection()) {
             installCache(readCut(connection, false));
-        } catch (SQLException ex) {
+        } catch (final SQLException ex) {
             throw unavailable("refresh published vector cut failed", ex);
         }
     }
 
-    /** 仅供容量探针读取并行分片单次采样的均值毫秒数。 */
+    /**
+     * Only the average number of milliseconds for capacity probe to read a parallel shard single-time sample.
+     *
+     * @return the operation result
+     */
     double sampleAverageMillis() {
         return samples.sum() == 0 ? Double.NaN : sampleNanos.sum() / (double) samples.sum() / 1_000_000.0;
     }
 
-    /** 仅供容量探针读取中心持久单行更新的均值毫秒数。 */
+    /**
+     * Only the average number of milliseconds for capacity probe reading centres durable single-line updates.
+     *
+     * @return the operation result
+     */
     double centerWriteAverageMillis() {
         return centerWrites.sum() == 0 ? Double.NaN
                 : centerNanos.sum() / (double) centerWrites.sum() / 1_000_000.0;
     }
 
-    /** 仅在持久切面包含本地序号和必要中心决议后确认写事务。 */
-    void awaitLocallyPublished(String shardId, int stripe, long sequence,
-                               long minimumDecisionEpoch, long timeoutMillis) {
+    /**
+     * Only confirm transaction after the durable cut contains the local serial number and necessary centre decision.
+     *
+     * @param shardId logical shard identifier
+     * @param stripe stripe
+     * @param sequence sequence
+     * @param minimumDecisionEpoch minimum decision epoch
+     * @param timeoutMillis timeout millis
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    void awaitLocallyPublished(final String shardId, final int stripe, final long sequence,
+                               final long minimumDecisionEpoch, final long timeoutMillis) {
         if (sequence < 0 || minimumDecisionEpoch < 0 || timeoutMillis < 1) {
             throw new IllegalArgumentException("invalid published vector wait boundary");
         }
@@ -345,7 +473,7 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
                     changed.awaitNanos(Math.min(remaining, leaseRemaining));
                     remaining -= System.nanoTime() - waitStarted;
                     requireLeader();
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                     throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                             "published vector wait interrupted", true, null, ex);
@@ -357,13 +485,21 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         }
     }
 
-    /** 读出中心单例行并验证固定路由布局，拒绝不兼容的故障恢复数据。 */
-    private Cut readCut(Connection connection, boolean lock) throws SQLException {
+    /**
+     * Reads the centre list routine and verify fixed route layout, rejecting incompatible failure recovery data.
+     *
+     * @param connection connection
+     * @param lock lock
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private Cut readCut(final Connection connection, final boolean lock) throws SQLException {
         String sql = "select layout_hash, decision_epoch, generation, vector_bytes "
                 + "from " + cutTable + " where singleton_id = 1"
                 + (lock ? " for update" : "");
-        try (PreparedStatement query = connection.prepareStatement(sql);
-             ResultSet row = query.executeQuery()) {
+        try (
+                PreparedStatement query = connection.prepareStatement(sql);
+                ResultSet row = query.executeQuery()) {
             if (!row.next() || !layoutHash.equals(row.getString("layout_hash"))) {
                 throw new SQLException("published vector route layout is missing or changed");
             }
@@ -377,8 +513,14 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         }
     }
 
-    /** 路由按固定顺序编码为无符号语义的长整数序列。 */
-    private byte[] encode(Map<String, List<Long>> values) {
+    /**
+     * Paths are encoded in fixed order as long integer series with no symbol semantics.
+     *
+     * @param values values
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private byte[] encode(final Map<String, List<Long>> values) {
         ByteBuffer bytes = ByteBuffer.allocate(Math.multiplyExact(Math.multiplyExact(routes.size(), stripes), Long.BYTES));
         for (String route : routes) {
             List<Long> sequences = values.get(route);
@@ -395,8 +537,14 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         return bytes.array();
     }
 
-    /** 解码前验证总长度和每个分量，损坏行不能变成可用读快照。 */
-    private Map<String, List<Long>> decode(byte[] encoded) throws SQLException {
+    /**
+     * Before decoding, the total length and weight of verify cannot be converted to readable snapshot.
+     *
+     * @param encoded encoded
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private Map<String, List<Long>> decode(final byte[] encoded) throws SQLException {
         int expected = Math.multiplyExact(Math.multiplyExact(routes.size(), stripes), Long.BYTES);
         if (encoded == null || encoded.length != expected) {
             throw new SQLException("published vector binary length differs from route layout");
@@ -417,8 +565,15 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         return Map.copyOf(values);
     }
 
-    /** 布局哈希把分片身份与分条数固化到持久行，避免相同长度的错误路由。 */
-    static String layoutFingerprint(List<String> routes, int stripes) {
+    /**
+     * Layout Hash solidifies shard identity and the fraction to durable rows, avoiding an error path of the same length.
+     *
+     * @param routes routes
+     * @param stripes stripes
+     * @return the operation result
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    static String layoutFingerprint(final List<String> routes, final int stripes) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(stripes).array());
@@ -428,13 +583,17 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
                 digest.update(name);
             }
             return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException ex) {
+        } catch (final NoSuchAlgorithmException ex) {
             throw new IllegalStateException("SHA-256 is required for published vector layout", ex);
         }
     }
 
-    /** 中心持久写成功后才唤醒本进程的提交等待者。 */
-    private void installCache(Cut cut) {
+    /**
+     * Center durable writes successfully to awaken the commit waiter for this process.
+     *
+     * @param cut cut
+     */
+    private void installCache(final Cut cut) {
         waitLock.lock();
         try {
             cached = cut;
@@ -444,7 +603,9 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         }
     }
 
-    /** 运行时撤销租约后立即唤醒正在等待发布确认的前台线程。 */
+    /**
+     * The foreground thread that is waiting to be confirmed is awakened as soon as the lease is aborted while running.
+     */
     void wakeWaiters() {
         waitLock.lock();
         try {
@@ -454,19 +615,29 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
         }
     }
 
-    /** 仅租约型内存发布者需要验证本地保守截止。 */
+    /**
+     * Only lease memory publisher needs verify local conservative deadline.
+     */
     private void requireLeader() {
         if (leaseGuard != null) {
             leaseGuard.requireActive();
         }
     }
 
-    /** SQL 故障使发布失败关闭，不得向客户端确认未入持久切面的写入。 */
-    private static MvccException unavailable(String message, SQLException cause) {
+    /**
+     * SQL failure shuts down the release and cannot confirm to the client that writing without an durable cut is not available.
+     *
+     * @param message message
+     * @param cause cause
+     * @return the operation result
+     */
+    private static MvccException unavailable(final String message, final SQLException cause) {
         return new MvccException(ErrorCode.STORAGE_UNAVAILABLE, message, true, null, cause);
     }
 
-    /** 释放后台并行采样线程。 */
+    /**
+     * Release background parallel sampling threads.
+     */
     @Override
     public void close() {
         if (leaseGuard != null) {
@@ -479,5 +650,14 @@ final class MysqlPublishedVectorCut implements AutoCloseable {
             }
         }
         oracle.close();
+    }
+
+    /**
+     * Line durable saves both the centre decision, the upper bounds of each strip and the single-tune release algebra.
+     *
+     * @param snapshot snapshot
+     * @param generation generation
+     */
+    private record Cut(MysqlStripedSnapshotOracle.Snapshot snapshot, long generation) {
     }
 }

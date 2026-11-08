@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
 import com.flyingzc.azir.api.Transaction;
@@ -14,31 +30,50 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Azir SQL 会话默认实现，把 SQL 计划映射到现有 MVCC 事务核心。
+ * The Azir SQL session default was achieved, and the SQL plan was mapped to the existing MVCC transaction core.
  */
 final class AzirSqlSession implements SqlSession {
+
     private final TransactionManager transactionManager;
+
     private final SqlPlanner planner;
+
     private final ShardResolver shardResolver;
+
     private final SqlValueCodec valueCodec;
+
     private final SqlStorageKeyCodec keyCodec;
+
     private final CalciteSqlExecutor calciteExecutor;
+
     private final IsolationLevel defaultIsolationLevel;
+
     private final SqlExecutionOptions executionOptions;
+
     private Transaction activeTransaction;
+
     private boolean invalidatedTransaction;
+
     private boolean closed;
 
     /**
-     * 构造 Azir SQL 会话。
+     * Construct Azir SQL session.
+     *
+     * @param transactionManager transaction manager
+     * @param planner planner
+     * @param shardResolver shard resolver
+     * @param valueCodec value codec
+     * @param keyCodec key codec
+     * @param defaultIsolationLevel default isolation level
+     * @param executionOptions execution options
      */
-    AzirSqlSession(TransactionManager transactionManager,
-                   SqlPlanner planner,
-                   ShardResolver shardResolver,
-                   SqlValueCodec valueCodec,
-                   SqlStorageKeyCodec keyCodec,
-                   IsolationLevel defaultIsolationLevel,
-                   SqlExecutionOptions executionOptions) {
+    AzirSqlSession(final TransactionManager transactionManager,
+                   final SqlPlanner planner,
+                   final ShardResolver shardResolver,
+                   final SqlValueCodec valueCodec,
+                   final SqlStorageKeyCodec keyCodec,
+                   final IsolationLevel defaultIsolationLevel,
+                   final SqlExecutionOptions executionOptions) {
         this.transactionManager = transactionManager;
         this.planner = planner;
         this.shardResolver = shardResolver;
@@ -50,10 +85,13 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 开启指定隔离级别的显式事务。
+     * Turn on visible transaction for the specified level of isolation.
+     *
+     * @param isolationLevel global transaction isolation level
+     * @throws MvccException if the operation cannot complete
      */
     @Override
-    public void begin(IsolationLevel isolationLevel) {
+    public void begin(final IsolationLevel isolationLevel) {
         ensureOpen();
         if (activeTransaction != null) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "transaction already active", false, activeTransaction.txId());
@@ -62,16 +100,21 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 执行一条 SQL 并返回结果。
+     * Run a SQL and return the results.
+     *
+     * @param sql sql
+     * @return the operation result
      */
     @Override
-    public SqlExecutionResult execute(String sql) {
+    public SqlExecutionResult execute(final String sql) {
         ensureOpen();
         return executePlan(planner.plan(sql));
     }
 
     /**
-     * 提交当前显式事务。
+     * Commit Current Visibility transaction.
+     *
+     * @return the operation result
      */
     @Override
     public SqlExecutionResult commit() {
@@ -81,9 +124,9 @@ final class AzirSqlSession implements SqlSession {
             TransactionCommitResult result = transactionManager.commit(committingTransaction);
             activeTransaction = null;
             return SqlExecutionResult.committed(result);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             if (!canRollback(committingTransaction, ex)) {
-                // 已提交或决议未知时不能再由会话 close 自动回滚，必须交给事务恢复流程处理。
+                // Commit or decision can no longer be automatically rollback by session close when it is unknown and must be handed over to the transaction recovery process.
                 activeTransaction = null;
             }
             throw ex;
@@ -91,7 +134,9 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 回滚当前显式事务。
+     * Rollback Current Visibility transaction.
+     *
+     * @throws MvccException if the operation cannot complete
      */
     @Override
     public void rollback() {
@@ -105,7 +150,9 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 判断当前会话是否存在活动显式事务。
+     * Determines if the current session is active transaction.
+     *
+     * @return the operation result
      */
     @Override
     public boolean active() {
@@ -113,7 +160,7 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 幂等终止会话并回滚未决事务；清理失败仍保持关闭状态，异常交给调用方处理。
+     * Idempotent terminates session and rollback pending transaction; clean-up failed to remain closed, abnormally handed over to the caller for processing.
      */
     @Override
     public void close() {
@@ -131,9 +178,12 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 执行已生成的 SQL 计划。
+     * Execute the generated SQL plan.
+     *
+     * @param plan plan
+     * @return the operation result
      */
-    private SqlExecutionResult executePlan(SqlPlan plan) {
+    private SqlExecutionResult executePlan(final SqlPlan plan) {
         return switch (plan) {
             case SqlPlan.BeginTransactionPlan beginPlan -> executeBegin(beginPlan);
             case SqlPlan.CommitTransactionPlan ignored -> commit();
@@ -150,17 +200,23 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 执行开启事务计划。
+     * Execute the open transaction schedule.
+     *
+     * @param plan plan
+     * @return the operation result
      */
-    private SqlExecutionResult executeBegin(SqlPlan.BeginTransactionPlan plan) {
+    private SqlExecutionResult executeBegin(final SqlPlan.BeginTransactionPlan plan) {
         begin(plan.isolationLevel());
         return SqlExecutionResult.empty();
     }
 
     /**
-     * 执行读写数据计划，自动提交模式会在语句结束后提交事务。
+     * Execute the reading and writing data plan, autocommit mode will be commit transaction at the end of the statement.
+     *
+     * @param plan plan
+     * @return the operation result
      */
-    private SqlExecutionResult executeDataPlan(SqlPlan plan) {
+    private SqlExecutionResult executeDataPlan(final SqlPlan plan) {
         if (invalidatedTransaction) {
             throw invalidatedTransactionException();
         }
@@ -170,9 +226,9 @@ final class AzirSqlSession implements SqlSession {
         try {
             StatementReadSnapshot snapshot = transactionManager.beginReadStatement(tx);
             result = executeDataPlan(tx, plan, snapshot);
-            // 关系运算可能在最后一页之后持续计算，返回前必须复核原快照，不能刷新 RC 时间戳。
+            // Relationship calculations may continue after the last page, and snapshot must be reviewed before returning. RC timestamp cannot be refreshed.
             transactionManager.validateReadStatement(tx, snapshot);
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             if (!canRollback(tx, ex)) {
                 if (!autocommit) {
                     activeTransaction = null;
@@ -191,7 +247,7 @@ final class AzirSqlSession implements SqlSession {
         }
         try {
             return result.withCommitResult(transactionManager.commit(tx));
-        } catch (RuntimeException ex) {
+        } catch (final RuntimeException ex) {
             if (canRollback(tx, ex)) {
                 rollbackQuietly(tx, ex);
             }
@@ -200,9 +256,15 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 在指定事务中执行读写数据计划。
+     * Execute a reading and writing data plan in the specified transaction.
+     *
+     * @param tx transaction context
+     * @param plan plan
+     * @param snapshot snapshot
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private SqlExecutionResult executeDataPlan(Transaction tx, SqlPlan plan, StatementReadSnapshot snapshot) {
+    private SqlExecutionResult executeDataPlan(final Transaction tx, final SqlPlan plan, final StatementReadSnapshot snapshot) {
         return switch (plan) {
             case SqlPlan.SelectByKeyPlan selectPlan -> executeSelect(tx, selectPlan, snapshot);
             case SqlPlan.InsertByKeyPlan insertPlan -> executeInsert(tx, insertPlan, snapshot);
@@ -214,9 +276,15 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 执行主键点查计划。
+     * Execute the primary key point check plan.
+     *
+     * @param tx transaction context
+     * @param plan plan
+     * @param snapshot snapshot
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private SqlExecutionResult executeSelect(Transaction tx, SqlPlan.SelectByKeyPlan plan, StatementReadSnapshot snapshot) {
+    private SqlExecutionResult executeSelect(final Transaction tx, final SqlPlan.SelectByKeyPlan plan, final StatementReadSnapshot snapshot) {
         String shardId = shardResolver.resolveShard(plan.table(), plan.key());
         Optional<byte[]> value = transactionManager.get(tx, shardId, keyCodec.encode(plan.table(), plan.key()), snapshot);
         if (value.isEmpty()) {
@@ -232,14 +300,19 @@ final class AzirSqlSession implements SqlSession {
         }
         return SqlExecutionResult.rows(java.util.List.of(new SqlRow(Map.of(
                 "id", plan.key(),
-                "value", decodedValue
-        ))));
+                "value", decodedValue))));
     }
 
     /**
-     * 简单计划器的 INSERT 同样按语句快照校验主键唯一性。
+     * The simple planner's INSERT is also a statement snapshot validate primary uniqueness.
+     *
+     * @param tx transaction context
+     * @param plan plan
+     * @param snapshot snapshot
+     * @return the operation result
+     * @throws MvccException if the operation cannot complete
      */
-    private SqlExecutionResult executeInsert(Transaction tx, SqlPlan.InsertByKeyPlan plan, StatementReadSnapshot snapshot) {
+    private SqlExecutionResult executeInsert(final Transaction tx, final SqlPlan.InsertByKeyPlan plan, final StatementReadSnapshot snapshot) {
         if (exists(tx, plan.table(), plan.key(), snapshot)) {
             throw new MvccException(ErrorCode.ILLEGAL_STATE, "duplicate key: " + plan.key(), false, tx.txId());
         }
@@ -247,34 +320,57 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 简单计划器的 UPDATE 仅修改本语句快照中存在的行。
+     * The UPDATE of the simple planner changes only the rows in this statement snapshot.
+     *
+     * @param tx transaction context
+     * @param plan plan
+     * @param snapshot snapshot
+     * @return the operation result
      */
-    private SqlExecutionResult executeUpdate(Transaction tx, SqlPlan.UpdateByKeyPlan plan, StatementReadSnapshot snapshot) {
+    private SqlExecutionResult executeUpdate(final Transaction tx, final SqlPlan.UpdateByKeyPlan plan, final StatementReadSnapshot snapshot) {
         return exists(tx, plan.table(), plan.key(), snapshot)
-                ? executePut(tx, plan.table(), plan.key(), plan.value()) : SqlExecutionResult.updateCount(0);
+                ? executePut(tx, plan.table(), plan.key(), plan.value())
+                : SqlExecutionResult.updateCount(0);
     }
 
     /**
-     * 使用调用方统一快照执行主键存在性检查。
+     * Use the caller to align snapshot to perform existential check of the primary key.
+     *
+     * @param tx transaction context
+     * @param table table
+     * @param key business key
+     * @param snapshot snapshot
+     * @return the operation result
      */
-    private boolean exists(Transaction tx, String table, String key, StatementReadSnapshot snapshot) {
+    private boolean exists(final Transaction tx, final String table, final String key, final StatementReadSnapshot snapshot) {
         return transactionManager.get(tx, shardResolver.resolveShard(table, key), keyCodec.encode(table, key), snapshot)
                 .isPresent();
     }
 
     /**
-     * 执行主键写入计划。
+     * Execute the primary key to write to the plan.
+     *
+     * @param tx transaction context
+     * @param table table
+     * @param key business key
+     * @param value value to write
+     * @return the operation result
      */
-    private SqlExecutionResult executePut(Transaction tx, String table, String key, String value) {
+    private SqlExecutionResult executePut(final Transaction tx, final String table, final String key, final String value) {
         String shardId = shardResolver.resolveShard(table, key);
         transactionManager.put(tx, shardId, keyCodec.encode(table, key), valueCodec.encode(value));
         return SqlExecutionResult.updateCount(1);
     }
 
     /**
-     * 执行主键删除计划。
+     * Execute the primary key to delete the schedule.
+     *
+     * @param tx transaction context
+     * @param plan plan
+     * @param snapshot snapshot
+     * @return the operation result
      */
-    private SqlExecutionResult executeDelete(Transaction tx, SqlPlan.DeleteByKeyPlan plan, StatementReadSnapshot snapshot) {
+    private SqlExecutionResult executeDelete(final Transaction tx, final SqlPlan.DeleteByKeyPlan plan, final StatementReadSnapshot snapshot) {
         if (!exists(tx, plan.table(), plan.key(), snapshot)) {
             return SqlExecutionResult.updateCount(0);
         }
@@ -284,7 +380,9 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 确认当前存在活动显式事务。
+     * Confirms current active visible transaction.
+     *
+     * @throws MvccException if the operation cannot complete
      */
     private void ensureActiveTransaction() {
         ensureOpen();
@@ -297,7 +395,9 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 关闭状态不可逆，必须在调用计划器或创建事务前拒绝再次使用会话。
+     * Turning off state irreversible must refuse to use session again before calling the planner or creating transaction.
+     *
+     * @throws MvccException if the operation cannot complete
      */
     private void ensureOpen() {
         if (closed) {
@@ -306,9 +406,14 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 仅允许回滚未进入持久化决议的事务，异常链包含提交未知时也必须交给恢复。
+     * Only rollback is allowed to enter transaction without durable storage decision, and an abnormal chain containing commit is also required to be handed over to recovery when the commit
+     * is unknown.
+     *
+     * @param tx transaction context
+     * @param ex ex
+     * @return the operation result
      */
-    private boolean canRollback(Transaction tx, RuntimeException ex) {
+    private boolean canRollback(final Transaction tx, final RuntimeException ex) {
         if (tx.status() == TxStatus.COMMITTED || tx.decisionStarted()) {
             return false;
         }
@@ -321,25 +426,32 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 自动提交失败时保留回滚根因，避免回滚异常掩盖原始 SQL 异常。
+     * If autocommit fails, keep the rollback root cause to avoid the rollback abnormally masking the original SQL anomaly.
+     *
+     * @param tx transaction context
+     * @param failure failure
      */
-    private void rollbackQuietly(Transaction tx, RuntimeException failure) {
+    private void rollbackQuietly(final Transaction tx, final RuntimeException failure) {
         try {
             transactionManager.rollback(tx);
-        } catch (RuntimeException rollbackFailure) {
+        } catch (final RuntimeException rollbackFailure) {
             failure.addSuppressed(rollbackFailure);
         }
     }
 
     /**
-     * SQL 执行失败后回滚整个显式事务并保留失效状态；不提供隐含的单语句回滚。
+     * The whole visible transaction after SQL failed to execute; no implicit statement rollback is provided.
+     *
+     * @param tx transaction context
+     * @param failure failure
+     * @return the operation result
      */
-    private MvccException invalidateTransaction(Transaction tx, RuntimeException failure) {
+    private MvccException invalidateTransaction(final Transaction tx, final RuntimeException failure) {
         invalidatedTransaction = true;
         String outcome = "entire explicit transaction rolled back";
         try {
             transactionManager.rollback(tx);
-        } catch (RuntimeException rollbackFailure) {
+        } catch (final RuntimeException rollbackFailure) {
             failure.addSuppressed(rollbackFailure);
             outcome = "whole-transaction rollback failed; cleanup remains pending";
         }
@@ -350,7 +462,9 @@ final class AzirSqlSession implements SqlSession {
     }
 
     /**
-     * 阻止失效事务继续执行或提交，也防止后续 SQL 意外转为自动提交。
+     * Prevents the failure of transaction to continue or commit and prevents subsequent SQL from unexpectedly converting to autocommit.
+     *
+     * @return the operation result
      */
     private MvccException invalidatedTransactionException() {
         return new MvccException(ErrorCode.ILLEGAL_STATE,

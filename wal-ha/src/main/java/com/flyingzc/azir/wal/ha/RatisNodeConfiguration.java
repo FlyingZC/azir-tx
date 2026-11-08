@@ -1,5 +1,33 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal.ha;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
+import java.util.Set;
+import java.util.UUID;
 import com.zaxxer.hikari.HikariDataSource;
 import com.flyingzc.azir.wal.WalBackupOptions;
 import com.flyingzc.azir.wal.WalOptions;
@@ -20,101 +48,83 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.X509Certificate;
-import java.util.*;
 
-/** 独立节点的严格配置，凭据仅引用环境变量，不提供明文或不认证的回退模式。 */
+/**
+ * Strict configuration of a stand-alone node, receipt only refers to environmental variables and does not provide explicit or unauthenticated regression mode.
+ */
 public final class RatisNodeConfiguration {
-    /** 固定诊断阶段只含代码定义的名称，不携带配置原文或密码。 */
-    public enum Phase { FILE, MEMBERSHIP, RAFT_TLS, MYSQL, BUDGETS, HEALTH }
-
-    /** 启动拒绝的诊断保留安全阶段，底层原因仅供受控本地排查，不直接输出日志。 */
-    public static final class ConfigurationException extends IOException {
-        private final Phase phase;
-
-        /** 使用固定阶段描述，不把文件内容、URL 或凭据拼进外层消息。 */
-        private ConfigurationException(Phase phase, Exception cause) {
-            super("node configuration rejected in phase " + phase, cause);
-            this.phase = phase;
-        }
-
-        /** 操作者可用阶段定位问题，不能依赖异常消息携带敏感连接细节。 */
-        public Phase phase() { return phase; }
-    }
 
     final Path directory;
+
     final RaftPeerId node;
+
     final RaftGroup group;
+
     final RatisTlsSecurity security;
+
     final List<Store> stores;
+
     final Map<String, String> routes;
+
     final WalOptions transactions;
+
     final WalBackupOptions backups;
+
     final MysqlWalReplicaBackendFactory.Options namespaces;
+
     final RatisTransportLimits transport;
+
     final RatisManagedNode.Maintenance maintenance;
+
     final String healthAddress;
+
     final int healthPort;
+
     final String applicationClass;
 
-    /** 单一控制池的私有装配数据，禁止通过默认 record 输出密码和 JDBC 地址。 */
-    record Store(String name, String url, String username, String password, Path trust, String trustPassword) {
-        /** 构建惰性连接池，数据库连接和持久性检查留给正式节点启动流程。 */
-        HikariDataSource pool() {
-            var pool = new HikariDataSource();
-            try {
-                pool.setPoolName("azir-control-" + name);
-                pool.setJdbcUrl(url);
-                pool.setUsername(username);
-                pool.setPassword(password);
-                pool.setMinimumIdle(0);
-                pool.setMaximumPoolSize(2);
-                pool.setConnectionTimeout(5000);
-                pool.setValidationTimeout(1000);
-                pool.setAutoCommit(true);
-                pool.addDataSourceProperty("connectTimeout", "3000");
-                pool.addDataSourceProperty("socketTimeout", "5000");
-                pool.addDataSourceProperty("sslMode", "VERIFY_IDENTITY");
-                pool.addDataSourceProperty("trustCertificateKeyStoreUrl", trust.toUri().toASCIIString());
-                pool.addDataSourceProperty("trustCertificateKeyStoreType", "PKCS12");
-                pool.addDataSourceProperty("trustCertificateKeyStorePassword", trustPassword);
-                pool.addDataSourceProperty("fallbackToSystemTrustStore", "false");
-                pool.addDataSourceProperty("allowPublicKeyRetrieval", "false");
-                pool.addDataSourceProperty("rewriteBatchedStatements", "true");
-                return pool;
-            } catch (RuntimeException | Error failure) {
-                pool.close();
-                throw failure;
-            }
-        }
-
-        /** 诊断只能辨认逻辑控制池，不能输出连接参数。 */
-        @Override public String toString() { return "Store[name=" + name + ", credentials=redacted]"; }
-    }
-
-    /** 在任何连接或线程启动之前，完成格式、预算、环境变量及证书校验。 */
-    public static RatisNodeConfiguration load(Path file) throws IOException {
+    /**
+     * Formats, budget, environment variables and certificates validate are completed before any connection or thread startup.
+     *
+     * @param file file
+     * @return the operation result
+     * @throws ConfigurationException if the operation cannot complete
+     * @throws IOException if the operation cannot complete
+     */
+    public static RatisNodeConfiguration load(final Path file) throws IOException {
         var path = Objects.requireNonNull(file).toAbsolutePath().normalize();
         Values values = null;
         try {
             values = new Values(path);
             return new RatisNodeConfiguration(values);
-        } catch (IOException | IllegalArgumentException invalid) {
-            // 外部配置错误可能包含敏感原文，公共异常只提供固定说明。
+        } catch (final IOException | IllegalArgumentException invalid) {
+            // External configuration errors may contain sensitive originals, and public anomalies only provide a fixed description.
             throw new ConfigurationException(values == null ? Phase.FILE : values.phase, invalid);
         }
     }
 
-    /** 只接受版本一配置，未知键与重复键一律拒绝，避免拼写错误悄悄启用默认值。 */
-    private RatisNodeConfiguration(Values values) throws IOException {
-        if (!values.required("format.version").equals("1")) { throw new IllegalArgumentException("unsupported configuration version"); }
+    /**
+     * Only version one configuration is accepted, and unknown keys and repeat keys are rejected to avoid spelling errors that will quietly enable the default value.
+     *
+     * @param values values
+     * @throws IOException if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private RatisNodeConfiguration(final Values values) throws IOException {
+        if (!values.required("format.version").equals("1")) {
+            throw new IllegalArgumentException("unsupported configuration version");
+        }
         values.phase = Phase.MEMBERSHIP;
         String id = values.identifier("node.id");
         node = RaftPeerId.valueOf(id);
         String groupText = values.required("group.id");
         UUID groupId = UUID.fromString(groupText);
-        if (!groupId.toString().equals(groupText)) { throw new IllegalArgumentException("canonical group UUID required"); }
+        if (!groupId.toString().equals(groupText)) {
+            throw new IllegalArgumentException("canonical group UUID required");
+        }
         directory = values.path("node.directory");
-        if (directory.getParent() == null) { throw new IllegalArgumentException("node directory cannot be filesystem root"); }
+        if (directory.getParent() == null) {
+            throw new IllegalArgumentException("node directory cannot be filesystem root");
+        }
         var voters = values.list("group.voters", 3, 3);
         var learners = values.optionalList("group.learners", 0, 6);
         var trusted = values.list("tls.peers", 3, 32);
@@ -134,7 +144,9 @@ public final class RatisNodeConfiguration {
             }
         }
         group = RaftGroup.valueOf(RaftGroupId.valueOf(groupId), peers);
-        if (group.getPeer(node) == null) { throw new IllegalArgumentException("local identity missing from group"); }
+        if (group.getPeer(node) == null) {
+            throw new IllegalArgumentException("local identity missing from group");
+        }
         values.phase = Phase.RAFT_TLS;
         Path identity = values.path("tls.identity");
         Path roots = values.path("tls.truststore");
@@ -146,7 +158,9 @@ public final class RatisNodeConfiguration {
             security.validate(group, node);
         } finally {
             Arrays.fill(identityPassword, '\0');
-            if (rootsPassword != null) { Arrays.fill(rootsPassword, '\0'); }
+            if (rootsPassword != null) {
+                Arrays.fill(rootsPassword, '\0');
+            }
         }
         values.phase = Phase.MYSQL;
         var configuredStores = new ArrayList<Store>();
@@ -166,10 +180,14 @@ public final class RatisNodeConfiguration {
         for (var shard : values.list("shards", 1, 64)) {
             Values.checkIdentifier(shard);
             String store = values.required("route." + shard);
-            if (!names.contains(store)) { throw new IllegalArgumentException("shard route references unknown control pool"); }
+            if (!names.contains(store)) {
+                throw new IllegalArgumentException("shard route references unknown control pool");
+            }
             configuredRoutes.put(shard, store);
         }
-        if (!new HashSet<>(configuredRoutes.values()).containsAll(names)) { throw new IllegalArgumentException("unused control pool"); }
+        if (!new HashSet<>(configuredRoutes.values()).containsAll(names)) {
+            throw new IllegalArgumentException("unused control pool");
+        }
         routes = Map.copyOf(configuredRoutes);
 
         values.phase = Phase.BUDGETS;
@@ -195,7 +213,7 @@ public final class RatisNodeConfiguration {
                 values.integer("transport.metadata-bytes", wire.metadataBytes(), 1024, 65536), values.integer("transport.backlog", wire.listenBacklog(), 16, 4096),
                 values.number("transport.handshake-ms", wire.handshakeMillis(), 100, 30_000), values.number("transport.idle-ms", wire.idleMillis(), 1000, 3_600_000),
                 values.number("transport.connection-age-ms", wire.connectionAgeMillis(), 1000, 86_400_000));
-        // 维护策略会持久化；样例显式列出所有字段，升级时不能无意改变已存在的策略。
+        // Maintenance policy session durable storage; sample visible list of all fields and upgrades should not inadvertently change the existing strategy.
         var h = RatisHealthOptions.defaults();
         var health = new RatisHealthOptions(values.number("maintenance.health.interval-ms", h.intervalMillis(), 100, 60_000),
                 values.integer("maintenance.health.failures", h.failures(), 1, 100), values.integer("maintenance.health.recoveries", h.recoveries(), 1, 100),
@@ -214,7 +232,9 @@ public final class RatisNodeConfiguration {
                 values.number("maintenance.probe-ms", 1000, 1, 5000));
         values.phase = Phase.HEALTH;
         healthAddress = values.optional("health.address", "127.0.0.1");
-        if (!Set.of("127.0.0.1", "::1").contains(healthAddress)) { throw new IllegalArgumentException("health endpoint must use a numeric loopback address"); }
+        if (!Set.of("127.0.0.1", "::1").contains(healthAddress)) {
+            throw new IllegalArgumentException("health endpoint must use a numeric loopback address");
+        }
         healthPort = values.integer("health.port", 18080, 1, 65535);
         applicationClass = values.optional("application.class", "");
         if (!applicationClass.isEmpty() && !applicationClass.matches("[A-Za-z_$][A-Za-z0-9_$]*(\\.[A-Za-z_$][A-Za-z0-9_$]*)+")) {
@@ -224,14 +244,26 @@ public final class RatisNodeConfiguration {
         values.finish();
     }
 
-    /** 生成托管节点配置，数据源仍由外层宿主负责关闭。 */
-    RatisManagedNode.Config managed(Map<String, HikariDataSource> pools) {
+    /**
+     * Generates a hosting node configuration, and the data source remains under the responsibility of the outer host.
+     *
+     * @param pools pools
+     * @return the operation result
+     */
+    RatisManagedNode.Config managed(final Map<String, HikariDataSource> pools) {
         return new RatisManagedNode.Config(directory, node, group, pools, security, transactions, backups, namespaces, transport, maintenance);
     }
 
-    /** 控制库必须是单一明确地址，禁止 URL 查询参数绕过 TLS、超时或凭据策略。 */
-    private static void validateJdbc(String url) {
-        if (!url.startsWith("jdbc:mysql://") || url.length() > 1024) { throw new IllegalArgumentException("explicit MySQL JDBC endpoint required"); }
+    /**
+     * The control library must be a single and clear address that prevents URL query parameters from bypassing TLS, timeout or receipt policies.
+     *
+     * @param url url
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static void validateJdbc(final String url) {
+        if (!url.startsWith("jdbc:mysql://") || url.length() > 1024) {
+            throw new IllegalArgumentException("explicit MySQL JDBC endpoint required");
+        }
         URI uri = URI.create(url.substring(5));
         if (uri.getHost() == null || uri.getPort() < 1 || uri.getPort() > 65535 || uri.getRawUserInfo() != null || uri.getRawQuery() != null
                 || uri.getRawFragment() != null || !uri.getRawPath().matches("/[A-Za-z0-9_]{1,64}")) {
@@ -243,93 +275,306 @@ public final class RatisNodeConfiguration {
         }
     }
 
-    /** 离线校验 MySQL 专属信任库，网络主机名验证仍由 Connector/J 在连接时执行。 */
-    private static void validateMysqlTrust(Path path, String password) throws IOException {
+    /**
+     * Offline validate MySQL exclusive trust library, Web hostname verify is still executed by Contractor/J at connection.
+     *
+     * @param path path
+     * @param password password
+     * @throws IOException if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    private static void validateMysqlTrust(final Path path, final String password) throws IOException {
         char[] chars = password.toCharArray();
         try {
             var store = KeyStore.getInstance("PKCS12");
             byte[] bytes = boundedFile(path, 1_048_576);
-            try { store.load(new java.io.ByteArrayInputStream(bytes), chars); }
-            finally { Arrays.fill(bytes, (byte) 0); }
-            if (store.size() < 1 || store.size() > 16) { throw new IllegalArgumentException("bounded MySQL CA trust required"); }
+            try {
+                store.load(new java.io.ByteArrayInputStream(bytes), chars);
+            } finally {
+                Arrays.fill(bytes, (byte) 0);
+            }
+            if (store.size() < 1 || store.size() > 16) {
+                throw new IllegalArgumentException("bounded MySQL CA trust required");
+            }
             for (var alias : Collections.list(store.aliases())) {
                 if (store.isKeyEntry(alias) || !(store.getCertificate(alias) instanceof X509Certificate ca) || ca.getBasicConstraints() < 0) {
                     throw new IllegalArgumentException("MySQL trust store must contain CA certificates only");
                 }
                 ca.checkValidity();
             }
-        } catch (java.security.GeneralSecurityException invalid) {
+        } catch (final java.security.GeneralSecurityException invalid) {
             throw new IOException("invalid MySQL CA trust store", invalid);
-        } finally { Arrays.fill(chars, '\0'); }
+        } finally {
+            Arrays.fill(chars, '\0');
+        }
     }
 
-    /** 普通文件采用无链接、有界读取，文件增长也不能突破内存预算。 */
-    private static byte[] boundedFile(Path path, int limit) throws IOException {
-        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.size(path) > limit) { throw new IOException("configuration resource missing or exceeds budget"); }
+    /**
+     * Normal files are unconnected, bounded readable and file growth cannot break memory budget.
+     *
+     * @param path path
+     * @param limit maximum number of items
+     * @return the operation result
+     * @throws IOException if the operation cannot complete
+     */
+    private static byte[] boundedFile(final Path path, final int limit) throws IOException {
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.size(path) > limit) {
+            throw new IOException("configuration resource missing or exceeds budget");
+        }
         try (var input = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS)) {
             byte[] bytes = input.readNBytes(limit + 1);
-            if (bytes.length > limit) { throw new IOException("configuration resource grew beyond budget"); }
+            if (bytes.length > limit) {
+                throw new IOException("configuration resource grew beyond budget");
+            }
             return bytes;
         }
     }
 
-    /** 公共诊断不包含路径、数据源配置和凭据对象。 */
-    @Override public String toString() { return "NodeConfiguration[node=" + node + ", group=" + group.getGroupId() + ", credentials=redacted]"; }
+    /**
+     * Public diagnostics do not contain path, data source configuration and receipt objects.
+     *
+     * @return the operation result
+     */
+    @Override
+    public String toString() {
+        return "NodeConfiguration[node=" + node + ", group=" + group.getGroupId() + ", credentials=redacted]";
+    }
 
-    /** 有界属性读取器，消耗过的键被移除，以便最终发现未知配置。 */
+    /**
+     * Fixed diagnostic stages contain only code-defined names and do not carry configuration originals or passwords.
+     */
+    public enum Phase {
+        FILE, MEMBERSHIP, RAFT_TLS, MYSQL, BUDGETS, HEALTH
+    }
+
+    /**
+     * Commencing the rejected diagnostic retention security phase for bottom reasons only for controlled local, which do not directly output logs.
+     */
+    public static final class ConfigurationException extends IOException {
+
+        private final Phase phase;
+
+        /**
+         * Use a fixed-stage description and do not spell file contents, URLs or receipt in outer messages.
+         *
+         * @param phase phase
+         * @param cause cause
+         */
+        private ConfigurationException(final Phase phase, final Exception cause) {
+            super("node configuration rejected in phase " + phase, cause);
+            this.phase = phase;
+        }
+
+        /**
+         * The operator can use a stage location problem and cannot rely on an abnormal message to carry sensitive connection details.
+         *
+         * @return the operation result
+         */
+        public Phase phase() {
+            return phase;
+        }
+    }
+
+    /**
+     * The private assembly data of the single control pool is forbidden by default record output password and JDBC address.
+     *
+     * @param name name
+     * @param url url
+     * @param username username
+     * @param password password
+     * @param trust trust
+     * @param trustPassword trust password
+     */
+    record Store(String name, String url, String username, String password, Path trust, String trustPassword) {
+
+        /**
+         * Build inert connection pool, database connection and durable checks to start the process at the official node.
+         *
+         * @return the operation result
+         */
+        HikariDataSource pool() {
+            var pool = new HikariDataSource();
+            try {
+                pool.setPoolName("azir-control-" + name);
+                pool.setJdbcUrl(url);
+                pool.setUsername(username);
+                pool.setPassword(password);
+                pool.setMinimumIdle(0);
+                pool.setMaximumPoolSize(2);
+                pool.setConnectionTimeout(5000);
+                pool.setValidationTimeout(1000);
+                pool.setAutoCommit(true);
+                pool.addDataSourceProperty("connectTimeout", "3000");
+                pool.addDataSourceProperty("socketTimeout", "5000");
+                pool.addDataSourceProperty("sslMode", "VERIFY_IDENTITY");
+                pool.addDataSourceProperty("trustCertificateKeyStoreUrl", trust.toUri().toASCIIString());
+                pool.addDataSourceProperty("trustCertificateKeyStoreType", "PKCS12");
+                pool.addDataSourceProperty("trustCertificateKeyStorePassword", trustPassword);
+                pool.addDataSourceProperty("fallbackToSystemTrustStore", "false");
+                pool.addDataSourceProperty("allowPublicKeyRetrieval", "false");
+                pool.addDataSourceProperty("rewriteBatchedStatements", "true");
+                return pool;
+            } catch (final RuntimeException | Error failure) {
+                pool.close();
+                throw failure;
+            }
+        }
+
+        /**
+         * Diagnosis can only identify the logical control pool and cannot output connection parameters.
+         *
+         * @return the operation result
+         */
+        @Override
+        public String toString() {
+            return "Store[name=" + name + ", credentials=redacted]";
+        }
+    }
+
+    /**
+     * Bounded Properties Reader, used keys are removed so that the unknown configuration is finally found.
+     */
     private static final class Values {
+
         private final Path parent;
+
         private final Properties properties;
+
         private Phase phase = Phase.FILE;
 
-        /** UTF-8 严格解码，重复键包括转义后同名的键也会拒绝。 */
-        Values(Path file) throws IOException {
+        /**
+         * UTF-8 is strictly decoded and repeat keys, including those with the same name after conversion, are rejected.
+         *
+         * @param file file
+         * @throws IOException if the operation cannot complete
+         */
+        Values(final Path file) throws IOException {
             parent = file.getParent();
             properties = new UniqueProperties();
             var decoder = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT);
             properties.load(new StringReader(decoder.decode(ByteBuffer.wrap(boundedFile(file, 65_536))).toString()));
         }
 
-        /** 必填文本不接受空串与控制字符。 */
-        String required(String key) {
+        /**
+         * Text will not accept empty string and control characters.
+         *
+         * @param key business key
+         * @return the operation result
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        String required(final String key) {
             String value = (String) properties.remove(key);
-            if (value == null || value.isBlank() || value.length() > 4096 || value.chars().anyMatch(Character::isISOControl)) { throw new IllegalArgumentException("missing or invalid configuration field: " + key); }
+            if (value == null || value.isBlank() || value.length() > 4096 || value.chars().anyMatch(Character::isISOControl)) {
+                throw new IllegalArgumentException("missing or invalid configuration field: " + key);
+            }
             return value.strip();
         }
 
-        /** 缺省值仅适用于完全没有声明的配置键。 */
-        String optional(String key, String fallback) { return properties.containsKey(key) ? required(key) : fallback; }
+        /**
+         * Default values only apply to configuration keys that are not declared at all.
+         *
+         * @param key business key
+         * @param fallback fallback
+         * @return the operation result
+         */
+        String optional(final String key, final String fallback) {
+            return properties.containsKey(key) ? required(key) : fallback;
+        }
 
-        /** 路径相对于配置文件解析，不执行变量替换、命令或通配符。 */
-        Path path(String key) { return parent.resolve(required(key)).normalize().toAbsolutePath(); }
+        /**
+         * Paths do not execute variable replacement, command or wildcards relative to configuration file resolution.
+         *
+         * @param key business key
+         * @return the operation result
+         */
+        Path path(final String key) {
+            return parent.resolve(required(key)).normalize().toAbsolutePath();
+        }
 
-        /** 标识符限制为可安全显示的 ASCII 范围。 */
-        String identifier(String key) { String value = required(key); checkIdentifier(value); return value; }
+        /**
+         * The identifier is limited to the ASCII range that can be shown safely.
+         *
+         * @param key business key
+         * @return the operation result
+         */
+        String identifier(final String key) {
+            String value = required(key);
+            checkIdentifier(value);
+            return value;
+        }
 
-        /** 节点、分片和控制池名称均拒绝空格、分隔符及超长输入。 */
-        static void checkIdentifier(String value) { if (!value.matches("[A-Za-z0-9._-]{1,64}")) { throw new IllegalArgumentException("invalid configuration identity"); } }
+        /**
+         * Node, shard and control pool names reject space, separator and super long input.
+         *
+         * @param value value to write
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        static void checkIdentifier(final String value) {
+            if (!value.matches("[A-Za-z0-9._-]{1,64}")) {
+                throw new IllegalArgumentException("invalid configuration identity");
+            }
+        }
 
-        /** 环境变量名可公开，但密码值绝不拼进异常信息。 */
-        String secret(String key) {
+        /**
+         * The environment variable name is publicly available, but the password value does not spell abnormal information.
+         *
+         * @param key business key
+         * @return the operation result
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        String secret(final String key) {
             String name = required(key);
-            if (!name.matches("[A-Za-z_][A-Za-z0-9_]{0,127}")) { throw new IllegalArgumentException("invalid environment reference: " + key); }
+            if (!name.matches("[A-Za-z_][A-Za-z0-9_]{0,127}")) {
+                throw new IllegalArgumentException("invalid environment reference: " + key);
+            }
             String value = System.getenv(name);
-            if (value == null || value.isEmpty() || value.length() > 4096 || value.indexOf('\0') >= 0) { throw new IllegalArgumentException("missing or invalid environment value for: " + key); }
+            if (value == null || value.isEmpty() || value.length() > 4096 || value.indexOf('\0') >= 0) {
+                throw new IllegalArgumentException("missing or invalid environment value for: " + key);
+            }
             return value;
         }
 
-        /** 有界整数禁止溢出、隐式单位和无限值。 */
-        long number(String key, long fallback, long min, long max) {
+        /**
+         * Bounded Integers prohibit spills, hidden units and unlimited values.
+         *
+         * @param key business key
+         * @param fallback fallback
+         * @param min min
+         * @param max max
+         * @return the operation result
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        long number(final String key, final long fallback, final long min, final long max) {
             long value = properties.containsKey(key) ? Long.parseLong(required(key)) : fallback;
-            if (value < min || value > max) { throw new IllegalArgumentException("configuration budget outside supported range: " + key); }
+            if (value < min || value > max) {
+                throw new IllegalArgumentException("configuration budget outside supported range: " + key);
+            }
             return value;
         }
 
-        /** 在完成范围检查后才缩窄为 int。 */
-        int integer(String key, int fallback, int min, int max) { return Math.toIntExact(number(key, fallback, min, max)); }
+        /**
+         * Zoom in to int after the scope check has been completed.
+         *
+         * @param key business key
+         * @param fallback fallback
+         * @param min min
+         * @param max max
+         * @return the operation result
+         */
+        int integer(final String key, final int fallback, final int min, final int max) {
+            return Math.toIntExact(number(key, fallback, min, max));
+        }
 
-        /** 列表中空元素、重复值或超过预算都会失败。 */
-        List<String> list(String key, int min, int max) {
+        /**
+         * The list of empty elements, duplicate values or more than budget failed.
+         *
+         * @param key business key
+         * @param min min
+         * @param max max
+         * @return the operation result
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        List<String> list(final String key, final int min, final int max) {
             var values = Arrays.stream(required(key).split(",", -1)).map(String::strip).toList();
             if (values.size() < min || values.size() > max || values.stream().anyMatch(String::isEmpty) || new HashSet<>(values).size() != values.size()) {
                 throw new IllegalArgumentException("invalid bounded configuration list: " + key);
@@ -337,18 +582,48 @@ public final class RatisNodeConfiguration {
             return values;
         }
 
-        /** 可选列表通过缺少键表示为空，不用空值掩盖错误配置。 */
-        List<String> optionalList(String key, int min, int max) { return properties.containsKey(key) ? list(key, min, max) : List.of(); }
+        /**
+         * The optional list is shown as empty by missing keys and does not mask the error configuration with an empty value.
+         *
+         * @param key business key
+         * @param min min
+         * @param max max
+         * @return the operation result
+         */
+        List<String> optionalList(final String key, final int min, final int max) {
+            return properties.containsKey(key) ? list(key, min, max) : List.of();
+        }
 
-        /** 不输出未知键原文，避免误填密码造成诊断泄露。 */
-        void finish() { if (!properties.isEmpty()) { throw new IllegalArgumentException("unknown node configuration fields"); } }
+        /**
+         * Do not output the original unknown key, so that the wrong password is not used to cause the diagnosis leak.
+         *
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        void finish() {
+            if (!properties.isEmpty()) {
+                throw new IllegalArgumentException("unknown node configuration fields");
+            }
+        }
     }
 
-    /** Properties 原生解析器的重复键保护，保留标准转义与续行语法。 */
+    /**
+     * Propertiers has duplicate key protection for original solvers, retaining standard transliteration and continuation syntax.
+     */
     private static final class UniqueProperties extends Properties {
-        /** 禁止后写覆盖先写，避免配置审计与实际启动值不一致。 */
-        @Override public synchronized Object put(Object key, Object value) {
-            if (containsKey(key)) { throw new IllegalArgumentException("duplicate node configuration field"); }
+
+        /**
+         * Prohibits after-writing to overwrite, so that the configuration audit is not consistent with actual start value.
+         *
+         * @param key business key
+         * @param value value to write
+         * @return the operation result
+         * @throws IllegalArgumentException if the operation cannot complete
+         */
+        @Override
+        public synchronized Object put(final Object key, final Object value) {
+            if (containsKey(key)) {
+                throw new IllegalArgumentException("duplicate node configuration field");
+            }
             return super.put(key, value);
         }
     }

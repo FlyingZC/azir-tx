@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.metrics;
 
 import java.util.EnumMap;
@@ -5,13 +21,14 @@ import java.util.Map;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * 线程安全的内存事务指标聚合器。
+ * A linearly secure memory transaction indicator polymer.
  */
 public final class InMemoryTransactionMetrics implements TransactionMetrics {
+
     private final Map<TransactionStage, MutableStageStats> statsByStage = new EnumMap<>(TransactionStage.class);
 
     /**
-     * 构造内存事务指标聚合器。
+     * Constructs the memory transaction indicator polymer.
      */
     public InMemoryTransactionMetrics() {
         for (TransactionStage stage : TransactionStage.values()) {
@@ -20,30 +37,41 @@ public final class InMemoryTransactionMetrics implements TransactionMetrics {
     }
 
     /**
-     * 记录阶段成功执行。
+     * Record a successful stage execution.
+     *
+     * @param stage stage
+     * @param elapsedNanos elapsed nanos
      */
     @Override
-    public void recordSuccess(TransactionStage stage, long elapsedNanos) {
+    public void recordSuccess(final TransactionStage stage, final long elapsedNanos) {
         statsByStage.get(stage).recordSuccess(elapsedNanos);
     }
 
     /**
-     * 记录阶段执行失败。
+     * Record a failed stage execution.
+     *
+     * @param stage stage
+     * @param elapsedNanos elapsed nanos
      */
     @Override
-    public void recordFailure(TransactionStage stage, long elapsedNanos) {
+    public void recordFailure(final TransactionStage stage, final long elapsedNanos) {
         statsByStage.get(stage).recordFailure(elapsedNanos);
     }
 
     /**
-     * 返回指定阶段的指标快照。
+     * Returns the indicator snapshot at the specified stage.
+     *
+     * @param stage stage
+     * @return the operation result
      */
-    public TransactionStageStats snapshot(TransactionStage stage) {
+    public TransactionStageStats snapshot(final TransactionStage stage) {
         return statsByStage.get(stage).snapshot();
     }
 
     /**
-     * 返回所有阶段的指标快照。
+     * Returns the indicator snapshot for all stages.
+     *
+     * @return the operation result
      */
     public Map<TransactionStage, TransactionStageStats> snapshots() {
         EnumMap<TransactionStage, TransactionStageStats> snapshots = new EnumMap<>(TransactionStage.class);
@@ -54,42 +82,51 @@ public final class InMemoryTransactionMetrics implements TransactionMetrics {
     }
 
     /**
-     * 可并发更新的阶段统计。
+     * Available concurrent update phase statistics.
      */
     private static final class MutableStageStats {
+
         private final LongAdder invocationCount = new LongAdder();
+
         private final LongAdder successCount = new LongAdder();
+
         private final LongAdder failureCount = new LongAdder();
+
         private final LongAdder totalNanos = new LongAdder();
 
         /**
-         * 记录一次成功阶段。
+         * Record a successful phase.
+         *
+         * @param elapsedNanos elapsed nanos
          */
-        private void recordSuccess(long elapsedNanos) {
+        private void recordSuccess(final long elapsedNanos) {
             invocationCount.increment();
             successCount.increment();
             totalNanos.add(Math.max(0L, elapsedNanos));
         }
 
         /**
-         * 记录一次失败阶段。
+         * Record a failure phase.
+         *
+         * @param elapsedNanos elapsed nanos
          */
-        private void recordFailure(long elapsedNanos) {
+        private void recordFailure(final long elapsedNanos) {
             invocationCount.increment();
             failureCount.increment();
             totalNanos.add(Math.max(0L, elapsedNanos));
         }
 
         /**
-         * 创建当前统计快照。
+         * Creates the current statistics snapshot.
+         *
+         * @return the operation result
          */
         private TransactionStageStats snapshot() {
             return new TransactionStageStats(
                     invocationCount.sum(),
                     successCount.sum(),
                     failureCount.sum(),
-                    totalNanos.sum()
-            );
+                    totalNanos.sum());
         }
     }
 }

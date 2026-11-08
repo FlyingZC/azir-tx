@@ -1,13 +1,43 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.sql;
 
 /**
- * SQL 分页、输入扫描与物化结果预算，不代表 JVM 堆上限或磁盘溢写能力。
- * 输入按取回的物理键 UTF-8 字节和原始 value 字节计费，包含页面预取、投影丢弃和重扫的行；结果按列值 UTF-8 计费。
+ * SQL break, input scan and materialization result budget, which does not represent the JVM stack cap or disk overwhelm capacity. Enter a byte fee for the physical key to be retrieved UTF-8
+ * and the original value bytes, including lines for page pretracting, projection discarding and resweeping; the result is charged at column value UTF-8.
+ *
+ * @param scanPageSize scan page size
+ * @param maxResultRows max result rows
+ * @param maxResultBytes max result bytes
+ * @param maxScannedRows max scanned rows
+ * @param maxScannedBytes max scanned bytes
  */
 public record SqlExecutionOptions(int scanPageSize, int maxResultRows, long maxResultBytes,
-                                  long maxScannedRows, long maxScannedBytes) {
+        long maxScannedRows, long maxScannedBytes) {
+
     /**
-     * 校验分页大小处于存储接口允许的 1..4096 范围，输入和结果预算均为正数。
+     * Validate page break size is within 1.4096 allowed for storage of interface, and input and result budget are positive.
+     *
+     * @param scanPageSize scan page size
+     * @param maxResultRows max result rows
+     * @param maxResultBytes max result bytes
+     * @param maxScannedRows max scanned rows
+     * @param maxScannedBytes max scanned bytes
+     * @throws IllegalArgumentException if the operation cannot complete
      */
     public SqlExecutionOptions {
         if (scanPageSize <= 0 || scanPageSize > 4096 || maxResultRows <= 0 || maxResultBytes <= 0
@@ -17,14 +47,20 @@ public record SqlExecutionOptions(int scanPageSize, int maxResultRows, long maxR
     }
 
     /**
-     * 保留原三参数构造入口，补充每语句一百万输入行和 256 MiB 输入字节的默认限制。
+     * Keeps the original three-parameter tectonic entry to supplement the default limit of 1 million input lines and 256 MiB input bytes per statement.
+     *
+     * @param scanPageSize scan page size
+     * @param maxResultRows max result rows
+     * @param maxResultBytes max result bytes
      */
-    public SqlExecutionOptions(int scanPageSize, int maxResultRows, long maxResultBytes) {
+    public SqlExecutionOptions(final int scanPageSize, final int maxResultRows, final long maxResultBytes) {
         this(scanPageSize, maxResultRows, maxResultBytes, 1_000_000L, 256L * 1024 * 1024);
     }
 
     /**
-     * 返回每页 256 行、十万结果行和 64 MiB 结果字节，以及默认输入限制的配置。
+     * Returns the configuration of 256 lines per page, 100,000 result lines and 64 MiB results bytes, as well as default input limits.
+     *
+     * @return the operation result
      */
     public static SqlExecutionOptions defaults() {
         return new SqlExecutionOptions(256, 100_000, 64L * 1024 * 1024);

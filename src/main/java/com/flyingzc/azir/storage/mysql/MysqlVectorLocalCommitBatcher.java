@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -18,27 +34,43 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 把独立客户端的本地单键事务有界合并为分片物理提交。 */
+/**
+ * Merge local single key transaction bounded to shard Physics commit for a stand-alone client.
+ */
 final class MysqlVectorLocalCommitBatcher implements AutoCloseable {
+
     private final MysqlStorageAdapter adapter;
+
     private final ArrayBlockingQueue<Pending> queue;
+
     private final int maxBatchSize;
+
     private final long maxWaitNanos;
+
     private final ExecutorService workers;
+
     private final AtomicBoolean closed = new AtomicBoolean();
+
     private final LongAdder batches = new LongAdder();
+
     private final LongAdder grouped = new LongAdder();
+
     private final LongAdder fallbackMembers = new LongAdder();
+
     private final AtomicReference<Throwable> lastFailure = new AtomicReference<>();
 
-    /** 每个待提交逻辑事务拥有独立完成凭据，不能用批次成功掩盖个体结果。 */
-    private record Pending(MysqlStorageAdapter.LocalVectorCommitRequest request,
-                           CompletableFuture<Long> result) {
-    }
-
-    /** 固定分片、并行物理提交数、批量大小、等待窗口和队列上界。 */
-    MysqlVectorLocalCommitBatcher(MysqlStorageAdapter adapter, int lanes, int maxBatchSize,
-                                  long maxWaitMicros, int capacity) {
+    /**
+     * Fixed shard, parallel physics commit, batch, waiting window and queue upper bounds.
+     *
+     * @param adapter adapter
+     * @param lanes lanes
+     * @param maxBatchSize max batch size
+     * @param maxWaitMicros max wait micros
+     * @param capacity capacity
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    MysqlVectorLocalCommitBatcher(final MysqlStorageAdapter adapter, final int lanes, final int maxBatchSize,
+                                  final long maxWaitMicros, final int capacity) {
         this.adapter = Objects.requireNonNull(adapter, "adapter");
         if (lanes < 1 || lanes > 64 || maxBatchSize < 1 || maxBatchSize > 64
                 || maxWaitMicros < 0 || maxWaitMicros > 10_000
@@ -48,16 +80,23 @@ final class MysqlVectorLocalCommitBatcher implements AutoCloseable {
         this.queue = new ArrayBlockingQueue<>(capacity);
         this.maxBatchSize = maxBatchSize;
         this.maxWaitNanos = TimeUnit.MICROSECONDS.toNanos(maxWaitMicros);
-        this.workers = Executors.newFixedThreadPool(lanes, task ->
-                Thread.ofPlatform().daemon().name("azir-vector-local-batch-" + adapter.shardId()).unstarted(task));
+        this.workers = Executors.newFixedThreadPool(lanes, task -> Thread.ofPlatform().daemon().name("azir-vector-local-batch-" + adapter.shardId()).unstarted(task));
         for (int index = 0; index < lanes; index++) {
             workers.submit(this::runLoop);
         }
     }
 
-    /** 队列满时有界等待；返回的 Future 只在真实持久提交或失败核对后完成。 */
-    CompletableFuture<Long> submit(MysqlStorageAdapter.LocalVectorCommitRequest request,
-                                   long timeoutMillis) {
+    /**
+     * Bounded waits when queue full; returned Future is only completed after real durable commit or failed check.
+     *
+     * @param request request
+     * @param timeoutMillis timeout millis
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws MvccException if the operation cannot complete
+     */
+    CompletableFuture<Long> submit(final MysqlStorageAdapter.LocalVectorCommitRequest request,
+                                   final long timeoutMillis) {
         Objects.requireNonNull(request, "request");
         if (timeoutMillis < 1 || closed.get()) {
             throw new IllegalArgumentException("closed batcher or invalid enqueue timeout");
@@ -78,14 +117,16 @@ final class MysqlVectorLocalCommitBatcher implements AutoCloseable {
                 result.completeExceptionally(unavailable(request.txId()));
             }
             return result;
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new MvccException(ErrorCode.STORAGE_UNAVAILABLE,
                     "local vector batch enqueue interrupted", true, request.txId(), ex);
         }
     }
 
-    /** 同键请求不进入同一物理批次；冲突由稳定键锁和版本检查最终裁决。 */
+    /**
+     * Same-key requests do not enter the same physics batch; conflicts are checked for final decision by a stabilization key lock and version.
+     */
     private void runLoop() {
         Pending deferred = null;
         try {
@@ -116,11 +157,11 @@ final class MysqlVectorLocalCommitBatcher implements AutoCloseable {
                 }
                 flush(pending);
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             Thread.currentThread().interrupt();
             lastFailure.set(ex);
             closed.set(true);
-        } catch (Throwable ex) {
+        } catch (final Throwable ex) {
             lastFailure.set(ex);
             closed.set(true);
         } finally {
@@ -134,8 +175,12 @@ final class MysqlVectorLocalCommitBatcher implements AutoCloseable {
         }
     }
 
-    /** 整批失败先查持久身份，再逐笔回退，不能盲目把结果未知当成回滚。 */
-    private void flush(List<Pending> pending) {
+    /**
+     * The whole batch failed by checking durable identity and then backing back. unknown outcome cannot be blindly considered as rollback.
+     *
+     * @param pending pending
+     */
+    private void flush(final List<Pending> pending) {
         batches.increment();
         grouped.add(pending.size());
         try {
@@ -144,7 +189,7 @@ final class MysqlVectorLocalCommitBatcher implements AutoCloseable {
             for (int index = 0; index < pending.size(); index++) {
                 pending.get(index).result().complete(sequences.get(index));
             }
-        } catch (RuntimeException batchFailure) {
+        } catch (final RuntimeException batchFailure) {
             lastFailure.set(batchFailure);
             fallbackMembers.add(pending.size());
             for (Pending item : pending) {
@@ -152,43 +197,66 @@ final class MysqlVectorLocalCommitBatcher implements AutoCloseable {
                     var durable = adapter.verifyLocalVectorCommit(item.request());
                     long sequence = durable.isPresent() ? durable.getAsLong()
                             : adapter.directCommitVectorLocal(item.request().txId(),
-                            item.request().mutation(), item.request().stripe(),
-                            item.request().startSequence());
+                                    item.request().mutation(), item.request().stripe(),
+                                    item.request().startSequence());
                     item.result().complete(sequence);
-                } catch (RuntimeException memberFailure) {
+                } catch (final RuntimeException memberFailure) {
                     item.result().completeExceptionally(memberFailure);
                 }
             }
         }
     }
 
-    /** 返回已经真正调用过物理批次的笔数。 */
+    /**
+     * Returns the number of numbers that have actually called physical batch.
+     *
+     * @return the operation result
+     */
     long batchCount() {
         return batches.sum();
     }
 
-    /** 返回本轮真正参与物理组批的逻辑事务总数。 */
+    /**
+     * Returns the total number of logical transaction s that actually participate in the current round of physical batches.
+     *
+     * @return the operation result
+     */
     long groupedCount() {
         return grouped.sum();
     }
 
-    /** 单批失败后转入持久核对和逐笔提交的逻辑事务数。 */
+    /**
+     * A single batch failed and moved to the durable reconciliation and cross-checking commit logical transaction number.
+     *
+     * @return the operation result
+     */
     long fallbackCount() {
         return fallbackMembers.sum();
     }
 
-    /** 异常证据仅用于监控；已回退成功的批次仍可有原始错误。 */
+    /**
+     * Unusual evidence is used only for surveillance purposes; batch, which has returned successfully, may still have an original error.
+     *
+     * @return the operation result
+     */
     Throwable lastFailure() {
         return lastFailure.get();
     }
 
-    /** 中止等待中的任务使用可重试未知结果，调用方须按事务号复核。 */
-    private static MvccException unavailable(long txId) {
+    /**
+     * Aborting the pending task will result in an unknown retry and the caller will have to review it by transaction ID.
+     *
+     * @param txId transaction identifier
+     * @return the operation result
+     */
+    private static MvccException unavailable(final long txId) {
         return new MvccException(ErrorCode.TRANSACTION_STATUS_UNKNOWN,
                 "local vector batcher stopped before confirming this transaction", true, txId);
     }
 
-    /** 处理已入队请求后停止后台线程，关闭后拒绝新请求。 */
+    /**
+     * Stop background threads after processing incoming requests and close to reject new requests.
+     */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
@@ -199,9 +267,19 @@ final class MysqlVectorLocalCommitBatcher implements AutoCloseable {
             if (!workers.awaitTermination(15, TimeUnit.SECONDS)) {
                 workers.shutdownNow();
             }
-        } catch (InterruptedException ex) {
+        } catch (final InterruptedException ex) {
             workers.shutdownNow();
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * Each commit Logical transaction has an independent receipt completion and cannot successfully hide the individual result with batch.
+     *
+     * @param request request
+     * @param result result
+     */
+    private record Pending(MysqlStorageAdapter.LocalVectorCommitRequest request,
+            CompletableFuture<Long> result) {
     }
 }

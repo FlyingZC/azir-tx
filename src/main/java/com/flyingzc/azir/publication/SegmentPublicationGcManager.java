@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.publication;
 
 import com.flyingzc.azir.metadata.TransactionMetadataStore;
@@ -9,31 +25,59 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.LongSupplier;
 
-/** 用同一持久安全点轮转回收分片版本、分段槽、中心终态与 owner 记录。 */
+/**
+ * Use the same durable safe point rotation collection shard version, slots, center terminal state and owner records.
+ */
 public final class SegmentPublicationGcManager {
+
     private final MysqlSegmentPublicationLedger ledger;
+
     private final TransactionMetadataStore metadataStore;
+
     private final Map<String, StorageAdapter> adapters;
+
     private final int metadataBatchSize;
+
     private final long retentionMillis;
+
     private final long timeBudgetNanos;
+
     private final LongSupplier monotonicClock;
+
     private int workCursor;
+
     private Long cycleSafePoint;
 
-    /** 创建默认批次、保留窗口和合作式时间预算。 */
-    public SegmentPublicationGcManager(MysqlSegmentPublicationLedger ledger,
-                                       TransactionMetadataStore metadataStore,
-                                       Map<String, StorageAdapter> adapters) {
+    /**
+     * Create default batch, save window and cooperative time budget.
+     *
+     * @param ledger ledger
+     * @param metadataStore metadata store
+     * @param adapters adapters
+     */
+    public SegmentPublicationGcManager(final MysqlSegmentPublicationLedger ledger,
+                                       final TransactionMetadataStore metadataStore,
+                                       final Map<String, StorageAdapter> adapters) {
         this(ledger, metadataStore, adapters, 256, 60_000, 1_000, System::nanoTime);
     }
 
-    /** 对长期运行配置有限批次和每轮后台预算。 */
-    public SegmentPublicationGcManager(MysqlSegmentPublicationLedger ledger,
-                                       TransactionMetadataStore metadataStore,
-                                       Map<String, StorageAdapter> adapters,
-                                       int metadataBatchSize, long retentionMillis,
-                                       long timeBudgetMillis, LongSupplier monotonicClock) {
+    /**
+     * The long run configuration is limited to batch and background budget per wheel.
+     *
+     * @param ledger ledger
+     * @param metadataStore metadata store
+     * @param adapters adapters
+     * @param metadataBatchSize metadata batch size
+     * @param retentionMillis retention millis
+     * @param timeBudgetMillis time budget millis
+     * @param monotonicClock monotonic clock
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public SegmentPublicationGcManager(final MysqlSegmentPublicationLedger ledger,
+                                       final TransactionMetadataStore metadataStore,
+                                       final Map<String, StorageAdapter> adapters,
+                                       final int metadataBatchSize, final long retentionMillis,
+                                       final long timeBudgetMillis, final LongSupplier monotonicClock) {
         if (metadataBatchSize < 1 || metadataBatchSize > 4096
                 || retentionMillis < 0 || timeBudgetMillis < 1) {
             throw new IllegalArgumentException("invalid segmented GC limits");
@@ -47,8 +91,14 @@ public final class SegmentPublicationGcManager {
         this.monotonicClock = Objects.requireNonNull(monotonicClock, "monotonicClock");
     }
 
-    /** 先清理到期租约，再按分片、槽、中心、owner 的顺序使用同一安全点。 */
-    public synchronized int gcOnce(int limitPerShard) {
+    /**
+     * First clear lease due and then use the same safe point in the order of shard, slot, center, owner.
+     *
+     * @param limitPerShard limit per shard
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     */
+    public synchronized int gcOnce(final int limitPerShard) {
         if (limitPerShard < 1 || limitPerShard > 4096) {
             throw new IllegalArgumentException("invalid segmented shard GC limit");
         }
@@ -78,7 +128,7 @@ public final class SegmentPublicationGcManager {
                     reclaimed += ledger.purgeSealedSegments(safePoint, cutoff, metadataBatchSize);
                 }
             }
-            // 失败保留阶段和目标安全点；全阶段完成后下一轮才读取更高水位。
+            // Failed to keep phase and target safe point; read higher watermark next round after completion of full phase.
             workCursor = (workCursor + 1) % workCount;
             if (workCursor == 0) {
                 cycleSafePoint = null;
@@ -88,7 +138,11 @@ public final class SegmentPublicationGcManager {
         return reclaimed;
     }
 
-    /** 返回分片与中心回收共同遵守的持久安全点。 */
+    /**
+     * Returns shard to safe point with Center collection.
+     *
+     * @return the operation result
+     */
     public long currentSafePoint() {
         return ledger.currentSafePoint();
     }

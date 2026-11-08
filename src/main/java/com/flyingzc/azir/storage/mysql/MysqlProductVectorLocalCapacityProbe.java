@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.storage.mysql;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -24,14 +40,26 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
-/** 测量正式单键向量 1PC、持租约发布与远端 TCP 读切面的同形容量。 */
+/**
+ * Measures the exact single-key vector 1PC, lease and remote TCP read snapshot equivalents.
+ */
 public final class MysqlProductVectorLocalCapacityProbe {
-    /** 容量入口不保存全局数据库连接。 */
+
+    /**
+     * The volume entry does not save global database connection.
+     */
     private MysqlProductVectorLocalCapacityProbe() {
     }
 
-    /** 必须显式选择全新隔离库，已有 MVCC 表时拒绝覆盖。 */
-    public static void main(String[] args) throws Exception {
+    /**
+     * You have to select the new vault in a visible way, and you can't overwrite it if you have MVCC tables.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    public static void main(final String[] args) throws Exception {
         if (!Boolean.parseBoolean(env("AZIR_TX_RESET", "false"))) {
             throw new IllegalArgumentException("product vector local probe requires AZIR_TX_RESET=true and fresh databases");
         }
@@ -65,9 +93,10 @@ public final class MysqlProductVectorLocalCapacityProbe {
         String controlUrl = env("AZIR_TX_CONTROL_JDBC", "jdbc:mysql://127.0.0.1:23306/control");
         String firstUrl = env("AZIR_TX_SHARD1_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_1");
         String secondUrl = env("AZIR_TX_SHARD2_JDBC", "jdbc:mysql://127.0.0.1:23306/shard_2");
-        try (HikariDataSource center = pool(controlUrl, username, password);
-             HikariDataSource left = pool(firstUrl, username, password);
-             HikariDataSource right = pool(secondUrl, username, password)) {
+        try (
+                HikariDataSource center = pool(controlUrl, username, password);
+                HikariDataSource left = pool(firstUrl, username, password);
+                HikariDataSource right = pool(secondUrl, username, password)) {
             requireEmptyMvccSchema(center);
             requireEmptyMvccSchema(left);
             requireEmptyMvccSchema(right);
@@ -83,18 +112,20 @@ public final class MysqlProductVectorLocalCapacityProbe {
             Map<String, DataSource> routes = Map.of("s1", left, "s2", right);
             var leases = MysqlVectorCutLeaderLease.forProduct(center, routes, stripes);
             leases.initializeProduct();
-            try (var runtime = MysqlVectorCutLeaderRuntime.forProduct(center, routes, stripes,
-                    ledger::currentPublished, leases, "127.0.0.1:" + port, 5_000, 200);
-                 var server = new MysqlVectorCutTcpServer(runtime, port);
-                 var remote = MysqlVectorCutTcpClient.forProduct(center, routes, stripes)) {
+            try (
+                    var runtime = MysqlVectorCutLeaderRuntime.forProduct(center, routes, stripes,
+                            ledger::currentPublished, leases, "127.0.0.1:" + port, 5_000, 200);
+                    var server = new MysqlVectorCutTcpServer(runtime, port);
+                    var remote = MysqlVectorCutTcpClient.forProduct(center, routes, stripes)) {
                 if (!runtime.start()) {
                     throw new IllegalStateException("product vector local probe found another active leader");
                 }
                 server.start();
                 if (gcEnabled) {
-                    try (HikariDataSource backgroundCenter = backgroundPool(controlUrl, username, password);
-                         HikariDataSource backgroundLeft = backgroundPool(firstUrl, username, password);
-                         HikariDataSource backgroundRight = backgroundPool(secondUrl, username, password)) {
+                    try (
+                            HikariDataSource backgroundCenter = backgroundPool(controlUrl, username, password);
+                            HikariDataSource backgroundLeft = backgroundPool(firstUrl, username, password);
+                            HikariDataSource backgroundRight = backgroundPool(secondUrl, username, password)) {
                         var foregroundLeases = new MysqlVectorSnapshotLeaseStore(center,
                                 List.of("s1", "s2"), stripes);
                         var backgroundLeases = new MysqlVectorSnapshotLeaseStore(backgroundCenter,
@@ -107,12 +138,13 @@ public final class MysqlProductVectorLocalCapacityProbe {
                                 "s2", stripes, backgroundLeases);
                         firstGc.initializeProduct();
                         secondGc.initializeProduct();
-                        try (var protection = new MysqlVectorReaderProtectionRuntime(
-                                foregroundLeases, () -> runtime.currentView().snapshot(),
-                                "vector-local-benchmark-reader", 5_000, 1_000, 10_000);
-                             var gc = new MysqlVectorLocalGcScheduler(runtime, backgroundLeases,
-                                     Map.of("s1", firstGc, "s2", secondGc),
-                                     gcBatchLimit, gcIntervalMillis)) {
+                        try (
+                                var protection = new MysqlVectorReaderProtectionRuntime(
+                                        foregroundLeases, () -> runtime.currentView().snapshot(),
+                                        "vector-local-benchmark-reader", 5_000, 1_000, 10_000);
+                                var gc = new MysqlVectorLocalGcScheduler(runtime, backgroundLeases,
+                                        Map.of("s1", firstGc, "s2", secondGc),
+                                        gcBatchLimit, gcIntervalMillis)) {
                             protection.start();
                             gc.start();
                             runConfigured(first, second, left, right, runtime, remote,
@@ -120,7 +152,7 @@ public final class MysqlProductVectorLocalCapacityProbe {
                                     logicalBatch, coalesceBatch, batchLanes, batchWaitMicros,
                                     reuseKeys, gc, windowSeconds);
                             System.out.printf("PRODUCT_VECTOR_LOCAL_GC runs=%d failures=%d "
-                                            + "last_reclaimed=%d total_reclaimed=%d first_error=%s%n",
+                                    + "last_reclaimed=%d total_reclaimed=%d first_error=%s%n",
                                     gc.stats().runCount(), gc.stats().failureCount(),
                                     gc.stats().lastProcessedCount(), gc.totalReclaimed(),
                                     gc.lastFailure());
@@ -139,33 +171,70 @@ public final class MysqlProductVectorLocalCapacityProbe {
         }
     }
 
-    /** 沿用当前产品连接池配置，避免把不同超时预算混入吞吐对照。 */
-    private static HikariDataSource pool(String url, String username, String password) {
+    /**
+     * Follow the current connection pool configuration and avoid mixing different timeout budget s into throughput contrasts.
+     *
+     * @param url url
+     * @param username username
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource pool(final String url, final String username, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.create(url, username, password);
     }
 
-    /** GC 必须使用与前台物理同权威但独立预算的小连接池。 */
-    private static HikariDataSource backgroundPool(String url, String username, String password) {
+    /**
+     * GC must use a small connection pool with foreground physics but independent budget.
+     *
+     * @param url url
+     * @param username username
+     * @param password password
+     * @return the operation result
+     */
+    private static HikariDataSource backgroundPool(final String url, final String username, final String password) {
         return (HikariDataSource) MysqlDataSourceFactory.createBackground(url, username, password);
     }
 
-    /** 两种维护模式复用完全相同的单键业务写入与切面 ACK 负载。 */
-    private static void runConfigured(MysqlStorageAdapter first, MysqlStorageAdapter second,
-                                      HikariDataSource left, HikariDataSource right,
-                                      MysqlVectorCutLeaderRuntime runtime,
-                                      MysqlVectorCutTcpClient remote,
-                                      int concurrency, int seconds, int stripes,
-                                      boolean javaFallback, boolean batchJavaFallback,
-                                      int logicalBatch, int coalesceBatch,
-                                      int batchLanes, long batchWaitMicros,
-                                      boolean reuseKeys,
-                                      MysqlVectorLocalGcScheduler gc,
-                                      int windowSeconds) throws Exception {
+    /**
+     * The two maintenance modes repeat the exact same single-key operations written to the cut-off ACK load.
+     *
+     * @param first first
+     * @param second second
+     * @param left left
+     * @param right right
+     * @param runtime runtime
+     * @param remote remote
+     * @param concurrency concurrency
+     * @param seconds seconds
+     * @param stripes stripes
+     * @param javaFallback java fallback
+     * @param batchJavaFallback batch java fallback
+     * @param logicalBatch logical batch
+     * @param coalesceBatch coalesce batch
+     * @param batchLanes batch lanes
+     * @param batchWaitMicros batch wait micros
+     * @param reuseKeys reuse keys
+     * @param gc gc
+     * @param windowSeconds window seconds
+     * @throws Exception if the operation cannot complete
+     */
+    private static void runConfigured(final MysqlStorageAdapter first, final MysqlStorageAdapter second,
+                                      final HikariDataSource left, final HikariDataSource right,
+                                      final MysqlVectorCutLeaderRuntime runtime,
+                                      final MysqlVectorCutTcpClient remote,
+                                      final int concurrency, final int seconds, final int stripes,
+                                      final boolean javaFallback, final boolean batchJavaFallback,
+                                      final int logicalBatch, final int coalesceBatch,
+                                      final int batchLanes, final long batchWaitMicros,
+                                      final boolean reuseKeys,
+                                      final MysqlVectorLocalGcScheduler gc,
+                                      final int windowSeconds) throws Exception {
         if (coalesceBatch > 0) {
-            try (var firstBatcher = new MysqlVectorLocalCommitBatcher(
-                    first, batchLanes, coalesceBatch, batchWaitMicros, 4096);
-                 var secondBatcher = new MysqlVectorLocalCommitBatcher(
-                         second, batchLanes, coalesceBatch, batchWaitMicros, 4096)) {
+            try (
+                    var firstBatcher = new MysqlVectorLocalCommitBatcher(
+                            first, batchLanes, coalesceBatch, batchWaitMicros, 4096);
+                    var secondBatcher = new MysqlVectorLocalCommitBatcher(
+                            second, batchLanes, coalesceBatch, batchWaitMicros, 4096)) {
                 run(first, second, firstBatcher, secondBatcher, left, right, runtime, remote,
                         concurrency, seconds, stripes, javaFallback, batchJavaFallback,
                         logicalBatch, reuseKeys, gc, windowSeconds);
@@ -177,8 +246,14 @@ public final class MysqlProductVectorLocalCapacityProbe {
         }
     }
 
-    /** 真正跑容量前确认没有已有产品 MVCC 表，避免误把旧业务数据当作探针输入。 */
-    private static void requireEmptyMvccSchema(HikariDataSource dataSource) throws SQLException {
+    /**
+     * Confirms that there is no existing product MVCC table before the true running capacity and avoids misusing old business data as probe input.
+     *
+     * @param dataSource database connection source
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws SQLException if the operation cannot complete
+     */
+    private static void requireEmptyMvccSchema(final HikariDataSource dataSource) throws SQLException {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select table_name from information_schema.tables
                 where table_schema = database() and left(table_name, 5) = 'mvcc_'
@@ -190,17 +265,39 @@ public final class MysqlProductVectorLocalCapacityProbe {
         }
     }
 
-    /** 两片各执行单分片写，ACK 只在正式发布切面包含该序号后计数。 */
-    private static void run(MysqlStorageAdapter first, MysqlStorageAdapter second,
-                            MysqlVectorLocalCommitBatcher firstBatcher,
-                            MysqlVectorLocalCommitBatcher secondBatcher,
-                            HikariDataSource left, HikariDataSource right,
-                            MysqlVectorCutLeaderRuntime runtime, MysqlVectorCutTcpClient remote,
-                            int concurrency, int seconds, int stripes,
-                            boolean javaFallback, boolean batchJavaFallback,
-                            int logicalBatch, boolean reuseKeys,
-                            MysqlVectorLocalGcScheduler gc,
-                            int windowSeconds) throws Exception {
+    /**
+     * Two executive sheets each shard writing, ACK counting only after the officially released cut contains that serial number.
+     *
+     * @param first first
+     * @param second second
+     * @param firstBatcher first batcher
+     * @param secondBatcher second batcher
+     * @param left left
+     * @param right right
+     * @param runtime runtime
+     * @param remote remote
+     * @param concurrency concurrency
+     * @param seconds seconds
+     * @param stripes stripes
+     * @param javaFallback java fallback
+     * @param batchJavaFallback batch java fallback
+     * @param logicalBatch logical batch
+     * @param reuseKeys reuse keys
+     * @param gc gc
+     * @param windowSeconds window seconds
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
+    private static void run(final MysqlStorageAdapter first, final MysqlStorageAdapter second,
+                            final MysqlVectorLocalCommitBatcher firstBatcher,
+                            final MysqlVectorLocalCommitBatcher secondBatcher,
+                            final HikariDataSource left, final HikariDataSource right,
+                            final MysqlVectorCutLeaderRuntime runtime, final MysqlVectorCutTcpClient remote,
+                            final int concurrency, final int seconds, final int stripes,
+                            final boolean javaFallback, final boolean batchJavaFallback,
+                            final int logicalBatch, final boolean reuseKeys,
+                            final MysqlVectorLocalGcScheduler gc,
+                            final int windowSeconds) throws Exception {
         AtomicLong sequence = new AtomicLong(100);
         LongAdder attempts = new LongAdder();
         LongAdder physical = new LongAdder();
@@ -216,8 +313,9 @@ public final class MysqlProductVectorLocalCapacityProbe {
         CountDownLatch ready = new CountDownLatch(concurrency);
         CountDownLatch start = new CountDownLatch(1);
         CountDownLatch done = new CountDownLatch(concurrency);
-        try (var background = Executors.newVirtualThreadPerTaskExecutor();
-             var workers = Executors.newFixedThreadPool(concurrency)) {
+        try (
+                var background = Executors.newVirtualThreadPerTaskExecutor();
+                var workers = Executors.newFixedThreadPool(concurrency)) {
             var reader = background.submit(() -> {
                 try {
                     start.await();
@@ -228,7 +326,7 @@ public final class MysqlProductVectorLocalCapacityProbe {
                         cutReads.increment();
                         LockSupport.parkNanos(500_000);
                     }
-                } catch (Exception ex) {
+                } catch (final Exception ex) {
                     firstFailure.compareAndSet(null, "reader:" + ex);
                     running.set(false);
                 }
@@ -248,15 +346,15 @@ public final class MysqlProductVectorLocalCapacityProbe {
                         long current = acked.sum();
                         long reclaimed = gc == null ? 0 : gc.totalReclaimed();
                         System.out.printf("PRODUCT_VECTOR_LOCAL_WINDOW index=%d elapsed_s=%.2f "
-                                        + "ack_tps=%.2f acked=%d estimated_remaining=%d "
-                                        + "gc_reclaimed=%d%n",
+                                + "ack_tps=%.2f acked=%d estimated_remaining=%d "
+                                + "gc_reclaimed=%d%n",
                                 ++index, (now - previousAt) / 1_000_000_000.0,
                                 (current - previous) / ((now - previousAt) / 1_000_000_000.0),
                                 current, current - reclaimed, reclaimed);
                         previous = current;
                         previousAt = now;
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 }
             });
@@ -279,7 +377,8 @@ public final class MysqlProductVectorLocalCapacityProbe {
                                 long id = sequence.incrementAndGet();
                                 int stripe = reuseKeys ? fixedStripe : (int) (id % stripes);
                                 long startSequence = reuseKeys
-                                        ? remote.currentView().snapshot().sequence(shardId, stripe) : 0;
+                                        ? remote.currentView().snapshot().sequence(shardId, stripe)
+                                        : 0;
                                 Mutation mutation = Mutation.put(reuseKeys ? fixedKey : "local-first:" + id,
                                         ("v" + id).getBytes(StandardCharsets.UTF_8));
                                 batch.add(new MysqlStorageAdapter.LocalVectorCommitRequest(
@@ -296,9 +395,9 @@ public final class MysqlProductVectorLocalCapacityProbe {
                                     var request = batch.getFirst();
                                     long localSeq = javaFallback
                                             ? adapter.directCommitVectorLocalJavaForProbe(request.txId(),
-                                            request.mutation(), request.stripe(), request.startSequence())
+                                                    request.mutation(), request.stripe(), request.startSequence())
                                             : adapter.directCommitVectorLocal(request.txId(),
-                                            request.mutation(), request.stripe(), request.startSequence());
+                                                    request.mutation(), request.stripe(), request.startSequence());
                                     localSequences = List.of(localSeq);
                                 } else {
                                     localSequences = batchJavaFallback
@@ -318,7 +417,7 @@ public final class MysqlProductVectorLocalCapacityProbe {
                                     publicationWaits.add(acknowledgedAt - physicallyCommittedAt);
                                     ackLatencies.add(acknowledgedAt - began);
                                 }
-                            } catch (Exception ex) {
+                            } catch (final Exception ex) {
                                 failures.add(batch.size());
                                 firstFailure.compareAndSet(null, "writer:" + ex);
                                 if (!runtime.isServing()) {
@@ -326,7 +425,7 @@ public final class MysqlProductVectorLocalCapacityProbe {
                                 }
                             }
                         }
-                    } catch (Exception ex) {
+                    } catch (final Exception ex) {
                         failures.increment();
                         firstFailure.compareAndSet(null, "writer-setup:" + ex);
                     } finally {
@@ -367,16 +466,17 @@ public final class MysqlProductVectorLocalCapacityProbe {
                         + ", acked=" + acked.sum());
             }
             System.out.printf("PRODUCT_VECTOR_LOCAL_CAPACITY path=%s concurrency=%d logical_batch=%d "
-                            + "reused_keys=%s duration_s=%.2f "
-                            + "attempts=%d physical=%d acked=%d failures=%d ack_tps=%.2f "
-                            + "ack_p99_ms=%.3f physical_avg_ms=%.3f physical_p99_ms=%.3f "
-                            + "wait_avg_ms=%.3f wait_p99_ms=%.3f "
-                            + "cut_reads=%d cut_avg_ms=%.3f cut_p99_ms=%.3f "
-                            + "group_batches=%d group_items=%d group_avg_size=%.2f group_fallbacks=%d "
-                            + "versions=%d gc_reclaimed=%d watermark_total=%d%n",
-                    firstBatcher != null ? "COALESCED" : logicalBatch > 1
-                            ? batchJavaFallback ? "JAVA_GROUP" : "PROCEDURE_GROUP"
-                            : javaFallback ? "JAVA" : "PROCEDURE",
+                    + "reused_keys=%s duration_s=%.2f "
+                    + "attempts=%d physical=%d acked=%d failures=%d ack_tps=%.2f "
+                    + "ack_p99_ms=%.3f physical_avg_ms=%.3f physical_p99_ms=%.3f "
+                    + "wait_avg_ms=%.3f wait_p99_ms=%.3f "
+                    + "cut_reads=%d cut_avg_ms=%.3f cut_p99_ms=%.3f "
+                    + "group_batches=%d group_items=%d group_avg_size=%.2f group_fallbacks=%d "
+                    + "versions=%d gc_reclaimed=%d watermark_total=%d%n",
+                    firstBatcher != null ? "COALESCED"
+                            : logicalBatch > 1
+                                    ? batchJavaFallback ? "JAVA_GROUP" : "PROCEDURE_GROUP"
+                                    : javaFallback ? "JAVA" : "PROCEDURE",
                     concurrency, logicalBatch, reuseKeys, duration, attempts.sum(),
                     physical.sum(), acked.sum(), failures.sum(),
                     acked.sum() / duration, p99(ackLatencies), average(physicalLatencies),
@@ -387,8 +487,14 @@ public final class MysqlProductVectorLocalCapacityProbe {
         }
     }
 
-    /** 已提交本地版本数必须等于各分片分条计数之和。 */
-    private static long[] persistedCounts(HikariDataSource dataSource) throws SQLException {
+    /**
+     * The commit local version number shall be equal to the sum of each shard fraction.
+     *
+     * @param dataSource database connection source
+     * @return the operation result
+     * @throws SQLException if the operation cannot complete
+     */
+    private static long[] persistedCounts(final HikariDataSource dataSource) throws SQLException {
         try (Connection connection = dataSource.getConnection(); PreparedStatement query = connection.prepareStatement("""
                 select (select count(*) from mvcc_vector_local_data_v1) as versions,
                        (select sum(committed_seq) from mvcc_vector_stripe_state_v1) as watermarks
@@ -400,20 +506,36 @@ public final class MysqlProductVectorLocalCapacityProbe {
         }
     }
 
-    /** 计算一次有界探针中实际完成读取的平均毫秒数。 */
-    private static double average(ConcurrentLinkedQueue<Long> values) {
+    /**
+     * Calculates the average number of milliseconds actually read out in bounded probe.
+     *
+     * @param values values
+     * @return the operation result
+     */
+    private static double average(final ConcurrentLinkedQueue<Long> values) {
         return values.stream().mapToLong(Long::longValue).average().orElse(Double.NaN) / 1_000_000.0;
     }
 
-    /** 按真实样本排序得到 P99，不用并发度倒推尾延迟。 */
-    private static double p99(ConcurrentLinkedQueue<Long> values) {
+    /**
+     * Ordered P99 by real sample, with no concurrent -degree pushback delay.
+     *
+     * @param values values
+     * @return the operation result
+     */
+    private static double p99(final ConcurrentLinkedQueue<Long> values) {
         long[] sorted = values.stream().mapToLong(Long::longValue).sorted().toArray();
         return sorted.length == 0 ? Double.NaN
                 : sorted[Math.max(0, (int) Math.ceil(sorted.length * 0.99) - 1)] / 1_000_000.0;
     }
 
-    /** 容量参数只来自本探针显式环境变量。 */
-    private static String env(String name, String fallback) {
+    /**
+     * The capacity parameter is derived only from this probe visible environment variable.
+     *
+     * @param name name
+     * @param fallback fallback
+     * @return the operation result
+     */
+    private static String env(final String name, final String fallback) {
         String value = System.getenv(name);
         return value == null || value.isBlank() ? fallback : value;
     }

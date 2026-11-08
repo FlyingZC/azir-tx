@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.e2e;
 
 import com.flyingzc.azir.common.ErrorCode;
@@ -34,19 +50,24 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * MySQL MVCC 事务基准测试入口。
+ * MySQL MVCC transaction benchmark test entrance.
  */
 public final class MysqlTxnBenchmark {
+
     /**
-     * 构造 MysqlTxnBenchmark 实例。
+     * Construct a MysqlTxnBenchmark instance.
      */
     private MysqlTxnBenchmark() {
     }
 
     /**
-     * 程序入口方法。
+     * Run the application entry point.
+     *
+     * @param args args
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
      */
-    public static void main(String[] args) throws Exception {
+    public static void main(final String[] args) throws Exception {
         Config config = Config.fromEnv();
         DataSource controlDataSource = MysqlDataSourceFactory.create(config.controlJdbcUrl(), config.username(), config.password());
         DataSource shard1DataSource = MysqlDataSourceFactory.create(config.shard1JdbcUrl(), config.username(), config.password());
@@ -58,7 +79,7 @@ public final class MysqlTxnBenchmark {
             TimestampOracle selectedTso = config.segmentTso()
                     ? segmentTso
                     : mysqlTso;
-            // 对照模式只遮蔽合并发布能力，仍使用同一个持久化 TSO 权威。
+            // Control mode only covers concurrent sheet capacity, still using the same durable storage TSO authority.
             TimestampOracle tso = config.legacyControl() ? selectedTso::nextTimestamp : selectedTso;
             TransactionMetadataStore metadataStore = new MysqlTransactionMetadataStore(controlDataSource);
             SafePointStore safePointStore = new MysqlSafePointStore(controlDataSource);
@@ -90,48 +111,44 @@ public final class MysqlTxnBenchmark {
                     ? new InMemoryTransactionMetrics()
                     : null;
             BenchmarkResult result;
-            try (TransactionManager transactionManager = new TransactionManager(
-                    tso,
-                    metadataStore,
-                    safePointStore,
-                    new TransactionOptions(
-                            new LockWaitPolicy(
-                                    config.conflictModeSetting(),
-                                    config.lockWaitTimeoutMs(),
-                                    config.lockWaitBackoffInitialMs(),
-                                    config.lockWaitBackoffMaxMs(),
-                                    config.lockWaitBackoffMultiplier(),
-                                    config.lockWaitBackoffJitter()
-                            ),
-                            new TransactionRetryPolicy(
-                                    config.maxAttempts(),
-                                    config.retryBackoffInitialMs(),
-                                    config.retryBackoffMaxMs(),
-                                    config.retryBackoffMultiplier(),
-                                    config.retryBackoffJitter()
-                            ),
-                            new CrossShardCommitPolicy(
-                                    config.parallelPrewrite(),
-                                    config.parallelPrepare(),
-                                    config.parallelCommit(),
-                                    config.parallelRollback(),
-                                    config.asyncCommit(),
-                                    config.asyncCommitWorkers()
-                            ),
-                            config.bufferWrites(),
-                            config.lazyBeginMetadata(),
-                            config.deferIntentCleanup()
-                    ),
-                    Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2),
-                    metrics == null ? NoOpTransactionMetrics.INSTANCE : metrics
-            )) {
+            try (
+                    TransactionManager transactionManager = new TransactionManager(
+                            tso,
+                            metadataStore,
+                            safePointStore,
+                            new TransactionOptions(
+                                    new LockWaitPolicy(
+                                            config.conflictModeSetting(),
+                                            config.lockWaitTimeoutMs(),
+                                            config.lockWaitBackoffInitialMs(),
+                                            config.lockWaitBackoffMaxMs(),
+                                            config.lockWaitBackoffMultiplier(),
+                                            config.lockWaitBackoffJitter()),
+                                    new TransactionRetryPolicy(
+                                            config.maxAttempts(),
+                                            config.retryBackoffInitialMs(),
+                                            config.retryBackoffMaxMs(),
+                                            config.retryBackoffMultiplier(),
+                                            config.retryBackoffJitter()),
+                                    new CrossShardCommitPolicy(
+                                            config.parallelPrewrite(),
+                                            config.parallelPrepare(),
+                                            config.parallelCommit(),
+                                            config.parallelRollback(),
+                                            config.asyncCommit(),
+                                            config.asyncCommitWorkers()),
+                                    config.bufferWrites(),
+                                    config.lazyBeginMetadata(),
+                                    config.deferIntentCleanup()),
+                            Map.of(shard1.shardId(), shard1, shard2.shardId(), shard2),
+                            metrics == null ? NoOpTransactionMetrics.INSTANCE : metrics)) {
                 result = runBenchmark(transactionManager, config);
             }
             System.out.println(result.toLine(config));
             if (metrics != null) {
                 TransactionMetricsFormatter.formatNonEmpty(metrics).forEach(System.out::println);
             }
-            // 基准过程出现非冲突失败或完全没有提交时，退出码必须明确标记证据无效。
+            // When a non-conflict or total commit process fails, the exit code must clearly mark the evidence as invalid.
             if (result.failures() != 0 || result.committed() == 0) {
                 throw new IllegalStateException("Azir cross-shard benchmark is invalid: "
                         + (result.firstFailure() == null ? "no committed transaction" : result.firstFailure()));
@@ -144,9 +161,14 @@ public final class MysqlTxnBenchmark {
     }
 
     /**
-     * 执行基准测试并返回统计结果。
+     * Run the benchmark and return its statistics.
+     *
+     * @param transactionManager transaction manager
+     * @param config config
+     * @return the operation result
+     * @throws Exception if the operation cannot complete
      */
-    private static BenchmarkResult runBenchmark(TransactionManager transactionManager, Config config) throws Exception {
+    private static BenchmarkResult runBenchmark(final TransactionManager transactionManager, final Config config) throws Exception {
         LongAdder attempts = new LongAdder();
         LongAdder committed = new LongAdder();
         LongAdder conflicts = new LongAdder();
@@ -179,7 +201,7 @@ public final class MysqlTxnBenchmark {
                                 return null;
                             });
                             committed.increment();
-                        } catch (MvccException ex) {
+                        } catch (final MvccException ex) {
                             if (ex.errorCode() == ErrorCode.LOCK_CONFLICT
                                     || ex.errorCode() == ErrorCode.LOCK_WAIT_TIMEOUT
                                     || ex.errorCode() == ErrorCode.WRITE_CONFLICT) {
@@ -188,12 +210,12 @@ public final class MysqlTxnBenchmark {
                                 failures.increment();
                                 firstFailure.compareAndSet(null, formatFailure(ex));
                             }
-                        } catch (RuntimeException ex) {
+                        } catch (final RuntimeException ex) {
                             failures.increment();
                             firstFailure.compareAndSet(null, formatFailure(ex));
                         }
                     }
-                } catch (InterruptedException ex) {
+                } catch (final InterruptedException ex) {
                     Thread.currentThread().interrupt();
                 } finally {
                     finishLatch.countDown();
@@ -214,21 +236,26 @@ public final class MysqlTxnBenchmark {
                 committed.sum(),
                 conflicts.sum(),
                 failures.sum(),
-                firstFailure.get()
-        );
+                firstFailure.get());
     }
 
     /**
-     * 将字符串转换为字节数组。
+     * Encode the string as a byte array.
+     *
+     * @param value value to write
+     * @return the operation result
      */
-    private static byte[] bytes(String value) {
+    private static byte[] bytes(final String value) {
         return value.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /**
-     * 格式化基准测试失败信息。
+     * Format benchmark test failed information.
+     *
+     * @param throwable throwable
+     * @return the operation result
      */
-    private static String formatFailure(Throwable throwable) {
+    private static String formatFailure(final Throwable throwable) {
         StringBuilder builder = new StringBuilder();
         builder.append(throwable.getClass().getSimpleName());
         if (throwable instanceof MvccException ex) {
@@ -248,9 +275,13 @@ public final class MysqlTxnBenchmark {
     }
 
     /**
-     * 重置基准测试表数据。
+     * Reset the benchmark tables.
+     *
+     * @param dataSource database connection source
+     * @param tables tables
+     * @throws Exception if the operation cannot complete
      */
-    private static void reset(DataSource dataSource, String... tables) throws Exception {
+    private static void reset(final DataSource dataSource, final String... tables) throws Exception {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             for (String table : tables) {
                 statement.execute("delete from " + table);
@@ -259,52 +290,104 @@ public final class MysqlTxnBenchmark {
     }
 
     /**
-     * 关闭资源或后台执行器。
+     * Close resources and background executors.
+     *
+     * @param dataSource database connection source
+     * @throws Exception if the operation cannot complete
      */
-    private static void close(DataSource dataSource) throws Exception {
+    private static void close(final DataSource dataSource) throws Exception {
         if (dataSource instanceof AutoCloseable closeable) {
             closeable.close();
         }
     }
 
     /**
-     * 基准测试配置对象。
+     * Read a string-valued environment variable.
+     *
+     * @param key business key
+     * @param defaultValue default value
+     * @return the operation result
+     */
+    private static String env(final String key, final String defaultValue) {
+        String value = System.getenv(key);
+        return value == null || value.isBlank() ? defaultValue : value;
+    }
+
+    /**
+     * Benchmark configuration.
+     *
+     * @param controlJdbcUrl control jdbc url
+     * @param shard1JdbcUrl shard1 jdbc url
+     * @param shard2JdbcUrl shard2 jdbc url
+     * @param username username
+     * @param password password
+     * @param resetTables reset tables
+     * @param concurrency concurrency
+     * @param durationSeconds duration seconds
+     * @param conflictMode conflict mode
+     * @param conflictModeSetting conflict mode setting
+     * @param lockWaitTimeoutMs lock wait timeout ms
+     * @param lockWaitBackoffInitialMs lock wait backoff initial ms
+     * @param lockWaitBackoffMaxMs lock wait backoff max ms
+     * @param lockWaitBackoffMultiplier lock wait backoff multiplier
+     * @param lockWaitBackoffJitter lock wait backoff jitter
+     * @param maxAttempts max attempts
+     * @param retryBackoffInitialMs retry backoff initial ms
+     * @param retryBackoffMaxMs retry backoff max ms
+     * @param retryBackoffMultiplier retry backoff multiplier
+     * @param retryBackoffJitter retry backoff jitter
+     * @param segmentTso segment tso
+     * @param tsoBatchSize tso batch size
+     * @param bufferWrites buffer writes
+     * @param lazyBeginMetadata lazy begin metadata
+     * @param deferIntentCleanup defer intent cleanup
+     * @param parallelPrewrite parallel prewrite
+     * @param parallelPrepare parallel prepare
+     * @param parallelCommit parallel commit
+     * @param parallelRollback parallel rollback
+     * @param asyncCommit async commit
+     * @param asyncCommitWorkers async commit workers
+     * @param stageMetrics stage metrics
+     * @param legacyControl legacy control
      */
     private record Config(String controlJdbcUrl,
-                          String shard1JdbcUrl,
-                          String shard2JdbcUrl,
-                          String username,
-                          String password,
-                          boolean resetTables,
-                          int concurrency,
-                          int durationSeconds,
-                          boolean conflictMode,
-                          ConflictMode conflictModeSetting,
-                          long lockWaitTimeoutMs,
-                          long lockWaitBackoffInitialMs,
-                          long lockWaitBackoffMaxMs,
-                          double lockWaitBackoffMultiplier,
-                          boolean lockWaitBackoffJitter,
-                          int maxAttempts,
-                          long retryBackoffInitialMs,
-                          long retryBackoffMaxMs,
-                          double retryBackoffMultiplier,
-                          boolean retryBackoffJitter,
-                          boolean segmentTso,
-                          int tsoBatchSize,
-                          boolean bufferWrites,
-                          boolean lazyBeginMetadata,
-                          boolean deferIntentCleanup,
-                          boolean parallelPrewrite,
-                          boolean parallelPrepare,
-                          boolean parallelCommit,
-                          boolean parallelRollback,
-                          boolean asyncCommit,
-                          int asyncCommitWorkers,
-                          boolean stageMetrics,
-                          boolean legacyControl) {
+            String shard1JdbcUrl,
+            String shard2JdbcUrl,
+            String username,
+            String password,
+            boolean resetTables,
+            int concurrency,
+            int durationSeconds,
+            boolean conflictMode,
+            ConflictMode conflictModeSetting,
+            long lockWaitTimeoutMs,
+            long lockWaitBackoffInitialMs,
+            long lockWaitBackoffMaxMs,
+            double lockWaitBackoffMultiplier,
+            boolean lockWaitBackoffJitter,
+            int maxAttempts,
+            long retryBackoffInitialMs,
+            long retryBackoffMaxMs,
+            double retryBackoffMultiplier,
+            boolean retryBackoffJitter,
+            boolean segmentTso,
+            int tsoBatchSize,
+            boolean bufferWrites,
+            boolean lazyBeginMetadata,
+            boolean deferIntentCleanup,
+            boolean parallelPrewrite,
+            boolean parallelPrepare,
+            boolean parallelCommit,
+            boolean parallelRollback,
+            boolean asyncCommit,
+            int asyncCommitWorkers,
+            boolean stageMetrics,
+            boolean legacyControl) {
+
         /**
-         * 从环境变量读取配置对象。
+         * Read configuration from environment variables.
+         *
+         * @return the operation result
          */
         private static Config fromEnv() {
             return new Config(
@@ -340,24 +423,34 @@ public final class MysqlTxnBenchmark {
                     Boolean.parseBoolean(env("AZIR_TX_ASYNC_COMMIT", "true")),
                     Integer.parseInt(env("AZIR_TX_ASYNC_COMMIT_WORKERS", "16")),
                     Boolean.parseBoolean(env("AZIR_TX_STAGE_METRICS", "false")),
-                    Boolean.parseBoolean(env("AZIR_TX_LEGACY_CONTROL", "false"))
-            );
+                    Boolean.parseBoolean(env("AZIR_TX_LEGACY_CONTROL", "false")));
         }
     }
 
     /**
-     * 基准测试结果对象。
+     * Benchmark results.
+     *
+     * @param elapsedSeconds elapsed seconds
+     * @param attempts attempts
+     * @param committed committed
+     * @param conflicts conflicts
+     * @param failures failures
+     * @param firstFailure first failure
      */
     private record BenchmarkResult(double elapsedSeconds,
-                                   long attempts,
-                                   long committed,
-                                   long conflicts,
-                                   long failures,
-                                   String firstFailure) {
+            long attempts,
+            long committed,
+            long conflicts,
+            long failures,
+            String firstFailure) {
+
         /**
-         * 将基准测试结果格式化为一行文本。
+         * Format benchmark results as a single line.
+         *
+         * @param config config
+         * @return the operation result
          */
-        private String toLine(Config config) {
+        private String toLine(final Config config) {
             double attemptTps = attempts / elapsedSeconds;
             double commitTps = committed / elapsedSeconds;
             double conflictTps = conflicts / elapsedSeconds;
@@ -388,13 +481,5 @@ public final class MysqlTxnBenchmark {
                     + " commit_tps=" + String.format("%.2f", commitTps)
                     + " conflict_tps=" + String.format("%.2f", conflictTps);
         }
-    }
-
-    /**
-     * 读取字符串环境变量配置。
-     */
-    private static String env(String key, String defaultValue) {
-        String value = System.getenv(key);
-        return value == null || value.isBlank() ? defaultValue : value;
     }
 }

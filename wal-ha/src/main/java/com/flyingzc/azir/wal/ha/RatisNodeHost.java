@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Azir TX contributors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.flyingzc.azir.wal.ha;
 
 import com.zaxxer.hikari.HikariDataSource;
@@ -9,44 +25,46 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 
-/** 独立进程的资源所有者，不能在仍有节点使用控制池时提前关闭底层连接。 */
+/**
+ * Owns configured node resources and releases connection pools only after node cleanup completes.
+ */
 final class RatisNodeHost implements AutoCloseable {
+
     private final RatisNodeConfiguration config;
+
     private final List<HikariDataSource> pools = new ArrayList<>();
+
     private volatile RatisManagedNode node;
+
     private RatisStartupException pendingStartup;
+
     private RatisNodeApplication application;
+
     private RatisNodeHealthServer health;
+
     private volatile boolean started, closing, failed;
+
     private boolean attempted, uncertainStartup;
 
-    /** 可公开的固定字段均为布尔或数值，不序列化内核异常消息和业务数据。 */
-    record Status(boolean live, boolean ready, boolean writableHint, boolean closing, boolean failed,
-                  long sampleAgeMillis, long publishedSequence, long materializationLag, long walBytes,
-                  long hotCacheBytes, long safePoint, long retainedBytes, long bufferedBytes, long raftLogBytes,
-                  long receiptArchiveBytes, long oldestActiveMillis, long certificateExpiresAtEpochMillis,
-                  int activeTransactions, int queuedCommits, boolean maintenanceFailed,
-                  boolean materializationFailed, boolean snapshotBackpressure) {
-        /** 固定 JSON 字段不需要引入通用序列化器，也不会调用外部对象的 toString。 */
-        String json() {
-            return "{\"live\":" + live + ",\"ready\":" + ready + ",\"writableHint\":" + writableHint
-                    + ",\"closing\":" + closing + ",\"failed\":" + failed + ",\"sampleAgeMillis\":" + sampleAgeMillis
-                    + ",\"publishedSequence\":" + publishedSequence + ",\"materializationLag\":" + materializationLag
-                    + ",\"walBytes\":" + walBytes + ",\"hotCacheBytes\":" + hotCacheBytes + ",\"activeTransactions\":" + activeTransactions
-                    + ",\"safePoint\":" + safePoint + ",\"retainedBytes\":" + retainedBytes + ",\"bufferedBytes\":" + bufferedBytes
-                    + ",\"raftLogBytes\":" + raftLogBytes + ",\"receiptArchiveBytes\":" + receiptArchiveBytes
-                    + ",\"oldestActiveMillis\":" + oldestActiveMillis + ",\"certificateExpiresAtEpochMillis\":" + certificateExpiresAtEpochMillis
-                    + ",\"queuedCommits\":" + queuedCommits + ",\"maintenanceFailed\":" + maintenanceFailed
-                    + ",\"materializationFailed\":" + materializationFailed + ",\"snapshotBackpressure\":" + snapshotBackpressure + "}";
-        }
+    /**
+     * The construction process does not start a thread or connection, first lets the main install off hooks before starting.
+     *
+     * @param config config
+     */
+    RatisNodeHost(final RatisNodeConfiguration config) {
+        this.config = config;
     }
 
-    /** 构造过程不启动线程或连接，先让 main 安装关闭钩子再启动。 */
-    RatisNodeHost(RatisNodeConfiguration config) { this.config = config; }
-
-    /** 宿主不支持失败后原地重开，成员身份、持久策略和恢复仍交给现有托管入口。 */
+    /**
+     * The host does not support reopening after failure and members identity, durable policy and recovery remain at the existing hosting entrance.
+     *
+     * @throws Exception if the operation cannot complete
+     * @throws IllegalStateException if the operation cannot complete
+     */
     synchronized void start() throws Exception {
-        if (attempted || closing) { throw new IllegalStateException("node host cannot restart in the same process"); }
+        if (attempted || closing) {
+            throw new IllegalStateException("node host cannot restart in the same process");
+        }
         attempted = true;
         try {
             RatisNodeHealthServer.requireBudgets();
@@ -60,39 +78,53 @@ final class RatisNodeHost implements AutoCloseable {
             var routes = new LinkedHashMap<String, HikariDataSource>();
             config.routes.forEach((shard, store) -> routes.put(shard, byName.get(store)));
             var managedConfig = config.managed(routes);
-            // 底层构造器若没有返回句柄，外层无法证明所有内部资源都已清理。
-            // 此时保留控制池直到所属进程退出，禁止在同一 JVM 重开目录。
+            // The outer layer cannot prove that all the internal resources have been cleared without the return handle of the submersible.
+            // At this point, the control pool is maintained until the process to which it belongs exits and the reopening of the directory in the same JVM is prohibited.
             uncertainStartup = true;
             try {
                 node = RatisManagedNode.open(managedConfig);
                 uncertainStartup = false;
-            } catch (RatisStartupException pending) {
+            } catch (final RatisStartupException pending) {
                 pendingStartup = pending;
                 uncertainStartup = false;
                 throw pending;
             }
-            // 探针先占用端口，业务启动失败后仍可表达不可用；业务未启动完不就绪。
+            // Probe First-instance port, which is not available after the start of business has failed; operations are not fully operational.
             health = new RatisNodeHealthServer(config, this);
             if (constructor != null) {
                 application = constructor.newInstance();
                 application.start(node);
             }
             started = true;
-        } catch (Exception | Error failure) {
+        } catch (final Exception | Error failure) {
             failed = true;
             throw failure;
         }
     }
 
-    /** 在接触数据库前验证插件类型和公开无参构造器，不自动扫描类路径。 */
+    /**
+     * Verify plugin type and open unincorporated builder before exposure to database, does not automatically scan class paths.
+     *
+     * @return the operation result
+     * @throws IllegalArgumentException if the operation cannot complete
+     * @throws ReflectiveOperationException if the operation cannot complete
+     */
     private Constructor<? extends RatisNodeApplication> applicationConstructor() throws ReflectiveOperationException {
-        if (config.applicationClass.isEmpty()) { return null; }
+        if (config.applicationClass.isEmpty()) {
+            return null;
+        }
         var type = Class.forName(config.applicationClass, false, RatisNodeHost.class.getClassLoader()).asSubclass(RatisNodeApplication.class);
-        if (!Modifier.isPublic(type.getModifiers()) || Modifier.isAbstract(type.getModifiers())) { throw new IllegalArgumentException("application must be a public concrete class"); }
+        if (!Modifier.isPublic(type.getModifiers()) || Modifier.isAbstract(type.getModifiers())) {
+            throw new IllegalArgumentException("application must be a public concrete class");
+        }
         return type.getConstructor();
     }
 
-    /** 仅读缓存，存储或维护错误与过期样本不能继续宣称业务已就绪。 */
+    /**
+     * Cache-reading, storage or maintenance errors and expired samples cannot continue to claim that the business is ready.
+     *
+     * @return the operation result
+     */
     Status status() {
         var current = node;
         var status = current == null ? null : current.status();
@@ -116,17 +148,88 @@ final class RatisNodeHost implements AutoCloseable {
                 storage == null ? 0 : storage.queuedCommits(), maintenanceFailed, materializationFailed, backpressure);
     }
 
-    /** 业务先停接单并排空；任何步骤失败都保留未清理句柄，不能假装资源已释放。 */
-    @Override public synchronized void close() throws Exception {
+    /**
+     * Operations were stopped and empty; any failure of steps retained the uncleaned handle and could not pretend that resources had been released.
+     *
+     * @throws Exception if the operation cannot complete
+     * @throws IOException if the operation cannot complete
+     */
+    @Override
+    public synchronized void close() throws Exception {
         closing = true;
-        if (application != null) { application.close(); application = null; }
-        if (node != null) { node.close(); node = null; }
-        if (pendingStartup != null) { pendingStartup.retryCleanup(); pendingStartup = null; }
-        if (uncertainStartup) { throw new IOException("startup cleanup cannot be proven; terminate the owning process before restart"); }
+        if (application != null) {
+            application.close();
+            application = null;
+        }
+        if (node != null) {
+            node.close();
+            node = null;
+        }
+        if (pendingStartup != null) {
+            pendingStartup.retryCleanup();
+            pendingStartup = null;
+        }
+        if (uncertainStartup) {
+            throw new IOException("startup cleanup cannot be proven; terminate the owning process before restart");
+        }
         for (var iterator = pools.iterator(); iterator.hasNext();) {
             iterator.next().close();
             iterator.remove();
         }
-        if (health != null) { health.close(); health = null; }
+        if (health != null) {
+            health.close();
+            health = null;
+        }
+    }
+
+    /**
+     * The publicly releasable fixed field is a boolean or a numeric, unsequenced nuclear abnormality message and business data.
+     *
+     * @param live live
+     * @param ready ready
+     * @param writableHint writable hint
+     * @param closing closing
+     * @param failed failed
+     * @param sampleAgeMillis sample age millis
+     * @param publishedSequence published sequence
+     * @param materializationLag materialization lag
+     * @param walBytes wal bytes
+     * @param hotCacheBytes hot cache bytes
+     * @param safePoint oldest retained snapshot timestamp
+     * @param retainedBytes retained bytes
+     * @param bufferedBytes buffered bytes
+     * @param raftLogBytes raft log bytes
+     * @param receiptArchiveBytes receipt archive bytes
+     * @param oldestActiveMillis oldest active millis
+     * @param certificateExpiresAtEpochMillis certificate expires at epoch millis
+     * @param activeTransactions active transactions
+     * @param queuedCommits queued commits
+     * @param maintenanceFailed maintenance failed
+     * @param materializationFailed materialization failed
+     * @param snapshotBackpressure snapshot backpressure
+     */
+    record Status(boolean live, boolean ready, boolean writableHint, boolean closing, boolean failed,
+            long sampleAgeMillis, long publishedSequence, long materializationLag, long walBytes,
+            long hotCacheBytes, long safePoint, long retainedBytes, long bufferedBytes, long raftLogBytes,
+            long receiptArchiveBytes, long oldestActiveMillis, long certificateExpiresAtEpochMillis,
+            int activeTransactions, int queuedCommits, boolean maintenanceFailed,
+            boolean materializationFailed, boolean snapshotBackpressure) {
+
+        /**
+         * Fixed JSON fields do not need to introduce a General Serializer, nor will they call external objects toString.
+         *
+         * @return the operation result
+         */
+        String json() {
+            return "{\"live\":" + live + ",\"ready\":" + ready + ",\"writableHint\":" + writableHint
+                    + ",\"closing\":" + closing + ",\"failed\":" + failed + ",\"sampleAgeMillis\":" + sampleAgeMillis
+                    + ",\"publishedSequence\":" + publishedSequence + ",\"materializationLag\":" + materializationLag
+                    + ",\"walBytes\":" + walBytes + ",\"hotCacheBytes\":" + hotCacheBytes + ",\"activeTransactions\":" + activeTransactions
+                    + ",\"safePoint\":" + safePoint + ",\"retainedBytes\":" + retainedBytes + ",\"bufferedBytes\":" + bufferedBytes
+                    + ",\"raftLogBytes\":" + raftLogBytes + ",\"receiptArchiveBytes\":" + receiptArchiveBytes
+                    + ",\"oldestActiveMillis\":" + oldestActiveMillis + ",\"certificateExpiresAtEpochMillis\":" + certificateExpiresAtEpochMillis
+                    + ",\"queuedCommits\":" + queuedCommits + ",\"maintenanceFailed\":" + maintenanceFailed
+                    + ",\"materializationFailed\":" + materializationFailed + ",\"snapshotBackpressure\":" + snapshotBackpressure + "}";
+        }
     }
 }
