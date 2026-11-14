@@ -1,5 +1,19 @@
-# 仅为部署模板。先替换真实地址、组 UUID、证书指纹和路径，再保存为私有 node.properties。
-# peer 指纹必须是已授权叶证书 SHA-256 的 64 位小写十六进制，禁止首次连接自动信任。
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Deployment template: replace addresses, group UUID, fingerprints and paths, then save a private node.properties.
+# Peer fingerprints must be 64 lowercase SHA-256 hex digits for authorized leaf certificates; never trust on first use.
 format.version=1
 node.id=node-a
 node.directory=/var/lib/azir-wal/node-a
@@ -17,7 +31,7 @@ tls.identity-password-env=AZIR_WAL_IDENTITY_PASSWORD
 tls.truststore=/etc/azir-wal/raft-ca.p12
 tls.trust-password-env=AZIR_WAL_RAFT_TRUST_PASSWORD
 
-# 每个副本必须使用自己的 MySQL 存储；此处两个逻辑分片共用该副本一个控制池。
+# Each replica needs its own MySQL storage; these two logical shards share one control pool within this replica.
 stores=local
 store.local.jdbc-url=jdbc:mysql://mysql-a.example.invalid:3306/azir_wal_control
 store.local.username-env=AZIR_WAL_MYSQL_USERNAME
@@ -50,7 +64,7 @@ backup.batch-keys=256
 backup.batch-bytes=16777216
 backup.timeout-ms=300000
 
-# 已持久化的维护策略必须保持一致；不要通过修改默认值绕过策略校验。
+# Persisted maintenance policies must match; changing defaults must not bypass policy validation.
 maintenance.health.interval-ms=1000
 maintenance.health.failures=3
 maintenance.health.recoveries=3
@@ -79,5 +93,5 @@ transport.idle-ms=60000
 transport.connection-age-ms=900000
 health.address=127.0.0.1
 health.port=18080
-# 可选：显式填写实现 RatisNodeApplication 的可信公开类名；缺少此键仅启动副本及监控。
+# Optionally name a trusted public RatisNodeApplication implementation; otherwise start replication and monitoring only.
 # application.class=com.example.AzirBusinessApplication

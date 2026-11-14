@@ -1,17 +1,31 @@
 #!/usr/bin/env bash
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-: "${JAVA_HOME:=/Users/zc/0zc/01-my/01-soft/jdk-21.0.10+7/Contents/Home}"
 : "${AZIR_TX_BENCH_DURATION_SECONDS:=5}"
 : "${AZIR_TX_JDBC_MAX_POOL_SIZE:=256}"
 : "${AZIR_TX_JDBC_CONNECTION_TIMEOUT_MS:=10000}"
 : "${AZIR_TX_BENCH_CONCURRENCY_LIST:=50 100 200}"
 : "${AZIR_TX_WAIT_SECONDS:=120}"
 
-export JAVA_HOME
-export PATH="$JAVA_HOME/bin:$PATH"
+if [[ -n "${JAVA_HOME:-}" ]]; then
+  export PATH="$JAVA_HOME/bin:$PATH"
+fi
 export AZIR_TX_BENCH_DURATION_SECONDS
 export AZIR_TX_JDBC_MAX_POOL_SIZE
 export AZIR_TX_JDBC_CONNECTION_TIMEOUT_MS
@@ -32,21 +46,21 @@ while true; do
   sleep 2
 done
 
-mvn -q -DskipTests compile
+./mvnw -q -DskipTests compile
 
 for concurrency in ${AZIR_TX_BENCH_CONCURRENCY_LIST}; do
   direct_line="$(
     AZIR_TX_RESET=true \
     AZIR_TX_BENCH_CONCURRENCY="$concurrency" \
     AZIR_TX_BENCH_CONFLICT=false \
-    mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlDirectTwoShardTxnBenchmark \
+    ./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlDirectTwoShardTxnBenchmark \
       | grep 'DIRECT_TWO_SHARD_BENCH'
   )"
   mvcc_line="$(
     AZIR_TX_RESET=true \
     AZIR_TX_BENCH_CONCURRENCY="$concurrency" \
     AZIR_TX_BENCH_CONFLICT=false \
-    mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlTxnBenchmark \
+    ./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.MysqlTxnBenchmark \
       | grep '^BENCH '
   )"
   direct_tps="$(printf '%s\n' "$direct_line" | sed -n 's/.*commit_tps=\([0-9.]*\).*/\1/p')"

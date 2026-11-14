@@ -1,4 +1,22 @@
+# Local development files and generated build output.
 .DS_Store
-target/
 .idea/
 .worktrees/
+.codex/
+target/
+*.log
+*.class
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.jks
+doc/
+docs/
+third-party/
+transaction-backends/
+transaction-backends-reactor/

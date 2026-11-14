@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2026 Azir TX contributors.
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>io.github.flyingzc</groupId>
+    <artifactId>azir-build</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>Azir TX Build</name>
+    <description>Shared Java 21 build and code style for Azir TX.</description>
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <project.build.outputTimestamp>2026-11-15T08:00:00Z</project.build.outputTimestamp>
+        <junit.version>5.12.2</junit.version>
+        <testcontainers.version>2.0.3</testcontainers.version>
+        <calcite.version>1.40.0</calcite.version>
+        <commons-lang3.version>3.18.0</commons-lang3.version>
+        <commons-io.version>2.20.0</commons-io.version>
+        <ratis.version>3.3.1</ratis.version>
+    </properties>
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-resources-plugin</artifactId>
+                    <version>3.3.1</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>3.4.2</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-clean-plugin</artifactId>
+                    <version>3.4.0</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.0</version>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+                <configuration>
+                    <useModulePath>false</useModulePath>
+                    <argLine>-XX:ActiveProcessorCount=4</argLine>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+            </plugin>
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>2.46.1</version>
+                <configuration>
+                    <java>
+                        <eclipse>
+                            <version>4.33</version>
+                            <file>${maven.multiModuleProjectDirectory}/build/eclipse-java.xml</file>
+                        </eclipse>
+                        <removeUnusedImports />
+                        <licenseHeader>
+                            <file>${maven.multiModuleProjectDirectory}/build/license-header.txt</file>
+                        </licenseHeader>
+                        <replaceRegex>
+                            <name>Formatting JavaDoc extra spaces</name>
+                            <searchRegex>\*\s+(\r?\n)\s{5}\*</searchRegex>
+                            <replacement>*$1     *</replacement>
+                        </replaceRegex>
+                        <trimTrailingWhitespace />
+                    </java>
+                    <pom>
+                        <sortPom>
+                            <encoding>UTF-8</encoding>
+                            <nrOfIndentSpace>4</nrOfIndentSpace>
+                            <keepBlankLines>true</keepBlankLines>
+                            <indentBlankLines>true</indentBlankLines>
+                            <indentSchemaLocation>false</indentSchemaLocation>
+                            <spaceBeforeCloseEmptyElement>true</spaceBeforeCloseEmptyElement>
+                            <sortModules>false</sortModules>
+                            <sortExecutions>false</sortExecutions>
+                            <predefinedSortOrder>custom_1</predefinedSortOrder>
+                            <expandEmptyElements>false</expandEmptyElements>
+                            <sortProperties>false</sortProperties>
+                        </sortPom>
+                        <trimTrailingWhitespace />
+                    </pom>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>check-format</id>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <phase>validate</phase>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <version>3.6.0</version>
+                <configuration>
+                    <configLocation>${maven.multiModuleProjectDirectory}/build/checkstyle.xml</configLocation>
+                    <propertyExpansion>azir.checkstyle.suppressions=${maven.multiModuleProjectDirectory}/build/checkstyle-suppressions.xml
+azir.license.header=${maven.multiModuleProjectDirectory}/build/license-header.txt</propertyExpansion>
+                    <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                    <consoleOutput>true</consoleOutput>
+                    <failOnViolation>true</failOnViolation>
+                    <failsOnError>true</failsOnError>
+                    <violationSeverity>error</violationSeverity>
+                </configuration>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.puppycrawl.tools</groupId>
+                        <artifactId>checkstyle</artifactId>
+                        <version>12.3.0</version>
+                    </dependency>
+                </dependencies>
+                <executions>
+                    <execution>
+                        <id>check-style</id>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <phase>validate</phase>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.rat</groupId>
+                <artifactId>apache-rat-plugin</artifactId>
+                <version>0.16.1</version>
+                <configuration>
+                    <excludes>
+                        <exclude>**/target/**</exclude>
+                        <exclude>.git/**</exclude>
+                        <exclude>README.md</exclude>
+                        <exclude>NOTICE</exclude>
+                        <exclude>LICENSE</exclude>
+                        <exclude>.gitignore</exclude>
+                    </excludes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>check-licenses</id>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <phase>verify</phase>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+    <url>https://github.com/FlyingZC/azir-tx</url>
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <scm>
+        <connection>scm:git:https://github.com/FlyingZC/azir-tx.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/FlyingZC/azir-tx.git</developerConnection>
+        <url>https://github.com/FlyingZC/azir-tx</url>
+    </scm>
+</project>

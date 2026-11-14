@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -44,17 +58,17 @@ done
 export AZIR_TX_RESET=true
 export AZIR_TX_TSO_MODE=DIRECT
 export AZIR_TX_TSO_BATCH_SIZE=1
-mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
+./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_TSO_MODE=LEGACY_BATCH
 export AZIR_TX_TSO_BATCH_SIZE=256
-mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
+./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_TSO_MODE=SEGMENT
 export AZIR_TX_TSO_BATCH_SIZE=256
-mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
+./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.TimestampOracleBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_BUFFERED_MODE=false
@@ -62,7 +76,7 @@ export AZIR_TX_PARALLEL_PREWRITE=false
 export AZIR_TX_PARALLEL_PREPARE=false
 export AZIR_TX_PARALLEL_COMMIT=false
 export AZIR_TX_PARALLEL_ROLLBACK=false
-mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.CrossShardWritePathPrototypeBenchmark
+./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.CrossShardWritePathPrototypeBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_BUFFERED_MODE=true
@@ -70,14 +84,14 @@ export AZIR_TX_PARALLEL_PREWRITE=true
 export AZIR_TX_PARALLEL_PREPARE=true
 export AZIR_TX_PARALLEL_COMMIT=true
 export AZIR_TX_PARALLEL_ROLLBACK=true
-mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.CrossShardWritePathPrototypeBenchmark
+./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.CrossShardWritePathPrototypeBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_ASYNC_COMMIT=false
 export AZIR_TX_SECONDARY_FINALIZE_WORKERS=8
-mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.AsyncCommitPrototypeBenchmark
+./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.AsyncCommitPrototypeBenchmark
 
 export AZIR_TX_RESET=true
 export AZIR_TX_ASYNC_COMMIT=true
 export AZIR_TX_SECONDARY_FINALIZE_WORKERS=8
-mvn -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.AsyncCommitPrototypeBenchmark
+./mvnw -q -DskipTests exec:java -Dexec.mainClass=com.flyingzc.azir.e2e.AsyncCommitPrototypeBenchmark

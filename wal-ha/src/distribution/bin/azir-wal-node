@@ -1,5 +1,19 @@
 #!/bin/sh
-# 独立前台进程入口：不拼接 JAVA_OPTS，不解释配置，不后台派生或自动杀进程。
+# Copyright 2026 Azir TX contributors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Run one foreground process without evaluating JAVA_OPTS or configuration, forking a daemon, or killing other processes.
 set -eu
 umask 077
 script_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)
@@ -13,7 +27,7 @@ case "$heap" in
     256m|512m|1g|2g|4g|8g) ;;
     *) echo 'AZIR_WAL_HEAP must be one of: 256m 512m 1g 2g 4g 8g' >&2; exit 2 ;;
 esac
-# HTTP 上限必须在 JDK 服务器初始化前设置；监听地址只能由严格配置指定为回环。
+# Set HTTP limits before JDK server initialization; validated configuration restricts the listener to loopback.
 exec "$java_bin" "-Xmx$heap" -XX:MaxDirectMemorySize=128m -XX:+ExitOnOutOfMemoryError \
     --add-modules jdk.httpserver \
     -Djdk.httpserver.maxConnections=32 \
