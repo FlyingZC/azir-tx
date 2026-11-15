@@ -16,6 +16,10 @@
   ~ limitations under the License.
   -->
 
+<!-- Adapted by Azir TX contributors from Apache ShardingSphere 5.5.3
+     (commit 8d35894433416ef249ebb6ea21f8a8749648e9b6).
+     Uses Java 21 and explicit declaration spacing for the existing codebase. -->
+
 <profiles version="13">
     <profile kind="CodeFormatterProfile" name="'ShardingSphere Apache Current'" version="13">
         <setting id="org.eclipse.jdt.core.compiler.source" value="21" />

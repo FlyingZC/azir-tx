@@ -195,20 +195,22 @@ class TransactionManagerNoOpHotPathTest {
      * @throws AssertionError if the operation cannot complete
      */
     private static String extractMethodSource(final String source, final String signature) {
-        int signatureIndex = source.indexOf(signature);
+        // Declaration modifiers and formatter line wrapping do not affect the allocation guard.
+        String normalizedSource = source.replaceAll("\\bfinal\\s+", "").replaceAll("\\s+", " ");
+        int signatureIndex = normalizedSource.indexOf(signature);
         assertTrue(signatureIndex >= 0, signature + " should exist");
-        int bodyStart = source.indexOf('{', signatureIndex);
+        int bodyStart = normalizedSource.indexOf('{', signatureIndex);
         assertTrue(bodyStart >= 0, signature + " should have method body");
 
         int depth = 0;
-        for (int index = bodyStart; index < source.length(); index++) {
-            char current = source.charAt(index);
+        for (int index = bodyStart; index < normalizedSource.length(); index++) {
+            char current = normalizedSource.charAt(index);
             if (current == '{') {
                 depth++;
             } else if (current == '}') {
                 depth--;
                 if (depth == 0) {
-                    return source.substring(signatureIndex, index + 1);
+                    return normalizedSource.substring(signatureIndex, index + 1);
                 }
             }
         }
