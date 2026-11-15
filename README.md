@@ -22,6 +22,7 @@ downloads Maven 3.9.9. MySQL tests use Testcontainers and isolated databases.
 
 ```sh
 ./mvnw clean verify
+docker pull eclipse-temurin:21-jdk
 ./mvnw -f wal-ha-reactor/pom.xml clean verify
 ```
 

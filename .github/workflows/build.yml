@@ -29,6 +29,8 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
+      - name: Prepare JVM image for process fault tests
+        run: docker pull eclipse-temurin:21-jdk
       - name: Verify core and WAL HA
         run: ./mvnw -B -f wal-ha-reactor/pom.xml clean verify
       - name: Package WAL nodes
