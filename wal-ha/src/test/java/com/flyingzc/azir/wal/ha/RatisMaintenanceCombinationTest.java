@@ -333,8 +333,13 @@ class RatisMaintenanceCombinationTest {
          * @throws Exception if the operation cannot complete
          */
         private String allocateNetwork(final String tag) throws Exception {
-            String reservation = docker.createNetworkCmd().withName("azir-pool-" + group + "-" + tag).withDriver("bridge").withInternal(true).withLabels(Map.of("azir.network.test", group.toString()))
-                    .exec().getId();
+            var allocator = docker.createNetworkCmd().withName("azir-pool-" + group + "-" + tag).withDriver("bridge").withInternal(true).withLabels(Map.of("azir.network.test", group.toString()));
+            String requestedSubnet = System.getProperty("azir.wal.ha.combinationSubnet." + tag);
+            if (requestedSubnet != null && !requestedSubnet.isBlank()) {
+                // An explicit unused subnet avoids exhausting the shared daemon's default pools.
+                allocator.withIpam(new Network.Ipam().withConfig(new Network.Ipam.Config().withSubnet(requestedSubnet)));
+            }
+            String reservation = allocator.exec().getId();
             history(-1, "POOL_CREATED", reservation);
             String subnet;
             try {

@@ -28,6 +28,11 @@ downloads Maven 3.9.9. MySQL tests use Testcontainers and isolated databases.
 The second command builds the core and WAL HA modules together. Tests include
 process and container fault scenarios and may take several minutes.
 
+On shared Docker hosts with exhausted default address pools, combination fault
+tests accept `-Dazir.wal.ha.combinationSubnet.raft=<unused-/24-CIDR>` and
+`-Dazir.wal.ha.combinationSubnet.backend=<another-unused-/24-CIDR>`. Choose
+subnets unused by Docker and host routes; default allocation is unchanged.
+
 ## Run the MySQL example
 
 The Compose service is a local development MySQL instance on port 23306 with
